@@ -9,6 +9,8 @@ import (
 	"net"
 	"strconv"
 	"time"
+
+	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
 // nowSeconds is the epoch clock the client syncs against (user/time, and the
@@ -24,8 +26,8 @@ func currentToken() int { return int(time.Now().UnixMilli()/57600000) & 0xFFFF }
 // The real signature is scrambleToken(token, sign) over a server secret we do
 // not have; a mismatch only makes the client drop its cached $SID and log in
 // again, which we accept.
-func makeSID(uid, name string) string {
-	sum := md5.Sum([]byte("wartales-mp" + uid + strconv.Itoa(currentToken()) + name))
+func makeSID(userID, name string) string {
+	sum := md5.Sum([]byte("wartales-mp" + userID + strconv.Itoa(currentToken()) + name))
 	sign := base64.RawStdEncoding.EncodeToString(sum[:])
 	return fmt.Sprintf("X%04x%s", currentToken(), sign)
 }
@@ -38,6 +40,9 @@ type loginArgs struct {
 }
 
 // adopt records who the local game says it is; the lobby code needs it.
+//
+// The game reports its Steam id here ("S<steamid>"), which we never put back on
+// the wire: see internal/uid. Everything the master emits uses the minted id.
 func adopt(p Peer, a loginArgs) {
 	sess, ok := p.(*session)
 	if !ok {
@@ -46,10 +51,10 @@ func adopt(p Peer, a loginArgs) {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	if a.UID != "" {
-		sess.uid = a.UID
+		sess.uid = uid.Mint(a.UID)
 	}
 	if sess.uid == "" {
-		sess.uid = fmt.Sprintf("I%d", rand.Int31())
+		sess.uid = uid.Mint(fmt.Sprintf("anonymous-%d", rand.Int63()))
 	}
 	if a.Name != "" {
 		sess.name = a.Name

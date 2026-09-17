@@ -14,6 +14,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
 // CallTimeout is shorter than the game's own 20s command timeout so that a
@@ -81,9 +83,9 @@ func (p *Peer) Push(cmd string, args any) {
 	}
 	p.mu.Lock()
 	p.pushUID++
-	uid := p.pushUID
+	n := p.pushUID
 	p.mu.Unlock()
-	_ = p.out.send(Envelope{UID: uid, Cmd: cmd, Args: raw})
+	_ = p.out.send(Envelope{UID: n, Cmd: cmd, Args: raw})
 }
 
 // Serve runs one guest connection on the host side until it closes.
@@ -100,6 +102,10 @@ func Serve(c net.Conn, h Handler, onClose func(*Peer)) {
 	if err := json.Unmarshal(first.Args, &u); err != nil {
 		return
 	}
+	// The guest announces itself, so its id is not trusted as given: a Steam
+	// shaped id would travel into every LobbyInfo we serve and make the whole
+	// lobby take the client's Steam only path (see internal/uid).
+	u.ID = uid.Ensure(u.ID)
 	peer := &Peer{user: u, out: out}
 	if onClose != nil {
 		defer onClose(peer)
@@ -194,11 +200,11 @@ func (c *Client) Call(cmd string, args json.RawMessage) (json.RawMessage, error)
 		return nil, errors.New("link: connection closed")
 	}
 	c.uid++
-	uid := c.uid
-	c.pending[uid] = ch
+	n := c.uid
+	c.pending[n] = ch
 	c.mu.Unlock()
 
-	if err := c.out.send(Envelope{UID: uid, Cmd: cmd, Args: args}); err != nil {
+	if err := c.out.send(Envelope{UID: n, Cmd: cmd, Args: args}); err != nil {
 		return nil, err
 	}
 	select {
@@ -216,7 +222,7 @@ func (c *Client) Call(cmd string, args json.RawMessage) (json.RawMessage, error)
 		return e.Args, nil
 	case <-time.After(CallTimeout):
 		c.mu.Lock()
-		delete(c.pending, uid)
+		delete(c.pending, n)
 		c.mu.Unlock()
 		return nil, errors.New("link: timeout")
 	}
@@ -236,9 +242,9 @@ func (c *Client) shutdown() {
 		return
 	}
 	c.closed = true
-	for uid, ch := range c.pending {
+	for n, ch := range c.pending {
 		close(ch)
-		delete(c.pending, uid)
+		delete(c.pending, n)
 	}
 }
 

@@ -325,9 +325,25 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	if l.owner != p.UserID() {
 		return wireErrf("Cannot transfer if not owner")
 	}
+	// The new owner comes from the client, so it is only ever accepted when it
+	// names a member of this lobby: member ids are minted by us (internal/uid)
+	// and echoing back an arbitrary, possibly Steam shaped id would put one
+	// into every LobbyInfo we serve.
 	s.lobbies.mu.Lock()
-	l.owner = a.UID
+	known := false
+	for _, u := range l.users {
+		if u.ID == a.UID {
+			known = true
+			break
+		}
+	}
+	if known {
+		l.owner = a.UID
+	}
 	s.lobbies.mu.Unlock()
+	if !known {
+		return wireErrf("Unknown user %s", a.UID)
+	}
 	l.broadcast(p, "lobby/transfer", map[string]any{"id": l.id, "uid": a.UID})
 	return nil
 }

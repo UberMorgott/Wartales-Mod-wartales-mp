@@ -6,12 +6,8 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"regexp"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/UberMorgott/wartales-mp/internal/code"
@@ -25,18 +21,35 @@ func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	port := fs.Int("port", 14250, "public TCP port for the relay and the proxy-link")
 	masterAddr := fs.String("master", "127.0.0.1:60442", "master listen address")
-	gamePath := fs.String("game", "", "path to Wartales.exe")
-	noGame := fs.Bool("no-game", false, "do not launch the game")
+	noWatch := fs.Bool("no-watch", false, "keep serving after the game exits")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
+	// The shims start us from inside the game, so the certificates have to be
+	// in place without anyone running a setup step first.
 	dir := install.DataDir()
+	if err := install.EnsureCerts(dir); err != nil {
+		return fmt.Errorf("certificates: %w", err)
+	}
 	tlsCfg, err := install.TLSConfig(dir)
 	if err != nil {
 		return err
+	}
+
+	// Attach to the game before opening any port: if it is already gone there
+	// is nothing to serve.
+	// A nil channel blocks forever, which is exactly what -no-watch means.
+	var done <-chan struct{}
+	if !*noWatch {
+		pid, exited, err := watchGame()
+		if err != nil {
+			return err
+		}
+		logger.Printf("attached to %s, pid %d", gameExe, pid)
+		done = exited
 	}
 
 	rl := relay.New(logger)
@@ -67,25 +80,6 @@ func runCmd(args []string) error {
 		}
 	}()
 
-	done := make(chan error, 1)
-	if !*noGame {
-		exe := *gamePath
-		if exe == "" {
-			exe = findGame()
-		}
-		if exe == "" {
-			return fmt.Errorf("could not find Wartales.exe, pass -game PATH")
-		}
-		logger.Printf("launching %s", exe)
-		cmd := exec.Command(exe)
-		cmd.Dir = filepath.Dir(exe)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Start(); err != nil {
-			return err
-		}
-		go func() { done <- cmd.Wait() }()
-	}
-
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
@@ -99,49 +93,6 @@ func runCmd(args []string) error {
 		logger.Printf("interrupted, shutting down")
 		return nil
 	}
-}
-
-// findGame looks in the usual Steam library locations.
-func findGame() string {
-	const rel = `steamapps\common\Wartales\Wartales.exe`
-	roots := []string{
-		`D:\Steam`,
-		os.Getenv("ProgramFiles(x86)") + `\Steam`,
-		os.Getenv("ProgramFiles") + `\Steam`,
-		os.Getenv("SystemDrive") + `\Steam`,
-	}
-	candidates := append([]string{}, roots...)
-	for _, r := range roots {
-		candidates = append(candidates, libraryFolders(r)...)
-	}
-	for _, r := range candidates {
-		if r == "" {
-			continue
-		}
-		p := filepath.Join(r, rel)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
-
-var vdfPath = regexp.MustCompile(`"path"\s+"([^"]+)"`)
-
-// libraryFolders reads the extra Steam libraries listed in libraryfolders.vdf.
-func libraryFolders(steamRoot string) []string {
-	if steamRoot == "" {
-		return nil
-	}
-	raw, err := os.ReadFile(filepath.Join(steamRoot, "steamapps", "libraryfolders.vdf"))
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, m := range vdfPath.FindAllStringSubmatch(string(raw), -1) {
-		out = append(out, strings.ReplaceAll(m[1], `\\`, `\`))
-	}
-	return out
 }
 
 func installCmd() error   { return install.Install(os.Stdout) }

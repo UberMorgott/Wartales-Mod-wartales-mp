@@ -3,11 +3,9 @@ package install
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -111,18 +109,10 @@ func TLSConfig(dir string) (*tls.Config, error) {
 	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
 }
 
-// CACertPath returns the path of the generated CA certificate.
+// CACertPath returns the path of the generated CA certificate. The ssl.hdll
+// shim reads exactly this file (%ProgramData%\wartales-mp\ca.crt) and appends
+// it to the game's trust chain, so the two must stay in step.
 func CACertPath(dir string) string { return filepath.Join(dir, caCertFile) }
-
-// CAThumbprint returns the SHA-1 thumbprint certutil identifies the CA by.
-func CAThumbprint(dir string) (string, error) {
-	der, err := readCertDER(filepath.Join(dir, caCertFile))
-	if err != nil {
-		return "", err
-	}
-	sum := sha1.Sum(der)
-	return hex.EncodeToString(sum[:]), nil
-}
 
 func serial() *big.Int {
 	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))

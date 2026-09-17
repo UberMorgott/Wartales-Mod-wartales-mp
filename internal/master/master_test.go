@@ -10,11 +10,13 @@ import (
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/UberMorgott/wartales-mp/internal/install"
+	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
 // wsClient is the minimum of a masked RFC6455 client needed to drive the
@@ -222,6 +224,105 @@ func TestLoginAndInstanceGet(t *testing.T) {
 	}
 }
 
+// TestEmittedUIDsAreNotSteamShaped guards the trap behind
+// Lobby.isSteamOnly@24596: it returns true when EVERY member id of a lobby
+// starts with 'S', and Lobby.setupPlatform@24597 then never sends instance/get,
+// so the game falls back to Steam P2P and our relay is bypassed. Nothing the
+// master emits may therefore carry a Steam shaped id, whatever the clients
+// report about themselves.
+func TestEmittedUIDsAreNotSteamShaped(t *testing.T) {
+	addr := startMaster(t)
+
+	// every id the server put on the wire during this test
+	var emitted []string
+	check := func(what, id string) {
+		t.Helper()
+		if id == "" {
+			t.Fatalf("%s: empty id", what)
+		}
+		if id[0] != 'X' {
+			t.Fatalf("%s = %q, want a Session ('X') id", what, id)
+		}
+		emitted = append(emitted, id)
+	}
+
+	host := dialMaster(t, addr)
+	defer func() { _ = host.c.Close() }()
+	var login struct {
+		SID string `json:"sid"`
+	}
+	raw := host.call(t, "user/login", map[string]any{
+		"name": "Host", "uid": "S0011223344556677", "version": 2,
+	})
+	if err := json.Unmarshal(raw, &login); err != nil {
+		t.Fatal(err)
+	}
+	check("user/login sid", login.SID)
+
+	var id string
+	raw = host.call(t, "lobby/create", map[string]any{
+		"props": map[string]any{"data": map[string]any{}, "isPrivate": false, "maxPlayers": 4},
+	})
+	if err := json.Unmarshal(raw, &id); err != nil {
+		t.Fatal(err)
+	}
+
+	guest := dialMaster(t, addr)
+	defer func() { _ = guest.c.Close() }()
+	guest.call(t, "user/session", map[string]any{
+		"name": "Guest", "uid": "S7766554433221100", "sid": login.SID, "version": 2,
+	})
+
+	var info struct {
+		Owner string `json:"owner"`
+		Users []struct {
+			ID string `json:"id"`
+		} `json:"users"`
+	}
+	raw = guest.call(t, "lobby/join", map[string]any{"id": id, "data": `{"ready":false}`})
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Users) != 2 {
+		t.Fatalf("lobby/join returned %d users, want 2: %s", len(info.Users), raw)
+	}
+	check("lobby/join owner", info.Owner)
+	for i, u := range info.Users {
+		check("lobby/join users["+strconv.Itoa(i)+"].id", u.ID)
+	}
+
+	raw = host.call(t, "lobby/info", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Users) != 2 {
+		t.Fatalf("lobby/info returned %d users, want 2: %s", len(info.Users), raw)
+	}
+	check("lobby/info owner", info.Owner)
+	for i, u := range info.Users {
+		check("lobby/info users["+strconv.Itoa(i)+"].id", u.ID)
+	}
+	if info.Users[0].ID == info.Users[1].ID {
+		t.Fatalf("both members share the id %q", info.Users[0].ID)
+	}
+
+	// what the client would compute: isSteamOnly is "every member is 'S'".
+	steamOnly := true
+	for _, u := range info.Users {
+		if !strings.HasPrefix(u.ID, "S") {
+			steamOnly = false
+		}
+	}
+	if steamOnly {
+		t.Fatal("isSteamOnly would be true: the game would bypass the relay")
+	}
+	for _, id := range emitted {
+		if strings.HasPrefix(id, "S") || !uid.IsSession(id) {
+			t.Fatalf("emitted id %q is not a Session id", id)
+		}
+	}
+}
+
 func TestLobbyLifecycle(t *testing.T) {
 	addr := startMaster(t)
 	w := dialMaster(t, addr)
@@ -257,7 +358,8 @@ func TestLobbyLifecycle(t *testing.T) {
 	if err := json.Unmarshal(raw, &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.ID != id || info.Owner != "S00" || len(info.Users) != 1 || info.Users[0].Name != "Host" {
+	// The owner is the id we minted for "S00", never the Steam id itself.
+	if info.ID != id || info.Owner != uid.Mint("S00") || len(info.Users) != 1 || info.Users[0].Name != "Host" {
 		t.Fatalf("lobby/info = %s", raw)
 	}
 
