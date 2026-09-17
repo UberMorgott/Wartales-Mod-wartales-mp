@@ -14,6 +14,15 @@ const DefaultSTUN = "stun.l.google.com:19302"
 
 const magicCookie = 0x2112A442
 
+// RFC 5389 attribute types and address family (RFC 5780 §7.2 keeps 0x8020 for
+// the pre-standard XOR-MAPPED-ADDRESS some servers still send).
+const (
+	attrMappedAddress          = 0x0001
+	attrXORMappedAddress       = 0x0020
+	attrXORMappedAddressLegacy = 0x8020
+	familyIPv4                 = 0x01
+)
+
 // STUNExternalIP asks a STUN server for our public address (RFC 5389 binding
 // request). It only tells us the IP; port mapping still needs UPnP or a manual
 // forward, since the game speaks TCP.
@@ -68,6 +77,9 @@ func parseSTUN(resp, txID []byte) (net.IP, error) {
 	}
 	body := resp[20 : 20+n]
 
+	// XOR-MAPPED-ADDRESS wins over MAPPED-ADDRESS whatever order they arrive
+	// in: some NATs rewrite the plain one on the way back.
+	var mapped net.IP
 	for len(body) >= 4 {
 		typ := binary.BigEndian.Uint16(body)
 		length := int(binary.BigEndian.Uint16(body[2:]))
@@ -76,20 +88,37 @@ func parseSTUN(resp, txID []byte) (net.IP, error) {
 		}
 		val := body[4 : 4+length]
 		switch typ {
-		case 0x0020, 0x0001: // XOR-MAPPED-ADDRESS, MAPPED-ADDRESS
-			if len(val) >= 8 && val[1] == 0x01 { // IPv4
-				ip := make(net.IP, 4)
-				copy(ip, val[4:8])
-				if typ == 0x0020 {
-					for i := range ip {
-						ip[i] ^= resp[4+i]
-					}
+		case attrXORMappedAddress, attrXORMappedAddressLegacy:
+			if ip := ipv4Attr(val); ip != nil {
+				// The IPv4 address is XOR-ed with the magic cookie.
+				var key [4]byte
+				binary.BigEndian.PutUint32(key[:], magicCookie)
+				for i := range ip {
+					ip[i] ^= key[i]
 				}
 				return ip, nil
 			}
+		case attrMappedAddress:
+			if ip := ipv4Attr(val); ip != nil && mapped == nil {
+				mapped = ip
+			}
 		}
-		// attributes are padded to 4 bytes
+		// attributes are padded to a multiple of 4 bytes
 		body = body[4+(length+3)&^3:]
 	}
+	if mapped != nil {
+		return mapped, nil
+	}
 	return nil, errors.New("stun: no mapped address")
+}
+
+// ipv4Attr decodes the {reserved, family, port, address} body shared by
+// MAPPED-ADDRESS and XOR-MAPPED-ADDRESS, returning nil unless it is IPv4.
+func ipv4Attr(val []byte) net.IP {
+	if len(val) < 8 || val[1] != familyIPv4 {
+		return nil
+	}
+	ip := make(net.IP, 4)
+	copy(ip, val[4:8])
+	return ip
 }

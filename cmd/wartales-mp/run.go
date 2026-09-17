@@ -75,10 +75,18 @@ func runCmd(args []string) error {
 
 	// Warm the public endpoint up so the first join code is instant.
 	go func() {
-		if addr, err := mapper.Addr(); err == nil {
-			logger.Printf("public endpoint: %s", addr)
-		} else {
+		ep, err := mapper.Endpoint()
+		switch {
+		case err != nil:
 			logger.Printf("public endpoint unknown: %v", err)
+		case ep.Reachable:
+			logger.Printf("public endpoint: %s (via %s)", ep.Addr, ep.Source)
+		default:
+			// Double NAT and friends: the code still works on the LAN, but
+			// nobody on the internet can reach it - say so instead of
+			// handing out a silently broken code.
+			logger.Printf("WARNING: %s", ep.Warning)
+			logger.Printf("LAN-only endpoint: %s (via %s)", ep.Addr, ep.Source)
 		}
 	}()
 
