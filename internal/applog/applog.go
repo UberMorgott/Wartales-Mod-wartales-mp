@@ -55,9 +55,6 @@ func Open(also io.Writer) (*log.Logger, func() error) {
 	path := filepath.Join(dir, FileName)
 
 	var sinks []io.Writer
-	if also != nil {
-		sinks = append(sinks, also)
-	}
 
 	var openErr error
 	var f *os.File
@@ -76,8 +73,15 @@ func Open(also io.Writer) (*log.Logger, func() error) {
 			sinks = append(sinks, f)
 		}
 	}
+	// The file comes first and every sink is written independently: the helper
+	// runs hidden, with no console, so writing to os.Stdout fails -- and
+	// io.MultiWriter would give up on the remaining sinks at the first error,
+	// which is how the log file ended up empty on the first live run.
+	if also != nil {
+		sinks = append(sinks, also)
+	}
 
-	logger := log.New(io.MultiWriter(sinks...), "", log.LstdFlags|log.Lmicroseconds)
+	logger := log.New(tolerantWriter(sinks), "", log.LstdFlags|log.Lmicroseconds)
 	if openErr != nil {
 		logger.Printf("log: cannot write %s: %v", path, openErr)
 	} else {
@@ -90,6 +94,24 @@ func Open(also io.Writer) (*log.Logger, func() error) {
 		}
 		return f.Close()
 	}
+}
+
+// tolerantWriter writes to every sink and reports success as long as the first
+// one accepted the bytes, so a dead console cannot silence the log file.
+type tolerantWriter []io.Writer
+
+func (w tolerantWriter) Write(p []byte) (int, error) {
+	n, err := 0, error(nil)
+	for i, s := range w {
+		wn, werr := s.Write(p)
+		if i == 0 {
+			n, err = wn, werr
+		}
+	}
+	if len(w) == 0 {
+		return len(p), nil
+	}
+	return n, err
 }
 
 // Trunc renders a payload for the log, bounded to MaxValue bytes. Control
