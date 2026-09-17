@@ -9,8 +9,8 @@ package wsx
 
 import (
 	"bufio"
-	"crypto/md5"
-	"crypto/sha1"
+	"crypto/md5"  //nolint:gosec // RFC6455/hixie handshake: X-Pass is an md5, changing it breaks the wire protocol
+	"crypto/sha1" //nolint:gosec // RFC6455 requires sha1 for Sec-WebSocket-Accept
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -83,6 +83,7 @@ func Accept(c net.Conn, br *bufio.Reader, auth AuthFunc) (*Conn, error) {
 		}
 	}
 
+	//nolint:gosec // sha1 is mandated by RFC6455 for Sec-WebSocket-Accept
 	sum := sha1.Sum([]byte(hash + wsGUID))
 	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
@@ -108,6 +109,7 @@ func checkPass(hash, pass, got string) bool {
 	if err != nil {
 		return false
 	}
+	//nolint:gosec // md5 is what the game's WSConnection computes for X-Pass
 	sum := md5.Sum([]byte(hex.EncodeToString(key) + pass))
 	return got == hex.EncodeToString(sum[:]) ||
 		got == base64.StdEncoding.EncodeToString(sum[:]) ||

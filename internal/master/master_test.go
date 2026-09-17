@@ -2,6 +2,7 @@ package master
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -31,8 +33,10 @@ func dialMaster(t *testing.T, addr string) *wsClient {
 	t.Helper()
 	var c net.Conn
 	var err error
-	for i := 0; i < 100; i++ { // the listener starts in a goroutine
-		c, err = tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
+	//nolint:gosec // the test dials the self-signed cert install.EnsureCerts just generated
+	d := tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}}
+	for range 100 { // the listener starts in a goroutine
+		c, err = d.DialContext(context.Background(), "tcp", addr)
 		if err == nil {
 			break
 		}
@@ -103,12 +107,16 @@ func (w *wsClient) call(t *testing.T, cmd string, args any) json.RawMessage {
 
 func (w *wsClient) writeMasked(t *testing.T, payload []byte) {
 	t.Helper()
+	if len(payload) > math.MaxUint16 {
+		t.Fatalf("payload of %d bytes needs a 64 bit length", len(payload))
+	}
+	n := uint16(len(payload)) //nolint:gosec // the length is bounded by the check above
 	var head []byte
-	if len(payload) < 126 {
-		head = []byte{0x81, byte(0x80 | len(payload))}
+	if n < 126 {
+		head = []byte{0x81, 0x80 | byte(n)}
 	} else {
 		head = []byte{0x81, 0x80 | 126, 0, 0}
-		binary.BigEndian.PutUint16(head[2:], uint16(len(payload)))
+		binary.BigEndian.PutUint16(head[2:], n)
 	}
 	var mask [4]byte
 	if _, err := rand.Read(mask[:]); err != nil {
@@ -206,7 +214,8 @@ func startMaster(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -42,9 +42,6 @@ func Dir() string {
 	return filepath.Join(base, "wartales-mp")
 }
 
-// Path returns the full path of the log file.
-func Path() string { return filepath.Join(Dir(), FileName) }
-
 // Open rotates the previous log to <name>.1, opens a fresh one and returns a
 // logger that writes both to it and to also (normally os.Stdout). The returned
 // closer must be called on shutdown. If the file cannot be opened, logging
@@ -66,6 +63,7 @@ func Open(also io.Writer) (*log.Logger, func() error) {
 		_ = os.Remove(path + ".1")
 		_ = os.Rename(path, path+".1")
 		var err error
+		//nolint:gosec // path is our own log file under Dir(), not user input
 		f, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			openErr = err

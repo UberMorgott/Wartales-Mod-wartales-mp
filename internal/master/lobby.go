@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"strconv"
 	"sync"
@@ -334,9 +335,7 @@ func (s *Server) lobbySetData(a lobbyArgs, p Peer) error {
 	if l.data == nil {
 		l.data = map[string]json.RawMessage{}
 	}
-	for k, v := range data {
-		l.data[k] = v
-	}
+	maps.Copy(l.data, data)
 	s.lobbies.mu.Unlock()
 	s.lobbies.broadcast(l, p, "lobby/setData", map[string]any{"id": l.id, "data": data})
 	return nil
@@ -413,13 +412,13 @@ func (s *Server) lobbyMakeShortCode(a lobbyArgs) (any, error) {
 	}
 	addr, err := s.publicAddr()
 	if err != nil {
-		return nil, fmt.Errorf("no public address: %v", err)
+		return nil, fmt.Errorf("no public address: %w", err)
 	}
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	port, err := strconv.Atoi(portStr)
+	port, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil {
 		return nil, err
 	}

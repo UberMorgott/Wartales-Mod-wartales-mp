@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"syscall"
@@ -26,7 +27,11 @@ func watchGame() (uint32, <-chan struct{}, error) {
 		return 0, nil, err
 	}
 
-	self := uint32(os.Getpid())
+	rawSelf := os.Getpid()
+	if rawSelf < 0 || rawSelf > math.MaxUint32 {
+		return 0, nil, fmt.Errorf("own pid %d does not fit in a uint32", rawSelf)
+	}
+	self := uint32(rawSelf)
 	pid := uint32(0)
 	for _, p := range procs {
 		if p.pid == self && p.parent != 0 {

@@ -51,6 +51,9 @@ type Server struct {
 	mu     sync.Mutex
 	local  *session     // the local game's connection
 	client *link.Client // set once we joined a remote lobby as a guest
+	ln     net.Listener // the master listener, nil until ListenAndServe runs
+	conns  map[net.Conn]struct{}
+	closed bool
 }
 
 // wireErr carries protocol text the game client sees verbatim: Handle's error
@@ -74,20 +77,49 @@ func New(opt Options) *Server {
 	return s
 }
 
-// ListenAndServe serves the master until the listener fails.
+// ListenAndServe serves the master until the listener fails or Close is
+// called; a Close returns nil, because a deliberate shutdown is not an error.
 func (s *Server) ListenAndServe() error {
 	ln, err := tls.Listen("tcp", s.opt.Addr, s.opt.TLS)
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = ln.Close() // Close raced us; nothing must be left listening
+		return nil
+	}
+	s.ln = ln
+	s.mu.Unlock()
 	s.opt.Log.Printf("master listening on %s", s.opt.Addr)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
+			if s.isClosed() {
+				return nil
+			}
 			return err
 		}
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			_ = c.Close()
+			return nil
+		}
+		if s.conns == nil {
+			s.conns = map[net.Conn]struct{}{}
+		}
+		s.conns[c] = struct{}{}
+		s.mu.Unlock()
 		go s.serve(c)
 	}
+}
+
+func (s *Server) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // ServeLink handles one guest's proxy-link connection (host role).
@@ -145,7 +177,12 @@ func (p *session) Push(cmd string, args any) {
 }
 
 func (s *Server) serve(c net.Conn) {
-	defer func() { _ = c.Close() }() // the game's connection is finished either way
+	defer func() {
+		_ = c.Close() // the game's connection is finished either way
+		s.mu.Lock()
+		delete(s.conns, c)
+		s.mu.Unlock()
+	}()
 	peer := c.RemoteAddr().String()
 	s.opt.Log.Printf("master: accepted TLS connection from %s", peer)
 	ws, err := wsx.Accept(c, nil, func(string) (string, bool) {
@@ -296,13 +333,29 @@ func (s *Server) localSession() *session {
 	return s.local
 }
 
-// Close releases the link to the host, if we hold one.
+// Close stops the listener, drops every game connection and releases the link
+// to the host, if we hold one. It is safe to call more than once.
 func (s *Server) Close() {
 	s.mu.Lock()
+	s.closed = true
 	cl := s.client
 	s.client = nil
+	ln := s.ln
+	s.ln = nil
+	conns := make([]net.Conn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.conns = nil
 	s.mu.Unlock()
+	// shutting down; a failed close needs no recovery
+	if ln != nil {
+		_ = ln.Close()
+	}
+	for _, c := range conns {
+		_ = c.Close() // unblocks the serve goroutine's ws.Read
+	}
 	if cl != nil {
-		_ = cl.Close() // shutting down; a failed close needs no recovery
+		_ = cl.Close()
 	}
 }

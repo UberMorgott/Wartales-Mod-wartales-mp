@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -125,6 +126,9 @@ func codeCmd(args []string) error {
 		ip := net.ParseIP(host)
 		if ip == nil {
 			return fmt.Errorf("%q is not an IP address", host)
+		}
+		if port < 0 || port > math.MaxUint16 {
+			return fmt.Errorf("port %d is out of range", port)
 		}
 		s, err := code.Encode(code.Endpoint{IP: ip, Port: uint16(port)})
 		if err != nil {

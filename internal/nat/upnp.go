@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -27,7 +28,8 @@ var igdServices = []string{
 // DiscoverIGD looks for an internet gateway with SSDP (M-SEARCH to the
 // multicast address 239.255.255.250:1900).
 func DiscoverIGD(timeout time.Duration) (*IGD, error) {
-	c, err := net.ListenPacket("udp4", ":0")
+	var lc net.ListenConfig
+	c, err := lc.ListenPacket(context.Background(), "udp4", ":0")
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +70,7 @@ func DiscoverIGD(timeout time.Duration) (*IGD, error) {
 }
 
 func headerValue(resp, key string) string {
-	for _, line := range strings.Split(resp, "\r\n") {
+	for line := range strings.SplitSeq(resp, "\r\n") {
 		if p := strings.Index(line, ":"); p > 0 && strings.EqualFold(strings.TrimSpace(line[:p]), key) {
 			return strings.TrimSpace(line[p+1:])
 		}
@@ -78,8 +80,12 @@ func headerValue(resp, key string) string {
 
 // describe fetches the device description and picks a WAN connection service.
 func describe(location string) (*IGD, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, location, nil)
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(location)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +137,8 @@ func describe(location string) (*IGD, error) {
 
 // localIPTowards returns the local address used to reach the gateway.
 func localIPTowards(gateway net.IP) net.IP {
-	c, err := net.Dial("udp4", net.JoinHostPort(gateway.String(), "1900"))
+	var d net.Dialer
+	c, err := d.DialContext(context.Background(), "udp4", net.JoinHostPort(gateway.String(), "1900"))
 	if err != nil {
 		return nil
 	}
@@ -150,7 +157,7 @@ func (g *IGD) soap(action, body string) (string, error) {
 		fmt.Sprintf(`<u:%s xmlns:u="%s">%s</u:%s>`, action, g.serviceType, body, action) +
 		`</s:Body></s:Envelope>`
 
-	req, err := http.NewRequest("POST", g.controlURL, strings.NewReader(env))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, g.controlURL, strings.NewReader(env))
 	if err != nil {
 		return "", err
 	}

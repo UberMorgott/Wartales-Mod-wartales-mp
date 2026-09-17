@@ -3,6 +3,7 @@ package relay
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 )
 
 // Wire format of the relay, from mpman/net/RelayP2PService.hx (RelayServer):
@@ -36,8 +37,13 @@ func packToHost(typ byte, cid uint16, payload []byte) []byte {
 // packConnect builds the SConnect frame: the identity string is length
 // prefixed with a u16 (RelayHost reads getUInt16 then getString).
 func packConnect(cid uint16, ident string) []byte {
+	n := len(ident)
+	if n > math.MaxUint16 { // the u16 prefix cannot describe a longer identity
+		n = math.MaxUint16
+		ident = ident[:n]
+	}
 	body := make([]byte, 2+len(ident))
-	binary.LittleEndian.PutUint16(body, uint16(len(ident)))
+	binary.LittleEndian.PutUint16(body, uint16(n))
 	copy(body[2:], ident)
 	return packToHost(TypeConnect, cid, body)
 }

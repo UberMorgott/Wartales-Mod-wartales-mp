@@ -109,12 +109,6 @@ func TLSConfig(dir string) (*tls.Config, error) {
 	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
 }
 
-// CACertPath returns the path of the generated CA certificate. The winmm.dll
-// proxy reads exactly this file (%ProgramData%\wartales-mp\ca.crt) in its
-// ssl_conf_set_ca hook and appends it to the game's trust chain, so the two
-// must stay in step.
-func CACertPath(dir string) string { return filepath.Join(dir, caCertFile) }
-
 func serial() *big.Int {
 	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
@@ -129,7 +123,7 @@ func writePEM(path, blockType string, der []byte, mode os.FileMode) error {
 }
 
 func readCertDER(path string) ([]byte, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is our own generated cert under the install dir
 	if err != nil {
 		return nil, err
 	}

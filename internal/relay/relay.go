@@ -9,6 +9,7 @@ package relay
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"log"
@@ -74,7 +75,8 @@ func randomPassword() string {
 // ListenAndServe owns the public port. Connections that do not look like an
 // HTTP upgrade are passed to onLink (the proxy-link protocol).
 func (s *Server) ListenAndServe(addr string, onLink func(net.Conn)) error {
-	ln, err := net.Listen("tcp", addr)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -310,11 +312,4 @@ func (s *Server) drop(c *client) {
 			_ = other.ws.Close() // host is gone; every guest is dropped regardless
 		}
 	}
-}
-
-// HasHost reports whether the host game is currently connected.
-func (s *Server) HasHost() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.hostCid != 0
 }

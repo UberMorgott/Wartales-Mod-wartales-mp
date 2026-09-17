@@ -1,11 +1,11 @@
 package master
 
 import (
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // not a security hash: makeSID needs a stable digest of the id, see makeSID
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net"
 	"strconv"
 	"time"
@@ -27,6 +27,7 @@ func currentToken() int { return int(time.Now().UnixMilli()/57600000) & 0xFFFF }
 // not have; a mismatch only makes the client drop its cached $SID and log in
 // again, which we accept.
 func makeSID(userID, name string) string {
+	//nolint:gosec // md5 is only a deterministic identifier mapping here, not a security primitive
 	sum := md5.Sum([]byte("wartales-mp" + userID + strconv.Itoa(currentToken()) + name))
 	sign := base64.RawStdEncoding.EncodeToString(sum[:])
 	return fmt.Sprintf("X%04x%s", currentToken(), sign)
@@ -54,7 +55,9 @@ func adopt(p Peer, a loginArgs) {
 		sess.uid = uid.Mint(a.UID)
 	}
 	if sess.uid == "" {
-		sess.uid = uid.Mint(fmt.Sprintf("anonymous-%d", rand.Int63()))
+		var b [8]byte
+		_, _ = rand.Read(b[:]) // crypto/rand.Read never returns an error
+		sess.uid = uid.Mint(fmt.Sprintf("anonymous-%x", b))
 	}
 	if a.Name != "" {
 		sess.name = a.Name
@@ -100,7 +103,7 @@ func (s *Server) instanceGet(args json.RawMessage, p Peer) (any, error) {
 		// A guest asking the host's master: hand out our public endpoint.
 		addr, err := s.publicAddr()
 		if err != nil {
-			return nil, fmt.Errorf("no public address: %v", err)
+			return nil, fmt.Errorf("no public address: %w", err)
 		}
 		return s.instanceAnswer(addr), nil
 	}

@@ -108,7 +108,7 @@ func TestPatchesAreWellFormed(t *testing.T) {
 // above; regenerate with: go run ./tools/hlpatchgen -out shim/proxy/hlpatch.h
 func TestHeaderMatchesShim(t *testing.T) {
 	path := filepath.Join("..", "..", "shim", "proxy", "hlpatch.h")
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // fixed in-repo test fixture path
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}

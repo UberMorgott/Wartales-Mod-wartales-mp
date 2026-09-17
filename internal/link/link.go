@@ -8,6 +8,7 @@ package link
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -148,7 +149,8 @@ type Client struct {
 // Dial connects to the host's public endpoint and announces the local user.
 // Pushes coming from the host are handed to onPush.
 func Dial(addr string, u User, onPush func(cmd string, args json.RawMessage), onClose func()) (*Client, error) {
-	c, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	d := net.Dialer{Timeout: 10 * time.Second}
+	c, err := d.DialContext(context.Background(), "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

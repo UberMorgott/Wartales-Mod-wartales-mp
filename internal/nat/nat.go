@@ -8,6 +8,7 @@
 package nat
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -162,7 +163,8 @@ func (m *Mapper) Close() {
 
 // LocalIP returns this machine's primary IPv4 address.
 func LocalIP() net.IP {
-	c, err := net.Dial("udp4", "8.8.8.8:53")
+	var d net.Dialer
+	c, err := d.DialContext(context.Background(), "udp4", "8.8.8.8:53")
 	if err != nil {
 		return nil
 	}

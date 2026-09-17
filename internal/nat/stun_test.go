@@ -10,13 +10,10 @@ var testTxID = []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 
 // attr builds one STUN attribute, padded to a multiple of 4 bytes.
 func attr(typ uint16, val []byte) []byte {
-	out := make([]byte, 4)
+	out := make([]byte, (4+len(val)+3)&^3)
 	binary.BigEndian.PutUint16(out, typ)
-	binary.BigEndian.PutUint16(out[2:], uint16(len(val)))
-	out = append(out, val...)
-	for len(out)%4 != 0 {
-		out = append(out, 0)
-	}
+	binary.BigEndian.PutUint16(out[2:], uint16(len(val))) //nolint:gosec // test attribute bodies are a few bytes long
+	copy(out[4:], val)
 	return out
 }
 
@@ -43,12 +40,13 @@ func response(msgType uint16, cookie uint32, txID []byte, attrs ...[]byte) []byt
 	for _, a := range attrs {
 		body = append(body, a...)
 	}
-	out := make([]byte, 20)
+	out := make([]byte, 20+len(body))
 	binary.BigEndian.PutUint16(out, msgType)
-	binary.BigEndian.PutUint16(out[2:], uint16(len(body)))
+	binary.BigEndian.PutUint16(out[2:], uint16(len(body))) //nolint:gosec // test response bodies are a few bytes long
 	binary.BigEndian.PutUint32(out[4:], cookie)
 	copy(out[8:], txID)
-	return append(out, body...)
+	copy(out[20:], body)
+	return out
 }
 
 func TestParseSTUN(t *testing.T) {

@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -30,7 +31,8 @@ func STUNExternalIP(server string) (net.IP, error) {
 	if server == "" {
 		server = DefaultSTUN
 	}
-	c, err := net.Dial("udp", server)
+	var d net.Dialer
+	c, err := d.DialContext(context.Background(), "udp", server)
 	if err != nil {
 		return nil, err
 	}

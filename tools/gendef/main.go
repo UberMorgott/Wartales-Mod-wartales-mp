@@ -208,7 +208,7 @@ func readExports(path string) ([]export, error) {
 	}
 
 	out := make([]export, 0, nameCount)
-	for i := uint32(0); i < nameCount; i++ {
+	for i := range nameCount {
 		nameRVA, err := m.u32(namesRVA + i*4)
 		if err != nil {
 			return nil, err
@@ -248,7 +248,7 @@ func (m *image) at(rva uint32) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if off >= uint32(len(data)) {
+		if int64(off) >= int64(len(data)) {
 			return nil, fmt.Errorf("rva %#x past raw data of %s", rva, s.Name)
 		}
 		return data[off:], nil
@@ -277,11 +277,11 @@ func (m *image) cstring(rva uint32) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	i := bytes.IndexByte(b, 0)
-	if i < 0 {
+	s, _, ok := bytes.Cut(b, []byte{0})
+	if !ok {
 		return "", fmt.Errorf("unterminated string at rva %#x", rva)
 	}
-	return string(b[:i]), nil
+	return string(s), nil
 }
 
 func orShort(err error, rva uint32) error {
@@ -326,7 +326,7 @@ func write(path, text string) error {
 
 func splitNames(s string) map[string]bool {
 	m := map[string]bool{}
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			m[p] = true
 		}

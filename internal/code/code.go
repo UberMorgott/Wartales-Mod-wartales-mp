@@ -39,7 +39,7 @@ func Encode(e Endpoint) (string, error) {
 	if ip4 == nil {
 		return "", fmt.Errorf("join code needs an IPv4 address, got %v", e.IP)
 	}
-	payload := []byte{e.Flags, ip4[0], ip4[1], ip4[2], ip4[3], byte(e.Port >> 8), byte(e.Port)}
+	payload := []byte{e.Flags, ip4[0], ip4[1], ip4[2], ip4[3], byte(e.Port >> 8 & 0xff), byte(e.Port & 0xff)}
 
 	// 7 bytes = 56 bits; pad to 60 bits (12 symbols) with 4 low zero bits.
 	var acc uint64
@@ -51,7 +51,7 @@ func Encode(e Endpoint) (string, error) {
 	var sb strings.Builder
 	sum := 0
 	for i := bodyLen - 1; i >= 0; i-- {
-		v := int(acc>>(uint(i)*5)) & 31
+		v := int(acc >> (uint(i) * 5) & 31)
 		sum += v
 		sb.WriteByte(Alphabet[v])
 	}
@@ -67,16 +67,16 @@ func Decode(s string) (Endpoint, error) {
 		return Endpoint{}, errBadCode
 	}
 
-	vals := make([]int, Length)
-	for i := 0; i < Length; i++ {
+	vals := make([]uint64, Length)
+	for i := range Length {
 		v := strings.IndexByte(Alphabet, norm[i])
 		if v < 0 {
 			return Endpoint{}, errBadCode
 		}
-		vals[i] = v
+		vals[i] = uint64(v & 31)
 	}
 
-	sum := 0
+	var sum uint64
 	for _, v := range vals[:bodyLen] {
 		sum += v
 	}
@@ -86,7 +86,7 @@ func Decode(s string) (Endpoint, error) {
 
 	var acc uint64
 	for _, v := range vals[:bodyLen] {
-		acc = acc<<5 | uint64(v)
+		acc = acc<<5 | v
 	}
 	acc >>= 4
 
