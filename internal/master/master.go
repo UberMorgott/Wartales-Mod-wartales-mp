@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 
+	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/link"
 	"github.com/UberMorgott/wartales-mp/internal/wsx"
 )
@@ -90,9 +92,19 @@ func (s *Server) ListenAndServe() error {
 
 // ServeLink handles one guest's proxy-link connection (host role).
 func (s *Server) ServeLink(c net.Conn) {
+	addr := c.RemoteAddr().String()
+	s.opt.Log.Printf("link: accepted proxy-link from %s", addr)
 	link.Serve(c, func(cmd string, args json.RawMessage, peer *link.Peer) (any, error) {
-		return s.Handle(cmd, args, peer)
+		s.opt.Log.Printf("link: <- %s from %s (%s) %s", cmd, peer.Name(), peer.UserID(), applog.Trunc(args))
+		result, err := s.Handle(cmd, args, peer)
+		if err != nil {
+			s.opt.Log.Printf("link: -> %s err %s", cmd, applog.Trunc(err.Error()))
+		} else {
+			s.opt.Log.Printf("link: -> %s ok %s", cmd, applog.Trunc(result))
+		}
+		return result, err
 	}, func(peer *link.Peer) {
+		s.opt.Log.Printf("link: proxy-link from %s (%s) closed", addr, peer.UserID())
 		s.lobbies.peerGone(peer)
 	})
 }
@@ -123,8 +135,10 @@ func (p *session) Push(cmd string, args any) {
 	p.mu.Unlock()
 	b, err := json.Marshal(link.Envelope{UID: uid, Cmd: cmd, Args: raw})
 	if err != nil {
+		p.srv.opt.Log.Printf("master: cannot marshal the push %s: %v", cmd, err)
 		return
 	}
+	p.srv.opt.Log.Printf("master: -> push #%d %s %s", uid, cmd, applog.Trunc(raw))
 	if err := p.ws.WriteText(string(b)); err != nil {
 		p.srv.opt.Log.Printf("master: push %s failed: %v", cmd, err)
 	}
@@ -132,22 +146,26 @@ func (p *session) Push(cmd string, args any) {
 
 func (s *Server) serve(c net.Conn) {
 	defer func() { _ = c.Close() }() // the game's connection is finished either way
+	peer := c.RemoteAddr().String()
+	s.opt.Log.Printf("master: accepted TLS connection from %s", peer)
 	ws, err := wsx.Accept(c, nil, func(string) (string, bool) {
 		// The game authenticates with a password obfuscated inside the
 		// bytecode; we cannot check it, and we do not need to.
 		return "", true
 	})
 	if err != nil {
-		s.opt.Log.Printf("master: handshake failed: %v", err)
+		s.opt.Log.Printf("master: handshake from %s failed: %v", peer, err)
 		return
 	}
 	sess := &session{srv: s, ws: ws}
 	s.mu.Lock()
 	s.local = sess
 	s.mu.Unlock()
-	s.opt.Log.Printf("master: game connected (ident %q)", ws.Ident)
+	s.opt.Log.Printf("master: game connected from %s (ident %q, headers %s)",
+		peer, ws.Ident, applog.Trunc(headerLine(ws.Headers)))
 
 	defer func() {
+		s.opt.Log.Printf("master: game session from %s ended (uid %q)", peer, sess.UserID())
 		s.lobbies.peerGone(sess)
 		s.mu.Lock()
 		if s.local == sess {
@@ -167,10 +185,11 @@ func (s *Server) serve(c net.Conn) {
 		}
 		var e link.Envelope
 		if err := json.Unmarshal(payload, &e); err != nil {
-			s.opt.Log.Printf("master: bad frame: %v", err)
+			s.opt.Log.Printf("master: bad frame from %s: %v (%s)", peer, err, applog.Trunc(payload))
 			continue
 		}
 		if e.UID < 0 {
+			s.opt.Log.Printf("master: <- push reply #%d %s", -e.UID, applog.Trunc(e.Args))
 			continue // the game answering one of our pushes
 		}
 		go s.answer(sess, e)
@@ -178,10 +197,11 @@ func (s *Server) serve(c net.Conn) {
 }
 
 func (s *Server) answer(sess *session, e link.Envelope) {
+	s.opt.Log.Printf("master: <- #%d %s %s", e.UID, e.Cmd, applog.Trunc(e.Args))
 	result, err := s.Handle(e.Cmd, e.Args, sess)
 	var reply link.Envelope
 	if err != nil {
-		s.opt.Log.Printf("master: %s failed: %v", e.Cmd, err)
+		s.opt.Log.Printf("master: -> #%d %s err %s", e.UID, e.Cmd, applog.Trunc(err.Error()))
 		raw, _ := json.Marshal(err.Error())
 		reply = link.Envelope{UID: -e.UID, Cmd: "err", Args: raw}
 	} else {
@@ -189,15 +209,40 @@ func (s *Server) answer(sess *session, e link.Envelope) {
 		if mErr != nil || result == nil {
 			raw = nil
 		}
+		s.opt.Log.Printf("master: -> #%d %s ok %s", e.UID, e.Cmd, applog.Trunc(raw))
 		reply = link.Envelope{UID: -e.UID, Args: raw}
 	}
 	b, err := json.Marshal(reply)
 	if err != nil {
+		s.opt.Log.Printf("master: cannot marshal the reply to %s: %v", e.Cmd, err)
 		return
 	}
 	if err := sess.ws.WriteText(string(b)); err != nil {
-		s.opt.Log.Printf("master: reply failed: %v", err)
+		s.opt.Log.Printf("master: reply to %s failed: %v", e.Cmd, err)
 	}
+}
+
+// headerLine renders the handshake headers in a stable order for the log.
+func headerLine(h map[string]string) string {
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		if b.Len() > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		if k == "x-pass" {
+			b.WriteString("<redacted>") // a password hash never belongs in a log
+			continue
+		}
+		b.WriteString(h[k])
+	}
+	return b.String()
 }
 
 // Handle runs one command. Local lobby commands are forwarded to the host's

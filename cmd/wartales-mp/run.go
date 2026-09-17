@@ -3,13 +3,13 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 
+	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/code"
 	"github.com/UberMorgott/wartales-mp/internal/install"
 	"github.com/UberMorgott/wartales-mp/internal/master"
@@ -26,7 +26,9 @@ func runCmd(args []string) error {
 		return err
 	}
 
-	logger := log.New(os.Stdout, "", log.LstdFlags)
+	logger, closeLog := applog.Open(os.Stdout)
+	defer func() { _ = closeLog() }() // shutting down; a failed close changes nothing
+	logger.Printf("wartales-mp starting: port %d, master %s", *port, *masterAddr)
 
 	// The winmm.dll proxy starts us from inside the game, so the certificates
 	// have to be in place without anyone running a setup step first.

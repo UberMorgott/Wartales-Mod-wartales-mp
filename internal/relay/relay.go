@@ -13,9 +13,11 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 
+	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/wsx"
 )
 
@@ -24,7 +26,16 @@ type client struct {
 	ident  string
 	isHost bool
 	ws     *wsx.Conn
+
+	// Frame counters, summarised in the log instead of dumping payloads.
+	framesIn  int64
+	bytesIn   int64
+	framesOut int64
+	bytesOut  int64
 }
+
+// frameLogEvery is how many frames pass between two relay traffic summaries.
+const frameLogEvery = 512
 
 // Server is the relay. It serves exactly one host at a time, which is all the
 // game ever needs.
@@ -86,10 +97,12 @@ func (s *Server) dispatch(c net.Conn, onLink func(net.Conn)) {
 		return
 	}
 	if string(head) == "GET " {
+		s.Log.Printf("relay: accepted websocket from %s", c.RemoteAddr())
 		s.Serve(c, br)
 		return
 	}
 	if onLink == nil {
+		s.Log.Printf("relay: no proxy-link handler, dropping %s", c.RemoteAddr())
 		_ = c.Close() // no proxy-link handler configured; drop the connection
 		return
 	}
@@ -130,7 +143,7 @@ func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 		return s.SlavePW, true
 	})
 	if err != nil {
-		s.Log.Printf("relay: handshake refused: %v", err)
+		s.Log.Printf("relay: handshake from %s refused: %v", c.RemoteAddr(), err)
 		if self != nil {
 			s.mu.Lock()
 			delete(s.clients, self.cid)
@@ -140,43 +153,89 @@ func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 	}
 	self.ws = ws
 
+	role := "client"
 	if self.isHost {
+		role = "host"
 		s.mu.Lock()
 		s.hostCid = self.cid
 		s.mu.Unlock()
-		s.Log.Printf("relay: host connected (cid %d, ident %q)", self.cid, self.ident)
-	} else {
-		s.Log.Printf("relay: client connected (cid %d, ident %q)", self.cid, self.ident)
+	}
+	s.Log.Printf("relay: %s connected (cid %d, ident %q, peer %s, headers %s)",
+		role, self.cid, self.ident, c.RemoteAddr(), applog.Trunc(headerLine(ws.Headers)))
+	if !self.isHost {
 		s.toHost(packConnect(self.cid, self.ident))
 	}
-	defer s.drop(self)
+	defer func() {
+		s.Log.Printf("relay: %s cid %d gone after %d frames in (%d B), %d frames out (%d B)",
+			role, self.cid, self.framesIn, self.bytesIn, self.framesOut, self.bytesOut)
+		s.drop(self)
+	}()
 
 	for {
 		op, payload, err := ws.Read()
 		if err != nil {
+			s.Log.Printf("relay: %s cid %d read ended: %v", role, self.cid, err)
 			return
 		}
 		if op != wsx.OpBinary {
+			s.Log.Printf("relay: %s cid %d sent a non-binary frame (opcode %d), ignored", role, self.cid, op)
 			continue // the relay carries binary frames only
 		}
 		if len(payload) < HSize {
+			s.Log.Printf("relay: %s cid %d sent a %d byte frame, shorter than the %d byte header",
+				role, self.cid, len(payload), HSize)
 			continue // RelayServer drops anything shorter than a header
+		}
+		self.framesIn++
+		self.bytesIn += int64(len(payload))
+		if self.framesIn%frameLogEvery == 0 {
+			s.Log.Printf("relay: %s cid %d: %d frames in (%d B)", role, self.cid, self.framesIn, self.bytesIn)
 		}
 		if self.isHost {
 			cid, body, err := parseFromHost(payload)
 			if err != nil {
+				s.Log.Printf("relay: bad host frame (%d B): %v", len(payload), err)
 				continue
 			}
-			if to := s.client(cid); to != nil {
-				if err := to.ws.WriteBinary(body); err != nil {
-					s.Log.Printf("relay: error with client %d: %v", cid, err)
-					s.closeClient(cid)
-				}
+			to := s.client(cid)
+			if to == nil {
+				s.Log.Printf("relay: host addressed unknown client %d, dropping %d B", cid, len(body))
+				continue
 			}
+			if err := to.ws.WriteBinary(body); err != nil {
+				s.Log.Printf("relay: error with client %d: %v", cid, err)
+				s.closeClient(cid)
+				continue
+			}
+			to.framesOut++
+			to.bytesOut += int64(len(body))
 		} else {
 			s.toHost(packToHost(TypeData, self.cid, payload))
 		}
 	}
+}
+
+// headerLine renders the handshake headers in a stable order for the log.
+func headerLine(h map[string]string) string {
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		if b.Len() > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		if k == "x-pass" {
+			b.WriteString("<redacted>") // a password hash never belongs in a log
+			continue
+		}
+		b.WriteString(h[k])
+	}
+	return b.String()
 }
 
 func (s *Server) genCid() uint16 {

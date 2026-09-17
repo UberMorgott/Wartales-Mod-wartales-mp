@@ -151,6 +151,51 @@ func (w *wsClient) readFrame(t *testing.T) []byte {
 	return buf
 }
 
+// readPush waits for a server initiated command and answers it the way the
+// game does ({"uid": -n, "args": true}).
+func (w *wsClient) readPush(t *testing.T, cmd string) json.RawMessage {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = w.c.SetReadDeadline(deadline)
+		payload := w.readFrame(t)
+		var e struct {
+			UID  int             `json:"uid"`
+			Cmd  string          `json:"cmd"`
+			Args json.RawMessage `json:"args"`
+		}
+		if err := json.Unmarshal(payload, &e); err != nil {
+			t.Fatalf("bad frame %q: %v", payload, err)
+		}
+		if e.UID <= 0 || e.Cmd == "" {
+			continue // a reply to one of our own calls
+		}
+		reply, err := json.Marshal(map[string]any{"uid": -e.UID, "args": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.writeMasked(t, reply)
+		if e.Cmd == cmd {
+			_ = w.c.SetReadDeadline(time.Time{})
+			return e.Args
+		}
+	}
+	t.Fatalf("no %s push arrived", cmd)
+	return nil
+}
+
+// expectNoPush fails if anything at all is pushed within d.
+func (w *wsClient) expectNoPush(t *testing.T, d time.Duration) {
+	t.Helper()
+	_ = w.c.SetReadDeadline(time.Now().Add(d))
+	defer func() { _ = w.c.SetReadDeadline(time.Time{}) }()
+	var h [2]byte
+	if _, err := io.ReadFull(w.br, h[:]); err != nil {
+		return // timed out: nothing was pushed, which is what we want
+	}
+	t.Fatal("a frame arrived, but the sender must not see its own lobby/chat")
+}
+
 func startMaster(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -321,6 +366,97 @@ func TestEmittedUIDsAreNotSteamShaped(t *testing.T) {
 			t.Fatalf("emitted id %q is not a Session id", id)
 		}
 	}
+}
+
+// TestLobbyTransport drives the lobby transport exactly the way mpman does.
+//
+// mpman.net.LobbyService (mpman/net/LobbyService.hx, connectTo@54992) opens no
+// socket of its own: HostWT.connect@12155 case 7 hands it the MPLobby that
+// lobby/create returned, and every hxbit packet travels as a lobby/chat
+// message whose "msg" is haxe.Serializer.run(LobbyMessageData.Packet(bytes,
+// targetUid)) - see broadcastMessage@54947 and MPLobby.onCommand@54985. The
+// server's whole job is the fan-out: deliver every lobby/chat to the other
+// members verbatim, with the sender's uid attached, and never back to the
+// sender. The receiver filters on the target uid inside the payload
+// (onMessage@54929), so the server must not look into "msg" at all.
+func TestLobbyTransport(t *testing.T) {
+	addr := startMaster(t)
+
+	host := dialMaster(t, addr)
+	defer func() { _ = host.c.Close() }()
+	host.call(t, "user/login", map[string]any{"name": "Host", "uid": "S00", "version": 2})
+
+	var id string
+	raw := host.call(t, "lobby/create", map[string]any{
+		"props": map[string]any{"data": map[string]any{}, "isPrivate": false, "maxPlayers": 4},
+	})
+	if err := json.Unmarshal(raw, &id); err != nil {
+		t.Fatal(err)
+	}
+	hostUID := uid.Mint("S00")
+	guestUID := uid.Mint("S01")
+
+	guest := dialMaster(t, addr)
+	defer func() { _ = guest.c.Close() }()
+	guest.call(t, "user/login", map[string]any{"name": "Guest", "uid": "S01", "version": 2})
+	guest.call(t, "lobby/join", map[string]any{"id": id, "data": `{"ready":false}`})
+
+	// The host must learn about the joiner: LobbyService.onUserJoined@54927 is
+	// what creates the per-guest LobbyUserService the packets are routed to.
+	join := host.readPush(t, "lobby/join")
+	var joinArgs struct {
+		ID   string `json:"id"`
+		UID  string `json:"uid"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(join, &joinArgs); err != nil {
+		t.Fatal(err)
+	}
+	if joinArgs.ID != id || joinArgs.UID != guestUID || joinArgs.Name != "Guest" {
+		t.Fatalf("lobby/join push = %s", join)
+	}
+
+	// A guest packet addressed to the lobby owner. The exact bytes are a
+	// haxe.Serializer enum value; the server treats them as opaque text.
+	up := `wy20:mpman.net.LobbyMessageDatay6:Packet:2s12:` +
+		`/v8AAQIDBAUGBw==y` + strconv.Itoa(len(hostUID)) + `:` + hostUID
+	guest.call(t, "lobby/chat", map[string]any{"id": id, "msg": up})
+
+	got := host.readPush(t, "lobby/chat")
+	var chat struct {
+		ID  string `json:"id"`
+		UID string `json:"uid"`
+		Msg string `json:"msg"`
+	}
+	if err := json.Unmarshal(got, &chat); err != nil {
+		t.Fatal(err)
+	}
+	if chat.ID != id {
+		t.Fatalf("lobby/chat push id = %q, want %q", chat.ID, id)
+	}
+	if chat.UID != guestUID {
+		t.Fatalf("lobby/chat push uid = %q, want the sender %q", chat.UID, guestUID)
+	}
+	if chat.Msg != up {
+		t.Fatalf("lobby/chat push msg = %q, want it forwarded verbatim", chat.Msg)
+	}
+
+	// ... and the answer the host sends back through its LobbyUserService.
+	down := `wy20:mpman.net.LobbyMessageDatay6:Packet:2s8:AAECAwQFBgc=y` +
+		strconv.Itoa(len(guestUID)) + `:` + guestUID
+	host.call(t, "lobby/chat", map[string]any{"id": id, "msg": down})
+
+	got = guest.readPush(t, "lobby/chat")
+	if err := json.Unmarshal(got, &chat); err != nil {
+		t.Fatal(err)
+	}
+	if chat.UID != hostUID || chat.Msg != down {
+		t.Fatalf("lobby/chat push back to the guest = %s", got)
+	}
+
+	// The sender never sees its own packet: onMessage@54929 would hand it to
+	// the wrong LobbyUserService.
+	host.expectNoPush(t, 250*time.Millisecond)
 }
 
 func TestLobbyLifecycle(t *testing.T) {

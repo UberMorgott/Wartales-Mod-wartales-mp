@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"sync"
 
+	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/code"
 	"github.com/UberMorgott/wartales-mp/internal/link"
 )
@@ -37,6 +39,9 @@ type store struct {
 	mu      sync.Mutex
 	lobbies map[string]*lobby
 	codes   map[string]string // short code -> lobby id
+
+	packets     int64 // lobby transport packets seen (lobby/chat fan-out)
+	packetBytes int64
 }
 
 func newStore(srv *Server) *store {
@@ -78,13 +83,39 @@ func (l *lobby) info() map[string]any {
 	}
 }
 
-// broadcast sends a lobby push to every member but the actor.
-func (l *lobby) broadcast(except Peer, cmd string, args map[string]any) {
+// broadcast sends a lobby push to every member but the actor. The recipient
+// list is snapshotted under the store lock: peerGone rewrites l.users from
+// another goroutine.
+func (s *store) broadcast(l *lobby, except Peer, cmd string, args map[string]any) int {
+	s.mu.Lock()
+	to := make([]Peer, 0, len(l.users))
 	for _, u := range l.users {
 		if u.peer == nil || (except != nil && u.ID == except.UserID()) {
 			continue
 		}
-		u.peer.Push(cmd, args)
+		to = append(to, u.peer)
+	}
+	s.mu.Unlock()
+	for _, p := range to {
+		p.Push(cmd, args)
+	}
+	return len(to)
+}
+
+// transportLogEvery is how many lobby transport packets pass between two
+// summaries; the payloads themselves are never logged, only counted.
+const transportLogEvery = 64
+
+// transport counts one lobby transport packet and summarises it periodically.
+func (s *store) transport(logger *log.Logger, id, from string, size, to int) {
+	s.mu.Lock()
+	s.packets++
+	s.packetBytes += int64(size)
+	n, total := s.packets, s.packetBytes
+	s.mu.Unlock()
+	if n == 1 || n%transportLogEvery == 0 {
+		logger.Printf("master: lobby transport %s: packet #%d from %s, %d B to %d peer(s), %d B total",
+			id, n, from, size, to, total)
 	}
 }
 
@@ -122,9 +153,13 @@ func (s *store) peerGone(p Peer) {
 	s.mu.Unlock()
 
 	for _, l := range affected {
-		l.broadcast(p, "lobby/leave", map[string]any{"id": l.id, "uid": p.UserID()})
+		if s.srv != nil {
+			s.srv.opt.Log.Printf("master: %s left lobby %s, %d member(s) remain, owner %s",
+				p.UserID(), l.id, len(l.users), l.owner)
+		}
+		s.broadcast(l, p, "lobby/leave", map[string]any{"id": l.id, "uid": p.UserID()})
 		if l.owner != p.UserID() && len(l.users) > 0 {
-			l.broadcast(p, "lobby/transfer", map[string]any{"id": l.id, "uid": l.owner})
+			s.broadcast(l, p, "lobby/transfer", map[string]any{"id": l.id, "uid": l.owner})
 		}
 	}
 }
@@ -210,7 +245,10 @@ func (s *Server) lobbyCreate(a lobbyArgs, p Peer) (any, error) {
 	s.lobbies.mu.Lock()
 	s.lobbies.lobbies[l.id] = l
 	s.lobbies.mu.Unlock()
-	s.opt.Log.Printf("master: lobby %s created by %s", l.id, p.Name())
+	s.opt.Log.Printf("master: lobby %s created by %s (%s), owner %s, props %s",
+		l.id, p.Name(), p.UserID(), l.owner, applog.Trunc(a.Props))
+	s.opt.Log.Printf("master: lobby %s transport is lobby/chat on this connection "+
+		"(mpman LobbyService, no second socket)", l.id)
 	return l.id, nil
 }
 
@@ -238,9 +276,21 @@ func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 	s.lobbies.mu.Unlock()
 
 	if !found {
-		l.broadcast(p, "lobby/join", map[string]any{
-			"id": l.id, "uid": p.UserID(), "name": p.Name(), "data": a.Data,
+		// MPLobby.onCommand@54985 runs haxe.Unserializer over args.data and
+		// answers false - dropping the joiner - when it yields null, so the
+		// push always carries something that unserializes: "z" is the haxe
+		// encoding of Int 0.
+		data := a.Data
+		if len(data) == 0 {
+			data = json.RawMessage(`"z"`)
+		}
+		n := s.lobbies.broadcast(l, p, "lobby/join", map[string]any{
+			"id": l.id, "uid": p.UserID(), "name": p.Name(), "data": data,
 		})
+		s.opt.Log.Printf("master: %s (%s) joined lobby %s, told %d peer(s)",
+			p.Name(), p.UserID(), l.id, n)
+	} else {
+		s.opt.Log.Printf("master: %s (%s) rejoined lobby %s", p.Name(), p.UserID(), l.id)
 	}
 	return info, nil
 }
@@ -288,7 +338,7 @@ func (s *Server) lobbySetData(a lobbyArgs, p Peer) error {
 		l.data[k] = v
 	}
 	s.lobbies.mu.Unlock()
-	l.broadcast(p, "lobby/setData", map[string]any{"id": l.id, "data": data})
+	s.lobbies.broadcast(l, p, "lobby/setData", map[string]any{"id": l.id, "data": data})
 	return nil
 }
 
@@ -304,16 +354,23 @@ func (s *Server) lobbySetUserData(a lobbyArgs, p Peer) error {
 		}
 	}
 	s.lobbies.mu.Unlock()
-	l.broadcast(p, "lobby/setUserData", map[string]any{"id": l.id, "uid": p.UserID(), "data": a.Data})
+	s.lobbies.broadcast(l, p, "lobby/setUserData", map[string]any{"id": l.id, "uid": p.UserID(), "data": a.Data})
 	return nil
 }
 
+// lobbyChat is also the lobby transport: mpman's LobbyService has no socket of
+// its own and tunnels every hxbit packet through lobby/chat as a
+// haxe.Serializer string of LobbyMessageData.Packet(Bytes, targetUid). See
+// decomp/SERVER-CONTRACT.md §7. The fan-out must reach every other member,
+// which then filters on the target uid embedded in the payload.
 func (s *Server) lobbyChat(a lobbyArgs, p Peer) error {
 	l := s.lobbies.get(a.ID)
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
-	l.broadcast(p, "lobby/chat", map[string]any{"id": l.id, "uid": p.UserID(), "msg": a.Msg})
+	n := s.lobbies.broadcast(l, p, "lobby/chat",
+		map[string]any{"id": l.id, "uid": p.UserID(), "msg": a.Msg})
+	s.lobbies.transport(s.opt.Log, l.id, p.UserID(), len(a.Msg), n)
 	return nil
 }
 
@@ -344,7 +401,7 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	if !known {
 		return wireErrf("Unknown user %s", a.UID)
 	}
-	l.broadcast(p, "lobby/transfer", map[string]any{"id": l.id, "uid": a.UID})
+	s.lobbies.broadcast(l, p, "lobby/transfer", map[string]any{"id": l.id, "uid": a.UID})
 	return nil
 }
 
