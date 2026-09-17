@@ -42,8 +42,9 @@ type loginArgs struct {
 
 // adopt records who the local game says it is; the lobby code needs it.
 //
-// The game reports its Steam id here ("S<steamid>"), which we never put back on
-// the wire: see internal/uid. Everything the master emits uses the minted id.
+// The game reports its Steam id here ("S<steamid>"). A lobby on the direct
+// relay never puts it back on the wire (see internal/uid); a lobby on SDR
+// emits exactly it, because the game derives the peer's SteamID from it.
 func adopt(p Peer, a loginArgs) {
 	sess, ok := p.(*session)
 	if !ok {
@@ -53,6 +54,9 @@ func adopt(p Peer, a loginArgs) {
 	defer sess.mu.Unlock()
 	if a.UID != "" {
 		sess.uid = uid.Mint(a.UID)
+		if uid.IsSteam(a.UID) {
+			sess.steam = a.UID // only ever emitted for a lobby on SDR
+		}
 	}
 	if sess.uid == "" {
 		var b [8]byte

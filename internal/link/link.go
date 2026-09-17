@@ -32,8 +32,9 @@ type Envelope struct {
 
 // User identifies the player behind a link.
 type User struct {
-	ID   string `json:"uid"`
-	Name string `json:"name"`
+	ID    string `json:"uid"`
+	Name  string `json:"name"`
+	Steam string `json:"steam,omitempty"` // the real Steam id, for a lobby on SDR
 }
 
 // Handler answers a command forwarded by a guest.
@@ -66,8 +67,11 @@ type Peer struct {
 	pushUID int
 }
 
-// UserID returns the guest's platform id.
+// UserID returns the guest's minted Session id.
 func (p *Peer) UserID() string { return p.user.ID }
+
+// SteamID returns the guest's real Steam id, or "" when it reported none.
+func (p *Peer) SteamID() string { return p.user.Steam }
 
 // Name returns the guest's display name.
 func (p *Peer) Name() string { return p.user.Name }
@@ -103,10 +107,15 @@ func Serve(c net.Conn, h Handler, onClose func(*Peer)) {
 	if err := json.Unmarshal(first.Args, &u); err != nil {
 		return
 	}
-	// The guest announces itself, so its id is not trusted as given: a Steam
-	// shaped id would travel into every LobbyInfo we serve and make the whole
-	// lobby take the client's Steam only path (see internal/uid).
+	// The guest announces itself, so its ids are not trusted as given: the
+	// Session id must be one, or a Steam shaped id would travel into every
+	// direct-relay LobbyInfo we serve and flip the lobby onto the Steam path;
+	// and the Steam id must be well-formed, or an SDR lobby would hand the
+	// host's game something it cannot turn into a SteamID (see internal/uid).
 	u.ID = uid.Ensure(u.ID)
+	if !uid.IsSteam(u.Steam) {
+		u.Steam = ""
+	}
 	peer := &Peer{user: u, out: out}
 	if onClose != nil {
 		defer onClose(peer)

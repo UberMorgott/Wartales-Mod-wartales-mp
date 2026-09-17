@@ -60,6 +60,9 @@ run flags:
   -port N        public TCP port for relay and proxy-link (default 14250)
   -master ADDR   master listen address (default 127.0.0.1:60442)
   -no-watch      keep serving after the game exits
+  -transport M   auto (default), direct or sdr: how lobbies we host carry
+                 the game; auto = direct relay when the public endpoint is
+                 verified reachable, otherwise Steam Datagram Relay
 
 The winmm.dll proxy in the game folder does the rest: it starts this helper and
 hooks the game's name resolution and CA setup from inside the process.

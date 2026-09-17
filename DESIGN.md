@@ -1,6 +1,9 @@
 # wartales-mp — замена сетевого коннекта Wartales
 
-Цель: коннект между игроками идёт напрямую, минуя инфраструктуру Shiro и Steam-релеи.
+Цель: коннект между игроками идёт напрямую, минуя инфраструктуру Shiro, а если у хоста нет
+доступного извне порта — через современный релей Valve (Steam Datagram Relay). Лестница
+транспортов ровно из двух ступеней: **direct → SDR**. Легаси-путь Steam P2P
+(`ISteamNetworking`, тот самый релей, который и ломается) убран по построению.
 Игра не патчится. Байткод (`hlboot.dat`), паки и `steam.hdll` не трогаем.
 
 ## Как игра соединяется сейчас (установлено реверсом, см. ../decomp)
@@ -62,24 +65,76 @@
 Crockford base32, как `UnifiedCode.cs` в PhoenixPoint\Multiplayer2:
 `[flags:1][ipv4:4][port:2]` → 12 символов + 1 контрольный. Алфавит без `I`, `L`, `O`, `U`.
 
-### Идентификаторы игроков: ни одного `S`-uid на проводе
+### Лестница транспортов: direct → SDR
 
-Ловушка: `Lobby.isSteamOnly@24596` возвращает true, если uid КАЖДОГО участника лобби
-начинается с `S` (платформенный символ Steam). Тогда `Lobby.setupPlatform@24597`
-вообще не шлёт `instance/get` — игра уходит на Steam P2P и наш relay оказывается не при делах.
+Переключатель — uid участников лобби. `Lobby.isSteamOnly@24596` возвращает true, если uid
+КАЖДОГО участника начинается с `S` (платформенный символ Steam). Тогда
+`Lobby.setupPlatform@24597` вообще не шлёт `instance/get`: хост отдаёт гостям свой
+`getUser().id` через hxbit-сообщение лобби, и игра идёт по своему Steam-пути
+(`mpman.net.SteamService`, `steam_send_p2p_packet` и т. д.). Любой не-`S` uid в лобби —
+и игра спрашивает `instance/get`, то есть наш relay. Кто рендерит uid, тот и выбирает
+транспорт; выбирает мастер, один раз, при `lobby/create` (`chooseTransport@internal/master/transport.go`):
 
-Поэтому uid игроков выдаёт мастер, а не игра: `internal/uid` детерминированно отображает
-то, что клиент о себе сообщил (`S<steamid>` в `user/login`), в Session-id `X<hex>` —
-первый символ внутри `UserID.PF_CHARS` (`S`, `W`, `R`, `X`, `M`, `L`), конструктор 6.
-Отображение стабильное: тот же игрок получает тот же id при переподключении и на обоих
-концах proxy-link.
+| Ступень | Когда | Что уходит на провод |
+| --- | --- | --- |
+| **direct** (наш relay) | `nat.Endpoint.Reachable` — публичный IPv4 подтверждён (UPnP/STUN) | Session-id `X<hex>` для всех: `uid.Mint` детерминированно отображает `S<steamid>` из `user/login` в `X…`, тот же игрок — тот же id на обоих концах proxy-link |
+| **SDR** (релей Valve) | публичного адреса нет (LAN-only / CGNAT / резолв не удался) | настоящие Steam-id игроков ровно как их сообщила игра (`S` + 16 hex, `UserID.hx:29/113`) — игра выводит из них SteamID64 пира; шим переносит легаси-вызовы на `ISteamNetworkingMessages` |
+| — (отказ) | публичного адреса нет **и** шим уже сообщил, что SDR в этом процессе невозможен | `lobby/create` отвечает `err "Cannot host: no usable transport: …"` с обеими причинами — честный отказ, а не лобби на пути, который не соединится |
 
-Минтится один раз, в `adopt@internal/master/user.go`; дальше всё, что уходит наружу
-(`LobbyInfo.users[].id`, `owner`, пуши `lobby/join`, `lobby/leave`, `lobby/setUserData`,
-`lobby/chat`, `lobby/transfer`, `link/hello`), берёт уже готовый `Peer.UserID()`.
-Uid, пришедший от клиента, не переносится на провод как есть: `lobby/transfer` принимает
-только id существующего участника, а `link.Serve` прогоняет представившегося гостя через
-`uid.Ensure`. Регрессия закрыта тестом `TestEmittedUIDsAreNotSteamShaped`.
+Принудительно: `wartales-mp run -transport direct|sdr` (`sdr` при заведомо неработающем SDR
+всё равно отказ). Решение и причина пишутся в `wartales-mp.log`
+(`lobby L… game transport: SDR (endpoint 192.168.1.5:14250 not internet-reachable: …; SDR ready)`).
+
+Как решение доходит до гостя: гость проксирует все `lobby/*` мастеру хоста, и все id, которые
+видит игра гостя (`lobby/join` → `LobbyInfo.users[].id`, `owner`, пуши), отрендерены мастером
+хоста. Отдельного поля не нужно — вердикт едет внутри id; мастер гостя лишь логирует его по
+`owner` ответа (`joined lobby L…; the host's master chose SDR`). Гость в `link/hello` передаёт
+и минтед-id, и свой Steam-id (`link.User.Steam`); `link.Serve` принимает Steam-id только
+правильной формы (`uid.IsSteam`), иначе гость остаётся на `X`-id — лобби перестаёт быть
+Steam-only, что логируется предупреждением (игра тогда спросит `instance/get`).
+
+Рендер id — `lobby.idOf(peer)`; все места, где id уходит наружу или сравнивается
+(`LobbyInfo`, `owner`, `lobby/join|leave|setUserData|chat|transfer`, `peerGone`, `broadcast`),
+идут через него. Регрессии закрыты тестами `TestEmittedUIDsAreNotSteamShaped` (direct: ни одного
+`S`), `TestSDRLobbyEmitsRealSteamIDs` (SDR: только настоящие `S`),
+`TestSDRLobbyWithoutSteamIDFallsBackToSession`, `TestNoTransportIsRefused`, `TestChooseTransport`.
+
+Ограничение, которое надо понимать: код подключения и лобби-фаза (`proxy-link`, `lobby/chat`
+через мастер хоста) по-прежнему идут на публичный порт хоста. SDR несёт только игровую фазу.
+Хост без доступного порта не примет гостя из интернета даже на SDR — сигналинг не доедет;
+на LAN обе ступени работают. Это границы текущего дизайна, не кода.
+
+### SDR в шиме: легаси-нативы переведены на `ISteamNetworkingMessages`
+
+`steam.hdll` (hlsteam) реализует Steam-транспорт игры на **устаревшем** `ISteamNetworking`
+(`SteamNetworking006`): `steam_send_p2p_packet`, `steam_read_p2p_packet`,
+`steam_is_p2p_packet_available`, `steam_accept_p2p_session`, `steam_close_p2p_session`,
+`steam_get_p2p_session_data`. Байткод резолвит их через `hlp_<name>(&sign)`, который
+возвращает адрес тела функции; шим (`shim/proxy/sdr.c`) хукает ровно этот адрес через MinHook
+(проверено: он совпадает с экспортом `steam_<name>`) и НИКОГДА не вызывает оригинал —
+трамплин не используется. Реализация поверх flat-API `steam_api64.dll` (все экспорты
+проверены в поставляемой DLL, у которой SmokeAPI форвардит их в `steam_api64_o.dll`):
+
+| Легаси-натив | SDR |
+| --- | --- |
+| `send_p2p_packet(uid, data, len, type, ch)` | `SendMessageToUser(identity(SteamID64 из 8 байт uid), data, len, flags, ch)`; `type` 0→`Unreliable`, 1→`Unreliable\|NoDelay\|NoNagle`, 2→`Reliable\|NoNagle`, 3→`Reliable`; всегда `+AutoRestartBrokenSession`; `true` ⇔ `k_EResultOK` |
+| `is_p2p_packet_available(&size, ch)` | докачивает `ReceiveMessagesOnChannel(ch)` в свою FIFO канала и сообщает размер ГОЛОВЫ очереди |
+| `read_p2p_packet(buf, max, &len, ch)` | снимает голову очереди, копирует `min(size, max)` (усечение как в `ReadP2PPacket`, хвост пропадает вместе с пакетом), `len` = скопировано, возвращает SteamID64 отправителя как свежие 8 байт (`hl_copy_bytes`), `Release` сообщения |
+| `accept_p2p_session` / `close_p2p_session` | `AcceptSessionWithUser` / `CloseSessionWithUser`; close ещё выкидывает из очередей всё от этого пира |
+| `get_p2p_session_data` | `null` («сессии нет»); игра его не вызывает |
+
+Входящие сессии: игра принимает их по легаси-колбэку `P2PSessionRequest_t`, который у нового
+интерфейса не бывает, — поэтому шим регистрирует
+`SetGlobalCallback_MessagesSessionRequest` и принимает сам (и логирует
+`MessagesSessionFailed`). `InitRelayNetworkAccess` вызывается заранее: отдельный поток ждёт
+`SteamAPI_GetHSteamUser() != 0` и инициализирует транспорт до первого пакета.
+
+Fail closed, без отката: нет `steam_api64.dll`, нет экспорта, `SteamNetworkingMessages002`
+не отдался — нативы ведут себя как транспорт, который не соединяется (send → false, available →
+false, read → null), причина — в `shim.log` (`sdr: UNAVAILABLE, transport disabled: …`) и в
+`%LOCALAPPDATA%\wartales-mp\sdr.status` (`ok` / `pending <why>` / `unavailable <why>`), который
+мастер читает при каждом `lobby/create`. Игра показывает ошибку соединения, а не тихо едет на
+старом релее. Доказательство без Steam — `shim\check.ps1` (см. ниже).
 
 ## Установка: ровно один новый файл в папке игры
 
@@ -113,17 +168,18 @@ Windows ищет неизвестную (не-KnownDLL) библиотеку в 
 | форвардинг | все именованные экспорты уходят в настоящую `System32\winmm.dll` (грузим по полному пути через `GetSystemDirectoryW`+`LoadLibraryW`, не по голому имени — иначе рекурсия в себя). Строку-форвардер PE использовать нельзя (она не может называть собственный модуль), поэтому `tools/gendef` из таблицы экспорта настоящей `winmm.dll` генерирует по тонкому thunk'у на экспорт: `jmp` через указатель, который заполняется `GetProcAddress` при загрузке |
 | `hl_host_resolve` (`libhl.dll`) | `master*.shirogames.com` → `127.0.0.1` (`0x0100007F`), остальное — насквозь |
 | `ssl_conf_set_ca` (`ssl.hdll`) | наш локальный CA добавляется в цепочку через оригинальный `ssl_cert_add_pem`, дальше вызов идёт насквозь; проверку сертификата НЕ отключаем |
+| шесть P2P-нативов `steam.hdll` | переведены на `ISteamNetworkingMessages` (SDR), см. выше; оригиналы не вызываются никогда |
 | `CreateFileW`/`CreateFileA` (`kernelbase.dll`) | открытие `hlboot.dat` на чтение подменяется на `%LOCALAPPDATA%\wartales-mp\hlboot.dat` — копию оригинала с 2 патченными байтами (файл в папке игры не трогаем). Копия при каждом открытии сверяется побайтно с «оригинал + патч» и перегенерируется, если отличается или отсутствует; если сигнатура в оригинале не нашлась ровно один раз (обновление игры) — игре отдаётся её собственный файл. Таблица — `internal/hlpatch`, генерится в `shim/proxy/hlpatch.h`. Обе сигнатуры — проверка таймаута клиента в `hxbit.NetworkHost.flush@3969`; после патча сравнение `clientTimeout !< clientTimeout` всегда истинно, и `c.timeout()` не вызывается никогда. Без этого игра падает `Null access` (`mpman/net/Client.hx:13`) примерно через минуту простоя в лобби: путь таймаута в этой сборке фатален для любой роли (см. `decomp/SERVER-CONTRACT.md` §7.3–7.4) |
-| лог | `%LOCALAPPDATA%\wartales-mp\shim.log`: attach, каждый хук (адрес или причина отказа), каждое открытие байткода (путь, размер, fnv1a, смещения патчей, копия reused/written/fallback), запуск ядра. Каждая строка — свой open/append/close |
+| лог | `%LOCALAPPDATA%\wartales-mp\shim.log`: attach, каждый хук (адрес или причина отказа), каждое открытие байткода (путь, размер, fnv1a, смещения патчей, копия reused/written/fallback), запуск ядра, состояние SDR (READY / причина отказа, первый пакет, сессии, счётчики при close). Каждая строка — свой open/append/close |
 | запуск ядра | извлекает вшитый `wartales-mp.exe` в `%LOCALAPPDATA%\wartales-mp\` (только если файла нет или сборка отличается по хэшу) и стартует его скрыто; тот сам следит за PID игры и выходит вместе с ней |
 
 Байткод резолвит нативы через указатели `hlp_<name>` при загрузке модуля, а не через IAT,
 поэтому патч IAT эти две функции не поймал бы — нужен инлайн-хук по телу функции. Хуки ставит
 MinHook (BSD-2, вендорится в `shim/minhook`): `MH_CreateHook` даёт трамплин для вызова оригинала.
-`libhl.dll` уже отображена — её хук ставится сразу; `ssl.hdll` грузится лениво, поэтому фоновый
-поток ждёт её появления опросом `GetModuleHandleW` (а не хукает нагруженный `LoadLibraryExW` под
-loader lock) — `conf_set_ca` вызывается один раз и поздно, при первой настройке TLS, так что опрос
-успевает с запасом. Хук `CreateFileW` — исключение: `hlboot.dat` открывается из `main()` игры до
+`libhl.dll` уже отображена — её хук ставится сразу; `ssl.hdll` и `steam.hdll` грузятся лениво,
+поэтому фоновый поток ждёт их появления опросом `GetModuleHandleW` (а не хукает нагруженный
+`LoadLibraryExW` под loader lock) — `conf_set_ca` вызывается один раз и поздно, при первой
+настройке TLS, а P2P-нативы — только при старте игры из лобби, так что опрос успевает с запасом. Хук `CreateFileW` — исключение: `hlboot.dat` открывается из `main()` игры до
 того, как успеет стартовать фоновый поток, поэтому он ставится прямо из `DllMain` (только
 `kernelbase`, она отображена и инициализирована задолго до нас). Именно `kernelbase`, а не
 `kernel32`: загрузчик HashLink (`src/main.c`, `load_code`) читает файл через `_wfopen`+`fread` из
@@ -132,7 +188,16 @@ loader lock) — `conf_set_ca` вызывается один раз и позд�
 поэтому никогда не срабатывала). Заглушки `kernel32` сами прыгают в `kernelbase`, так что хук
 там ловит всех. Проверка без запуска игры: `shim\check.ps1` грузит собранную `winmm.dll` в
 тестовый процесс, открывает настоящий `hlboot.dat` через `_wfopen`/`fread` и `CreateFileW`/`ReadFile`
-и сверяет результат с ожидаемым образом.
+и сверяет результат с ожидаемым образом. Она же доказывает SDR-транспорт без Steam: в процесс
+заранее грузятся три подделки из `shim/check` — `libhl.dll` (только `hl_copy_bytes`),
+`steam.hdll` (легаси-нативы с настоящими `hlp_`-резолверами, каждый вызов считается — счётчик
+обязан остаться 0) и, в режиме `sdr`, `steam_api64.dll` (in-process loopback
+`ISteamNetworkingMessages`: отправленное пиру X ставится в очередь как пришедшее от X). Нативы
+вызываются через `hlp_<name>`, как это делает байткод, и проверяются: флаги по типу отправки,
+границы пакетов, усечение, независимые очереди каналов, SteamID отправителя, автоприём сессии,
+close выкидывает очередь пира, каждое сообщение отпущено `Release`. Режим `nosdr` (без
+`steam_api64.dll` вообще) проверяет fail closed: send false, available false, read null, причина
+в `shim.log` и `sdr.status`, легаси по-прежнему не вызван.
 
 ### Сборка
 
@@ -145,7 +210,7 @@ loader lock) — `conf_set_ca` вызывается один раз и позд�
 | `hlpatchgen` читает `internal/hlpatch` | `shim/proxy/hlpatch.h` (таблица байт-патчей) |
 | `go build` | `wartales-mp.exe` — финальное ядро |
 | `objcopy -I binary -O pe-x86-64` оборачивает exe | `embed.o` — линкуемый блоб |
-| `gcc -shared` линкует `proxy.c` + thunk'и + MinHook + `embed.o` + `.def` | `winmm.dll` |
+| `gcc -shared` линкует `proxy.c` + `sdr.c` + thunk'и + MinHook + `embed.o` + `.def` | `winmm.dll` |
 
 Единственный файл для папки игры — `dist\winmm.dll`. Обновление игры в Steam его не тронет
 (это новый файл, а не подмена); чтобы выключить мод, файл просто удаляют — игра возвращается
@@ -153,12 +218,16 @@ loader lock) — `conf_set_ca` вызывается один раз и позд�
 
 Для игрока: копирует `winmm.dll` в папку игры, жмёт «Играть» в Steam как обычно, создаёт лобби
 в ванильном интерфейсе, игра показывает код, код кидается другу — тот вводит его в игре и
-подключается. Steam-путь остаётся на месте как запасной.
+подключается. Запасного пути на старом Steam-релее нет: либо direct, либо SDR.
 
 ## Границы применимости
 
-Транспорт игры — TCP, поэтому UDP hole punch неприменим. Если у хоста CGNAT и UPnP выключен,
-прямое соединение не построится — это ограничение NAT, не кода. Гостю проброс не нужен.
+Транспорт игры на direct — TCP, поэтому UDP hole punch неприменим. Если у хоста CGNAT и UPnP
+выключен, прямое соединение не построится — мастер выберет SDR для игровой фазы, но код
+подключения и лобби-фаза всё равно идут на порт хоста (см. «Лестница транспортов»), так что из
+интернета такой хост недостижим и на SDR; на LAN — работает. Гостю проброс не нужен.
+Сквозной SDR-сеанс двух игроков со Steam ещё не прогонялся: проверены семантика нативов на
+loopback-подделке и выбор транспорта, а не живой релей Valve.
 
 ## Контракт мастера
 

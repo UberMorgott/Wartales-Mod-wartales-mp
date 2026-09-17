@@ -18,7 +18,7 @@
 //     fill here with GetProcAddress against the System32 copy loaded by its
 //     full path -- never a bare "winmm.dll", which would find us and recurse.
 //
-//  2. Hooks two HashLink natives with inline trampolines (MinHook, BSD-2). The
+//  2. Hooks HashLink natives with inline trampolines (MinHook, BSD-2). The
 //     bytecode resolves natives through hlp_<name> pointers at module load, not
 //     through the IAT, so IAT patching would miss them; only an inline hook on
 //     the function body catches every call:
@@ -29,6 +29,10 @@
 //     the loader lock, a background thread polls for the module and hooks it the
 //     moment it appears -- conf_set_ca is called once, late (first TLS setup),
 //     long after ssl.hdll loads, so the poll wins the race comfortably.
+//       - the six legacy Steam P2P natives of steam.hdll (send/read/
+//         is_available/accept/close/session_data): diverted for good onto
+//         ISteamNetworkingMessages (Steam Datagram Relay), see sdr.c. The
+//         legacy ISteamNetworking relay never carries traffic again.
 //
 //  3. Hands the game a patched copy of its HashLink bytecode. CreateFileW in
 //     kernelbase.dll is hooked; an open of hlboot.dat is answered with a handle
@@ -61,6 +65,7 @@
 
 #include "MinHook.h"
 #include "hlpatch.h"
+#include "shim.h"
 
 // ---------------------------------------------------------------------------
 // Diagnostics: %LOCALAPPDATA%\wartales-mp\shim.log.
@@ -82,7 +87,7 @@ static HANDLE open_raw(const wchar_t *path, DWORD access, DWORD share, DWORD dis
 }
 
 // helper_path builds %LOCALAPPDATA%\wartales-mp and appends tail (may be empty).
-static BOOL helper_path(const wchar_t *tail, wchar_t *out, DWORD cch) {
+BOOL helper_path(const wchar_t *tail, wchar_t *out, DWORD cch) {
 	DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", out, cch);
 	if (n == 0 || n >= cch)
 		return FALSE;
@@ -98,7 +103,7 @@ static BOOL helper_path(const wchar_t *tail, wchar_t *out, DWORD cch) {
 static wchar_t log_path[MAX_PATH * 2];
 static BOOL log_ready;
 
-static void shim_log(const char *fmt, ...) {
+void shim_log(const char *fmt, ...) {
 	char line[1024];
 	int n;
 	va_list ap;
@@ -327,8 +332,6 @@ static void detour_conf_set_ca(void *conf, hl_ssl_cert *cert) {
 // every signature exactly once the game gets its own file. Nothing in the game
 // folder is written, and a broken copy is impossible to hand out.
 // ---------------------------------------------------------------------------
-
-static BOOL hook_one(const char *name, void *proc, void *detour, void **orig); // defined below
 
 // HL_MAX_IMAGE bounds what we are willing to hold in memory (hlboot.dat is 19 MB).
 #define HL_MAX_IMAGE (256u * 1024u * 1024u)
@@ -771,7 +774,7 @@ static void start_helper(void) {
 
 // hook_one creates and enables an inline hook on proc, returning the trampoline
 // (the callable original) in *orig.
-static BOOL hook_one(const char *name, void *proc, void *detour, void **orig) {
+BOOL hook_one(const char *name, void *proc, void *detour, void **orig) {
 	MH_STATUS st;
 	if (proc == NULL) {
 		shim_log("hook %s: symbol not found", name);
@@ -791,9 +794,16 @@ static BOOL hook_one(const char *name, void *proc, void *detour, void **orig) {
 	return TRUE;
 }
 
+static DWORD WINAPI sdr_warm_up_thread(LPVOID unused) {
+	(void)unused;
+	sdr_warm_up();
+	return 0;
+}
+
 static DWORD WINAPI worker(LPVOID unused) {
 	HMODULE libhl;
 	HMODULE ssl;
+	HMODULE steam;
 	int tries;
 
 	MH_STATUS st;
@@ -817,21 +827,44 @@ static DWORD WINAPI worker(LPVOID unused) {
 		shim_log("hook libhl!hl_host_resolve: libhl.dll not loaded");
 	}
 
-	// ssl.hdll is loaded lazily on first TLS use; poll until it appears. Up to
-	// ~10 minutes at 200ms; conf_set_ca fires long after the module loads.
-	for (tries = 0; tries < 3000; tries++) {
-		ssl = GetModuleHandleW(L"ssl.hdll");
-		if (ssl != NULL) {
-			void *p = (void *)GetProcAddress(ssl, "ssl_conf_set_ca");
-			real_cert_add_pem = (cert_add_pem_fn)(void *)GetProcAddress(ssl, "ssl_cert_add_pem");
-			if (real_cert_add_pem == NULL)
-				shim_log("hook ssl!ssl_conf_set_ca: ssl_cert_add_pem not found, CA cannot be added");
-			hook_one("ssl!ssl_conf_set_ca", p, (void *)detour_conf_set_ca, (void **)&real_conf_set_ca);
-			return 0;
+	// ssl.hdll and steam.hdll are loaded lazily by the HashLink module loader;
+	// poll until each appears. Up to ~10 minutes at 200ms; conf_set_ca fires
+	// long after ssl.hdll loads, and the P2P natives are first called only
+	// once a lobby starts a game, so the poll wins both races comfortably.
+	ssl = NULL;
+	steam = NULL;
+	for (tries = 0; tries < 3000 && (ssl == NULL || steam == NULL); tries++) {
+		if (ssl == NULL) {
+			ssl = GetModuleHandleW(L"ssl.hdll");
+			if (ssl != NULL) {
+				void *p = (void *)GetProcAddress(ssl, "ssl_conf_set_ca");
+				real_cert_add_pem = (cert_add_pem_fn)(void *)GetProcAddress(ssl, "ssl_cert_add_pem");
+				if (real_cert_add_pem == NULL)
+					shim_log("hook ssl!ssl_conf_set_ca: ssl_cert_add_pem not found, CA cannot be added");
+				hook_one("ssl!ssl_conf_set_ca", p, (void *)detour_conf_set_ca, (void **)&real_conf_set_ca);
+			}
 		}
-		Sleep(200);
+		if (steam == NULL) {
+			steam = GetModuleHandleW(L"steam.hdll");
+			if (steam != NULL) {
+				HANDLE t;
+				sdr_hook_steam(steam, libhl);
+				// Request relay access as soon as the Steam API is up; that
+				// wait must not hold the ssl.hdll poll back.
+				t = CreateThread(NULL, 0, sdr_warm_up_thread, NULL, 0, NULL);
+				if (t != NULL)
+					CloseHandle(t);
+				else
+					shim_log("sdr: CreateThread(warm-up) failed (%lu)", (unsigned long)GetLastError());
+			}
+		}
+		if (ssl == NULL || steam == NULL)
+			Sleep(200);
 	}
-	shim_log("hook ssl!ssl_conf_set_ca: ssl.hdll never loaded, gave up");
+	if (ssl == NULL)
+		shim_log("hook ssl!ssl_conf_set_ca: ssl.hdll never loaded, gave up");
+	if (steam == NULL)
+		shim_log("sdr: steam.hdll never loaded, gave up (no Steam transport in this build?)");
 	return 0;
 }
 
@@ -844,6 +877,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 		shim_log("attach: winmm.dll proxy loaded");
 		bind_forwards();      // before anything can call a forwarded export
 		hook_bytecode_open(); // before the game's entry point opens hlboot.dat
+		sdr_reset_status();   // a stale verdict from the last run must not be read
 		t = CreateThread(NULL, 0, worker, NULL, 0, NULL);
 		if (t != NULL)
 			CloseHandle(t);

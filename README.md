@@ -9,8 +9,18 @@ and the session is unusable. The game itself is fine — the meeting place is no
 
 wartales-mp replaces the rendezvous with a local one. The game talks to a master
 server running on `127.0.0.1` instead of Shiro's, and that master tells the game
-to connect straight to the other player's machine. Neither Shiro's
-infrastructure nor Valve's relays are in the path.
+how to connect. There are exactly two ways, tried in this order:
+
+1. **Direct** — straight to the host's machine, when the host has a verified
+   public address. Neither Shiro's infrastructure nor any relay is in the path.
+2. **SDR** — Valve's modern relay network (Steam Datagram Relay) through
+   `ISteamNetworkingMessages`, when the host has no reachable address.
+
+The game's own legacy Steam P2P path (`ISteamNetworking`, the old relay that
+is the one that fails) has been removed: the mod diverts those calls for good
+and never lets them carry traffic, not even as a fallback. If SDR is not
+available either, hosting fails with the reasons instead of quietly running on
+the old relay.
 
 ## Status
 
@@ -55,16 +65,21 @@ one of theirs), and it will not break the game if it does not fit any more.
 - **Host:** needs a public address and one open inbound TCP port (`14250` by
   default). The mod tries UPnP automatically, and falls back to STUN
   (`stun.l.google.com:19302`) to learn the external address. If UPnP is off on
-  the router the port has to be forwarded by hand. Behind CGNAT a direct
-  connection cannot be built at all — that is a NAT limit, not something the mod
-  can work around. The game's transport is TCP, so UDP hole punching does not
-  apply.
+  the router the port has to be forwarded by hand. The direct transport is TCP,
+  so UDP hole punching does not apply.
 - **Guest:** needs nothing. No port, no forwarding, no configuration. Enter the
   join code the host gives you.
 
-If the mod cannot confirm that the address it found is reachable from the
-internet, it says so in the log rather than handing out a code that quietly does
-not work.
+The transport is chosen per lobby, when it is created, and logged with the
+reason: a verified public address means direct; otherwise SDR, and the lobby's
+player ids are then the players' real Steam ids so that the game takes its
+Steam path — which the mod carries over SDR. `wartales-mp run -transport
+direct|sdr` forces one.
+
+One limit to know about: the join code and the lobby phase still travel to the
+host's port (the guest's game commands are proxied to the host's master over
+it). SDR carries the game phase only. A host with no reachable port cannot be
+joined from the internet even on SDR; on a LAN both transports work.
 
 ## Logs
 
@@ -73,7 +88,11 @@ Two files, both under `%LOCALAPPDATA%\wartales-mp\`:
 | File | What is in it |
 | --- | --- |
 | `wartales-mp.log` | the helper: connections, every master command with its arguments and reply, relay counters, NAT discovery, errors |
-| `shim.log` | the in-game part: DLL attach, each hook (address or why it failed), each bytecode open with its size and hash, helper startup |
+| `shim.log` | the in-game part: DLL attach, each hook (address or why it failed), each bytecode open with its size and hash, helper startup, the SDR transport (ready, or exactly why not; first packet, sessions, counters) |
+
+A third, one-line file `sdr.status` (`ok`, `pending <why>` or
+`unavailable <why>`) is the shim's verdict on SDR; the helper reads it before
+choosing a lobby's transport.
 
 The previous run of `wartales-mp.log` is kept as `wartales-mp.log.1`. Nothing is
 sampled and nothing leaves the machine — this is a debugging aid, not telemetry.
@@ -95,12 +114,28 @@ Verified — a single-machine run:
 - a join code is issued and decodes to the host's public endpoint,
 - the stock 60 s lobby crash no longer fires.
 
+Verified without Steam — `shim\check.ps1` loads the DLL into a test process
+with stand-in `steam.hdll` / `steam_api64.dll` libraries:
+
+- all six legacy P2P natives are diverted and their original bodies are never
+  called,
+- packet semantics over the loopback `ISteamNetworkingMessages`: reliability
+  flags per send type, packet boundaries, truncation, per-channel queues, the
+  sender's Steam id, automatic session acceptance, close dropping a peer's
+  queue,
+- with no `steam_api64.dll` at all the shim fails closed and says why.
+
 Not yet verified:
 
 - **an actual second player joining by code.** No end-to-end session has ever
-  been run. The guest path — resolving a code, the proxy-link to the host's
-  master, the guest's game connecting to the host's relay — is implemented and
-  unit-tested, but it has never carried a real second player.
+  been run, on either transport. The guest path — resolving a code, the
+  proxy-link to the host's master, the guest's game connecting to the host's
+  relay — is implemented and unit-tested, but it has never carried a real
+  second player.
+- **SDR against Valve's real relay.** The shim's transport is proven against a
+  loopback stand-in, not against a running Steam client; whether the real
+  `SteamNetworkingMessages002` accepts sessions and delivers between two
+  accounts has not been observed.
 
 Treat the two-player path as untested. Reports with both log files are useful.
 
@@ -112,7 +147,7 @@ with a `serverID`; the first character of that string selects the transport.
 Whoever controls the master therefore controls how players connect, and the game
 needs no patch for it.
 
-`winmm.dll` is loaded by the game at startup and does four things:
+`winmm.dll` is loaded by the game at startup and does five things:
 
 1. **Forwards every call through.** Every export is forwarded to the real
    `System32\winmm.dll`, so the game's audio behaves exactly as before.
@@ -128,6 +163,14 @@ needs no patch for it.
    ends in a `Null access` crash. Two bytes turn the timeout comparison into one
    that is never true, so the crash cannot fire. The patch is applied to a copy
    under `%LOCALAPPDATA%`, never to the file in the game folder.
+5. **Moves the game's Steam transport onto SDR.** The game's Steam path is
+   built on the deprecated `ISteamNetworking` P2P calls in `steam.hdll`. The
+   mod hooks those six calls and re-implements them on
+   `ISteamNetworkingMessages` through `steam_api64.dll`, keeping the exact
+   semantics the game relies on (per-channel queues, reliability per send type,
+   packet boundaries and truncation, the sender's Steam id). The old
+   implementations are never called. If SDR cannot be set up, the calls fail
+   visibly and `shim.log` says why.
 
 It then starts the helper, `wartales-mp.exe` (embedded in the DLL, extracted to
 `%LOCALAPPDATA%\wartales-mp\`), hidden. The helper watches the game's process
@@ -143,9 +186,13 @@ The host's lobby state is authoritative. When the host asks for a join code, the
 helper discovers the public endpoint (UPnP, then STUN) and encodes `ip:port` into
 a short Crockford-base32 code. A guest entering that code decodes it, opens a
 proxy-link to the host's master, and from then on both games see one lobby. The
-guest's game then connects to the host's relay directly.
+guest's game then connects to the host's relay directly (direct transport) or,
+when the host's master decided on SDR, both games take their Steam path and the
+shim carries it over Valve's relay network. The decision travels inside the
+player ids the host's master renders, so the guest's helper cannot disagree.
 
-Game traffic goes guest to host machine, and nowhere else.
+On the direct transport, game traffic goes guest to host machine, and nowhere
+else.
 
 The full design is in [DESIGN.md](DESIGN.md) (Russian).
 
@@ -160,7 +207,10 @@ Windows, with `go`, `gcc` and `objcopy` on `PATH`:
 
 `check.ps1` loads the built DLL into a test process, opens the real
 `hlboot.dat` through it and compares the result against the expected patched
-image, so the bytecode path can be checked without the game running.
+image, so the bytecode path can be checked without the game running. It then
+exercises the SDR transport twice: with a loopback stand-in `steam_api64.dll`
+(packet semantics end to end) and without one (fail closed). The game folder
+is only ever read.
 
 ## Licence
 

@@ -17,13 +17,18 @@ import (
 
 	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/link"
+	"github.com/UberMorgott/wartales-mp/internal/nat"
 	"github.com/UberMorgott/wartales-mp/internal/wsx"
 )
 
 // Peer is whoever issued a command: the local game, or a guest behind a
 // proxy-link.
 type Peer interface {
+	// UserID is the minted Session ('X') id: what a direct-relay lobby emits.
 	UserID() string
+	// SteamID is the real Steam id the player's game reported, or "" when it
+	// reported none (or one that is not well-formed). An SDR lobby emits it.
+	SteamID() string
 	Name() string
 	Remote() bool
 	Push(cmd string, args any)
@@ -41,6 +46,15 @@ type Options struct {
 	// PublicAddr returns the "ip:port" other players must reach us on. It is
 	// used for guests' serverID and for short codes.
 	PublicAddr func() (string, error)
+
+	// Transport is ModeAuto, ModeDirect or ModeSDR ("" = auto).
+	Transport string
+	// Endpoint returns the full public endpoint verdict, for the transport
+	// choice. nil means "unknown".
+	Endpoint func() (nat.Endpoint, error)
+	// SDRStatus returns the shim's verdict on the SDR transport. nil means
+	// "unknown".
+	SDRStatus func() SDRStatus
 }
 
 // Server is the master.
@@ -143,17 +157,19 @@ func (s *Server) ServeLink(c net.Conn) {
 
 // session is the local game's master connection.
 type session struct {
-	srv  *Server
-	ws   *wsx.Conn
-	mu   sync.Mutex
-	uid  string
-	name string
-	push int
+	srv   *Server
+	ws    *wsx.Conn
+	mu    sync.Mutex
+	uid   string
+	steam string
+	name  string
+	push  int
 }
 
-func (p *session) UserID() string { return p.uid }
-func (p *session) Name() string   { return p.name }
-func (p *session) Remote() bool   { return false }
+func (p *session) UserID() string  { return p.uid }
+func (p *session) SteamID() string { return p.steam }
+func (p *session) Name() string    { return p.name }
+func (p *session) Remote() bool    { return false }
 
 // Push sends a server initiated command, per SERVER-CONTRACT §3.9.
 func (p *session) Push(cmd string, args any) {

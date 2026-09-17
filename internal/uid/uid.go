@@ -3,8 +3,12 @@
 // The client refuses to ask the master for a transport when every member of a
 // lobby looks like a Steam account: Lobby.isSteamOnly@24596 returns true when
 // each member id starts with 'S', and Lobby.setupPlatform@24597 then skips
-// instance/get and falls back to Steam P2P, bypassing our relay. So no id we
-// emit may start with 'S'; we hand out Session ids ('X') instead.
+// instance/get and takes the game's Steam path, bypassing our relay. That
+// switch is the master's to throw: a lobby on the direct relay gets Session
+// ids ('X') for every member, a lobby on SDR gets the players' real Steam ids
+// (which the shim then carries over ISteamNetworkingMessages). An id that
+// merely looks like Steam but is not one is never emitted: the game would
+// derive a bogus SteamID from it.
 package uid
 
 import (
@@ -35,6 +39,26 @@ func Mint(raw string) string {
 // IsSession reports whether id already has the shape Mint produces.
 func IsSession(id string) bool {
 	return len(id) >= minLen && id[0] == Session
+}
+
+// steamLen is the length of a Steam id as mpman.UserID.fromPlatform builds it:
+// 'S' followed by 8 bytes in hex (the SteamID64 with its high dword xor'ed
+// with 0x1100001, see UserID.hx:29/113).
+const steamLen = 1 + 16
+
+// IsSteam reports whether id is a well-formed Steam id the game can turn back
+// into a SteamID64. Only such an id may be put on the wire when a lobby runs
+// over SDR: the game derives the peer's SteamID from it.
+func IsSteam(id string) bool {
+	if len(id) != steamLen || id[0] != 'S' {
+		return false
+	}
+	for _, c := range id[1:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // Ensure returns id when it is already a Session id and a minted one otherwise.

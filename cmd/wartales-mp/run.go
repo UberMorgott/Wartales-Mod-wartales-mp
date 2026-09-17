@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -23,8 +24,14 @@ func runCmd(args []string) error {
 	port := fs.Int("port", 14250, "public TCP port for the relay and the proxy-link")
 	masterAddr := fs.String("master", "127.0.0.1:60442", "master listen address")
 	noWatch := fs.Bool("no-watch", false, "keep serving after the game exits")
+	transport := fs.String("transport", master.ModeAuto, "game transport for lobbies we host: auto, direct or sdr")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	switch *transport {
+	case master.ModeAuto, master.ModeDirect, master.ModeSDR:
+	default:
+		return fmt.Errorf("-transport must be auto, direct or sdr, not %q", *transport)
 	}
 
 	logger, closeLog := applog.Open(os.Stdout)
@@ -67,7 +74,15 @@ func runCmd(args []string) error {
 		SlavePW:    rl.SlavePW,
 		Log:        logger,
 		PublicAddr: mapper.Addr,
+		Transport:  *transport,
+		Endpoint:   mapper.Endpoint,
+		// The shim's verdict on SDR lives next to our log; it is re-read at
+		// every lobby creation because the Steam API may come up after us.
+		SDRStatus: func() master.SDRStatus {
+			return master.ReadSDRStatus(filepath.Join(applog.Dir(), "sdr.status"))
+		},
 	})
+	logger.Printf("transport mode %s (direct relay when the public endpoint is verified, else SDR)", *transport)
 	defer ms.Close()
 
 	errs := make(chan error, 2)

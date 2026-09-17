@@ -14,7 +14,19 @@
 // directory before the DLL loads, so the real one is untouched, and the
 // helper-exe mutex is taken first so the proxy does not start wartales-mp.exe.
 //
-//   shimcheck.exe <winmm.dll> <hlboot.dat> <scratch LOCALAPPDATA>
+// It then proves the SDR transport without a Steam client. Three stand-ins
+// are loaded from <fake dir> before the proxy: libhl.dll (hl_copy_bytes),
+// steam.hdll (the legacy natives, which count every call and must stay at
+// zero) and, in "sdr" mode, steam_api64.dll (a loopback ISteamNetworkingMessages).
+// The natives are then called through their hlp_ resolvers exactly as the
+// bytecode would, and the packet semantics are asserted: reliability flags
+// per send type, packet boundaries, truncation, per-channel queues, the
+// sender's SteamID, automatic session acceptance, close dropping the peer's
+// queue. In "nosdr" mode there is no steam_api64.dll at all and the shim must
+// fail closed: send false, nothing available, read null, reason in the log
+// and in sdr.status, and still no legacy call.
+//
+//   shimcheck.exe <winmm.dll> <hlboot.dat> <scratch LOCALAPPDATA> <fake dir> sdr|nosdr
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -26,6 +38,7 @@
 #include <string.h>
 
 #include "../proxy/hlpatch.h"
+#include "fake_steam.h"
 
 static int failures;
 
@@ -184,6 +197,212 @@ static int log_contains(const wchar_t *log, const char *needle) {
 	return ok;
 }
 
+// wait_log polls the log for needle for up to ms milliseconds.
+static int wait_log(const wchar_t *log, const char *needle, DWORD ms) {
+	DWORD start = GetTickCount();
+	for (;;) {
+		if (log_contains(log, needle))
+			return 1;
+		if (GetTickCount() - start > ms)
+			return 0;
+		Sleep(50);
+	}
+}
+
+static int file_starts_with(const wchar_t *path, const char *prefix) {
+	size_t n;
+	unsigned char *b = read_raw(path, &n);
+	int ok;
+	if (b == NULL)
+		return 0;
+	b[n] = 0;
+	ok = strncmp((char *)b, prefix, strlen(prefix)) == 0;
+	free(b);
+	return ok;
+}
+
+// ---------------------------------------------------------------- SDR check
+
+// hlsteam's native signatures (native/networking.cpp).
+typedef unsigned char *vuid;
+typedef unsigned char (*send_fn)(vuid, unsigned char *, int, int, int);
+typedef vuid (*read_fn)(unsigned char *, int, uint32_t *, int);
+typedef unsigned char (*avail_fn)(uint32_t *, int);
+typedef unsigned char (*session_fn)(vuid);
+typedef void *(*session_data_fn)(vuid);
+typedef void *(*hlp_fn)(const char **sign);
+typedef void (*stats_fn)(fake_stats_t *);
+typedef void (*inject_fn)(uint64_t, int, const void *, int);
+typedef int (*fire_fn)(uint64_t);
+typedef long (*legacy_fn)(void);
+
+static HMODULE load_fake(const wchar_t *dir, const wchar_t *name) {
+	wchar_t path[MAX_PATH * 2];
+	HMODULE m;
+	wcscpy(path, dir);
+	wcscat(path, L"\\");
+	wcscat(path, name);
+	m = LoadLibraryW(path);
+	printf("      %ls -> %p\n", path, (void *)m);
+	return m;
+}
+
+// resolve goes through hlp_<name>, the way the HashLink module loader does.
+static void *resolve(HMODULE steam, const char *name) {
+	char hlp[64];
+	const char *sign = NULL;
+	hlp_fn f;
+	strcpy(hlp, "hlp_");
+	strcat(hlp, name);
+	f = (hlp_fn)(void *)GetProcAddress(steam, hlp);
+	return f != NULL ? f(&sign) : NULL;
+}
+
+static void put_uid(unsigned char *out, uint64_t id) { memcpy(out, &id, 8); }
+static uint64_t get_uid(const unsigned char *in) {
+	uint64_t id = 0;
+	if (in != NULL)
+		memcpy(&id, in, 8);
+	return id;
+}
+
+static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *log, const wchar_t *scratch) {
+	send_fn send = (send_fn)resolve(steam, "send_p2p_packet");
+	read_fn read = (read_fn)resolve(steam, "read_p2p_packet");
+	avail_fn avail = (avail_fn)resolve(steam, "is_p2p_packet_available");
+	session_fn accept = (session_fn)resolve(steam, "accept_p2p_session");
+	session_fn close = (session_fn)resolve(steam, "close_p2p_session");
+	session_data_fn sdata = (session_data_fn)resolve(steam, "get_p2p_session_data");
+	legacy_fn legacy = (legacy_fn)(void *)GetProcAddress(steam, "fake_legacy_calls");
+	stats_fn stats = api != NULL ? (stats_fn)(void *)GetProcAddress(api, "fake_stats") : NULL;
+	inject_fn inject = api != NULL ? (inject_fn)(void *)GetProcAddress(api, "fake_inject") : NULL;
+	fire_fn fire = api != NULL ? (fire_fn)(void *)GetProcAddress(api, "fake_fire_session_request") : NULL;
+	unsigned char peer[8], other[8], third[8], buf[64];
+	uint32_t size, len;
+	vuid from;
+	fake_stats_t st;
+	wchar_t status[MAX_PATH * 2];
+	const uint64_t PEER = 0x0102030405060708ULL, OTHER = 0x00000000AABBCCDDULL, THIRD = 0x1234567890ABCDEFULL;
+
+	wcscpy(status, scratch);
+	wcscat(status, L"\\wartales-mp\\sdr.status");
+	put_uid(peer, PEER);
+	put_uid(other, OTHER);
+	put_uid(third, THIRD);
+
+	check(send != NULL && read != NULL && avail != NULL && accept != NULL && close != NULL && sdata != NULL && legacy != NULL,
+		"legacy natives resolve through hlp_<name>");
+	if (send == NULL || read == NULL || avail == NULL || accept == NULL || close == NULL || sdata == NULL || legacy == NULL)
+		return;
+	check(wait_log(log, "sdr: 6 of 6 legacy P2P natives diverted", 10000), "shim.log records all 6 natives diverted");
+	check(((unsigned char *)send)[0] == 0xE9, "steam_send_p2p_packet carries an inline jmp (hook installed)");
+
+	if (!with_api) {
+		check(wait_log(log, "sdr: UNAVAILABLE, transport disabled: steam_api64.dll is not loaded", 10000),
+			"shim.log names the reason SDR is unavailable");
+		check(file_starts_with(status, "unavailable steam_api64.dll is not loaded"), "sdr.status carries the verdict for the helper");
+		check(send(peer, (unsigned char *)"abcde", 5, 2, 0) == 0, "fail closed: send_p2p_packet returns false");
+		size = 77;
+		check(avail(&size, 0) == 0, "fail closed: is_p2p_packet_available returns false");
+		len = 77;
+		check(read(buf, sizeof(buf), &len, 0) == NULL, "fail closed: read_p2p_packet returns null");
+		check(accept(peer) == 0, "fail closed: accept_p2p_session returns false");
+		check(close(peer) == 1, "fail closed: close_p2p_session reports nothing open");
+		check(sdata(peer) == NULL, "get_p2p_session_data answers null");
+		check(legacy() == 0, "the legacy hlsteam bodies were never called");
+		return;
+	}
+
+	check(stats != NULL && inject != NULL && fire != NULL, "fake steam_api64.dll test exports resolve");
+	if (stats == NULL || inject == NULL || fire == NULL)
+		return;
+	check(wait_log(log, "sdr: READY: ISteamNetworkingMessages at", 10000), "warm-up bound ISteamNetworkingMessages before first use");
+	check(log_contains(log, "sdr: InitRelayNetworkAccess called, relay status 100"), "InitRelayNetworkAccess called early");
+	check(file_starts_with(status, "ok"), "sdr.status says ok");
+	stats(&st);
+	check(st.relay_inits == 1 && st.request_cb_set && st.failed_cb_set, "relay access requested once, session callbacks registered");
+
+	// Send type -> reliability flags (EP2PSend -> k_nSteamNetworkingSend_*).
+	check(send(peer, (unsigned char *)"abcde", 5, 2, 0) == 1, "send type 2 (Reliable) succeeds");
+	stats(&st);
+	check(st.sends == 1 && st.last_flags == (8 | 1 | 32), "type 2 -> Reliable|NoNagle|AutoRestart (0x29)");
+	check(st.last_send_to == PEER && st.last_send_id_type == 16 && st.last_channel == 0, "target identity is SteamID64 from the 8-byte vuid, channel 0");
+	check(send(peer, (unsigned char *)"u", 1, 0, 0) == 1, "send type 0 (Unreliable) succeeds");
+	stats(&st);
+	check(st.last_flags == 32, "type 0 -> Unreliable|AutoRestart (0x20)");
+	check(send(peer, (unsigned char *)"xy", 2, 1, 0) == 1, "send type 1 (UnreliableNoDelay) succeeds");
+	stats(&st);
+	check(st.last_flags == (4 | 1 | 32), "type 1 -> Unreliable|NoDelay|NoNagle|AutoRestart (0x25)");
+	check(send(peer, (unsigned char *)"rwb", 3, 3, 0) == 1, "send type 3 (ReliableWithBuffering) succeeds");
+	stats(&st);
+	check(st.last_flags == (8 | 32), "type 3 -> Reliable|AutoRestart (0x28)");
+	check(send(peer, (unsigned char *)"x", 1, 7, 0) == 0, "unknown send type is refused");
+	check(send(peer, (unsigned char *)"x", 1, 2, 99) == 0, "out-of-range channel is refused");
+	stats(&st);
+	check(st.sends == 4, "refused sends never reach Steam");
+
+	// Queue order, next-size reporting, packet boundaries and truncation.
+	size = 0;
+	check(avail(&size, 0) == 1 && size == 5, "is_p2p_packet_available reports the next message's size (5)");
+	len = 0;
+	memset(buf, 0, sizeof(buf));
+	from = read(buf, 3, &len, 0);
+	check(from != NULL && len == 3 && memcmp(buf, "abc", 3) == 0, "read into a 3-byte buffer truncates to 3 bytes (\"abc\")");
+	check(get_uid(from) == PEER, "read_p2p_packet returns the sender's SteamID as 8 bytes");
+	size = 0;
+	check(avail(&size, 0) == 1 && size == 1, "the truncated remainder is gone: next message is the 1-byte one");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 1 && buf[0] == 'u', "second packet read whole (\"u\")");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 2 && memcmp(buf, "xy", 2) == 0, "third packet read whole (\"xy\")");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 3 && memcmp(buf, "rwb", 3) == 0, "fourth packet read whole (\"rwb\")");
+	check(read(buf, sizeof(buf), &len, 0) == NULL, "read on an empty channel returns null");
+	check(avail(&size, 0) == 0, "is_p2p_packet_available is false on an empty channel");
+
+	// Channels are independent queues.
+	check(send(peer, (unsigned char *)"one", 3, 2, 1) == 1 && send(peer, (unsigned char *)"zero", 4, 2, 0) == 1,
+		"sends on channels 1 and 0");
+	check(avail(&size, 0) == 1 && size == 4, "channel 0 sees only its own message (4 bytes)");
+	check(avail(&size, 1) == 1 && size == 3, "channel 1 sees only its own message (3 bytes)");
+	from = read(buf, sizeof(buf), &len, 1);
+	check(from != NULL && len == 3 && memcmp(buf, "one", 3) == 0, "channel 1 reads \"one\"");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 4 && memcmp(buf, "zero", 4) == 0, "channel 0 reads \"zero\"");
+
+	// Sender identity comes from the message, not from whoever we sent to.
+	inject(OTHER, 0, "from-other", 10);
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == OTHER && len == 10, "a message from another peer reports that peer's SteamID");
+
+	// Sessions: incoming requests are accepted automatically; explicit
+	// accept/close still reach Steam; close drops that peer's queued messages.
+	check(fire(THIRD) == 1, "fake raised a session request");
+	stats(&st);
+	check(st.accepts == 1 && st.last_accept == THIRD, "session request auto-accepted for the requesting peer");
+	check(log_contains(log, "sdr: session request from 1311768467294899695 (type 16): accepted"), "shim.log records the auto-accept");
+	check(accept(peer) == 1, "accept_p2p_session forwards to AcceptSessionWithUser");
+	stats(&st);
+	check(st.accepts == 2 && st.last_accept == PEER, "explicit accept named the right peer");
+	inject(PEER, 0, "p1", 2);
+	inject(OTHER, 0, "o1", 2);
+	inject(PEER, 1, "p2", 2);
+	check(avail(&size, 0) == 1 && size == 2, "queued messages before close");
+	check(close(peer) == 1, "close_p2p_session forwards to CloseSessionWithUser");
+	stats(&st);
+	check(st.closes == 1 && st.last_close == PEER, "close named the right peer");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == OTHER && memcmp(buf, "o1", 2) == 0, "close dropped the closed peer's messages, kept the other peer's");
+	check(read(buf, sizeof(buf), &len, 0) == NULL && read(buf, sizeof(buf), &len, 1) == NULL, "nothing from the closed peer remains on any channel");
+	check(sdata(peer) == NULL, "get_p2p_session_data answers null");
+
+	stats(&st);
+	check(st.allocated == st.released, "every message handed out by Steam was released");
+	printf("      fake: %u sends, %u allocated, %u released, %u accepts, %u closes\n", st.sends, st.allocated,
+		st.released, st.accepts, st.closes);
+	check(legacy() == 0, "the legacy hlsteam bodies were never called");
+}
+
 static void print_log(const wchar_t *log) {
 	size_t n;
 	unsigned char *b = read_raw(log, &n);
@@ -204,15 +423,20 @@ int main(int argc, char **argv) {
 	unsigned i;
 	unsigned long long snap_before, snap_after;
 	unsigned count_before, count_after;
-	HMODULE kb, mod;
+	HMODULE kb, mod, fake_hl, fake_steam, fake_api = NULL;
 	unsigned char *kb_cfw;
 	HANDLE h;
 	wchar_t *slash;
+	wchar_t fake_dir_w[MAX_PATH * 2];
+	int with_api;
 
-	if (argc != 4) {
-		fprintf(stderr, "usage: shimcheck <winmm.dll> <hlboot.dat> <scratch LOCALAPPDATA>\n");
+	if (argc != 6 || (strcmp(argv[5], "sdr") != 0 && strcmp(argv[5], "nosdr") != 0)) {
+		fprintf(stderr, "usage: shimcheck <winmm.dll> <hlboot.dat> <scratch LOCALAPPDATA> <fake dir> sdr|nosdr\n");
 		return 2;
 	}
+	with_api = strcmp(argv[5], "sdr") == 0;
+	MultiByteToWideChar(CP_ACP, 0, argv[4], -1, game_dir, MAX_PATH * 2);
+	GetFullPathNameW(game_dir, MAX_PATH * 2, fake_dir_w, NULL);
 	// Absolute paths throughout: the check changes cwd to the game folder.
 	MultiByteToWideChar(CP_ACP, 0, argv[1], -1, game_dir, MAX_PATH * 2);
 	GetFullPathNameW(game_dir, MAX_PATH * 2, dll, NULL);
@@ -253,6 +477,19 @@ int main(int argc, char **argv) {
 	wcscat(log, L"\\wartales-mp\\shim.log");
 	DeleteFileW(copy);
 	DeleteFileW(log);
+
+	// 2b. The Steam stand-ins go in first, so the proxy's worker finds
+	//     steam.hdll (and, in sdr mode, steam_api64.dll) the way it would in
+	//     the game.
+	printf("      mode: %s\n", with_api ? "sdr (loopback steam_api64.dll)" : "nosdr (no steam_api64.dll at all)");
+	fake_hl = load_fake(fake_dir_w, L"libhl.dll");
+	fake_steam = load_fake(fake_dir_w, L"steam.hdll");
+	check(fake_hl != NULL && fake_steam != NULL, "fake libhl.dll and steam.hdll loaded");
+	if (with_api) {
+		fake_api = load_fake(fake_dir_w, L"steam_api64.dll");
+		check(fake_api != NULL, "fake steam_api64.dll loaded");
+	}
+	check(GetModuleHandleW(L"steam_api64.dll") == fake_api, "steam_api64.dll presence matches the mode");
 
 	// 3. Load the shim like the loader would.
 	kb = GetModuleHandleW(L"kernelbase.dll");
@@ -339,6 +576,10 @@ int main(int argc, char **argv) {
 	snap_after = dir_snapshot(game_dir, &count_after);
 	printf("      game folder: %u entries before, %u after\n", count_before, count_after);
 	check(count_before == count_after && snap_before == snap_after, "game folder untouched (names, sizes, mtimes)");
+
+	// 11. The SDR transport, through the hooked natives.
+	if (fake_steam != NULL)
+		check_sdr(with_api, fake_steam, fake_api, log, scratch);
 
 	print_log(log);
 	printf("%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);

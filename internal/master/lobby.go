@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -14,6 +15,8 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/code"
 	"github.com/UberMorgott/wartales-mp/internal/link"
+	"github.com/UberMorgott/wartales-mp/internal/nat"
+	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
 // member is one player inside a lobby. Data is a JSON string, as the client
@@ -32,6 +35,21 @@ type lobby struct {
 	isPrivate  *bool
 	maxPlayers *int
 	users      []*member
+	transport  Transport // decided once, at creation; fixes how member ids are rendered
+}
+
+// idOf is the id a member is known by inside this lobby. A direct-relay lobby
+// uses the minted Session id; an SDR lobby uses the player's real Steam id,
+// which is what makes Lobby.isSteamOnly true on every game and what the game
+// turns back into the peer's SteamID. A player without a usable Steam id
+// keeps the Session id even in an SDR lobby: that flips the whole lobby back
+// onto instance/get (our direct relay), which is logged at join time rather
+// than hidden behind an id the game could not resolve.
+func (l *lobby) idOf(p Peer) string {
+	if l.transport == TransportSDR && p.SteamID() != "" {
+		return p.SteamID()
+	}
+	return p.UserID()
 }
 
 type store struct {
@@ -90,8 +108,12 @@ func (l *lobby) info() map[string]any {
 func (s *store) broadcast(l *lobby, except Peer, cmd string, args map[string]any) int {
 	s.mu.Lock()
 	to := make([]Peer, 0, len(l.users))
+	exceptID := ""
+	if except != nil {
+		exceptID = l.idOf(except)
+	}
 	for _, u := range l.users {
-		if u.peer == nil || (except != nil && u.ID == except.UserID()) {
+		if u.peer == nil || (except != nil && u.ID == exceptID) {
 			continue
 		}
 		to = append(to, u.peer)
@@ -134,8 +156,9 @@ func (s *store) peerGone(p Peer) {
 	s.mu.Lock()
 	var affected []*lobby
 	for _, l := range s.lobbies {
+		id := l.idOf(p)
 		for i, u := range l.users {
-			if u.ID == p.UserID() {
+			if u.ID == id {
 				l.users = append(l.users[:i], l.users[i+1:]...)
 				affected = append(affected, l)
 				break
@@ -147,19 +170,20 @@ func (s *store) peerGone(p Peer) {
 			delete(s.lobbies, l.id)
 			continue
 		}
-		if l.owner == p.UserID() {
+		if l.owner == l.idOf(p) {
 			l.owner = l.users[0].ID
 		}
 	}
 	s.mu.Unlock()
 
 	for _, l := range affected {
+		id := l.idOf(p)
 		if s.srv != nil {
 			s.srv.opt.Log.Printf("master: %s left lobby %s, %d member(s) remain, owner %s",
-				p.UserID(), l.id, len(l.users), l.owner)
+				id, l.id, len(l.users), l.owner)
 		}
-		s.broadcast(l, p, "lobby/leave", map[string]any{"id": l.id, "uid": p.UserID()})
-		if l.owner != p.UserID() && len(l.users) > 0 {
+		s.broadcast(l, p, "lobby/leave", map[string]any{"id": l.id, "uid": id})
+		if l.owner != id && len(l.users) > 0 {
 			s.broadcast(l, p, "lobby/transfer", map[string]any{"id": l.id, "uid": l.owner})
 		}
 	}
@@ -191,6 +215,9 @@ type lobbyArgs struct {
 func (s *Server) lobbyCommand(cmd string, args json.RawMessage, p Peer) (any, error) {
 	if !p.Remote() && cmd != "lobby/resolveShortCode" {
 		if raw, ok, err := s.forward(cmd, args); ok {
+			if err == nil && cmd == "lobby/join" {
+				s.logHostTransport(raw)
+			}
 			return raw, err
 		}
 	}
@@ -229,26 +256,72 @@ func (s *Server) lobbyCommand(cmd string, args json.RawMessage, p Peer) (any, er
 	return nil, wireErrf("Unknown command %s", cmd)
 }
 
+// logHostTransport is the guest's view of the host's verdict: a lobby whose
+// owner id is Steam shaped is on SDR, anything else is on the host's direct
+// relay. The verdict itself travels inside the ids the host's master renders,
+// so both masters agree by construction; this only makes it visible.
+func (s *Server) logHostTransport(raw json.RawMessage) {
+	var info struct {
+		ID    string `json:"id"`
+		Owner string `json:"owner"`
+	}
+	if json.Unmarshal(raw, &info) != nil || info.ID == "" {
+		return
+	}
+	t := TransportDirect
+	if uid.IsSteam(info.Owner) {
+		t = TransportSDR
+	}
+	s.opt.Log.Printf("master: joined lobby %s; the host's master chose %s (owner id %s)", info.ID, t, info.Owner)
+}
+
+// decideTransport runs the choice for a new lobby, with whatever the helper
+// knows right now.
+func (s *Server) decideTransport() (Transport, string, error) {
+	var ep nat.Endpoint
+	epErr := errors.New("no endpoint resolver")
+	if s.opt.Endpoint != nil {
+		ep, epErr = s.opt.Endpoint()
+	}
+	var sdr SDRStatus
+	if s.opt.SDRStatus != nil {
+		sdr = s.opt.SDRStatus()
+	}
+	return chooseTransport(s.opt.Transport, ep, epErr, sdr)
+}
+
 // lobbyCreate replies with the new lobby id only; the client builds the
-// LobbyInfo itself.
+// LobbyInfo itself. The transport is decided here, once per lobby, and fixes
+// how every member id of this lobby is rendered from now on.
 func (s *Server) lobbyCreate(a lobbyArgs, p Peer) (any, error) {
-	l := &lobby{id: newLobbyID(), owner: p.UserID(), data: map[string]json.RawMessage{}}
+	transport, reason, err := s.decideTransport()
+	if err != nil {
+		s.opt.Log.Printf("master: lobby creation by %s (%s) REFUSED: %v", p.Name(), p.UserID(), err)
+		return nil, wireErrf("Cannot host: %v", err)
+	}
+	l := &lobby{id: newLobbyID(), data: map[string]json.RawMessage{}, transport: transport}
+	l.owner = l.idOf(p)
 	if a.Props != nil {
 		if a.Props.Data != nil {
 			l.data = a.Props.Data
 		}
 		l.isPrivate = a.Props.IsPrivate
 		l.maxPlayers = a.Props.MaxPlayers
-		l.users = append(l.users, &member{ID: p.UserID(), Name: p.Name(), Data: a.Props.MyData, peer: p})
+		l.users = append(l.users, &member{ID: l.owner, Name: p.Name(), Data: a.Props.MyData, peer: p})
 	} else {
-		l.users = append(l.users, &member{ID: p.UserID(), Name: p.Name(), peer: p})
+		l.users = append(l.users, &member{ID: l.owner, Name: p.Name(), peer: p})
 	}
 	s.lobbies.mu.Lock()
 	s.lobbies.lobbies[l.id] = l
 	s.lobbies.mu.Unlock()
 	s.opt.Log.Printf("master: lobby %s created by %s (%s), owner %s, props %s",
-		l.id, p.Name(), p.UserID(), l.owner, applog.Trunc(a.Props))
-	s.opt.Log.Printf("master: lobby %s transport is lobby/chat on this connection "+
+		l.id, p.Name(), l.owner, l.owner, applog.Trunc(a.Props))
+	s.opt.Log.Printf("master: lobby %s game transport: %s (%s)", l.id, transport, reason)
+	if transport == TransportSDR && p.SteamID() == "" {
+		s.opt.Log.Printf("master: WARNING: lobby %s is on SDR but the host reported no Steam id; "+
+			"the game will ask instance/get and use the direct relay instead", l.id)
+	}
+	s.opt.Log.Printf("master: lobby %s lobby-phase transport is lobby/chat on this connection "+
 		"(mpman LobbyService, no second socket)", l.id)
 	return l.id, nil
 }
@@ -263,19 +336,26 @@ func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 		s.lobbies.mu.Unlock()
 		return nil, wireErrf("Lobby is full")
 	}
+	id := l.idOf(p)
 	found := false
 	for _, u := range l.users {
-		if u.ID == p.UserID() {
+		if u.ID == id {
 			u.Data, u.peer, u.Name, found = a.Data, p, p.Name(), true
 			break
 		}
 	}
 	if !found {
-		l.users = append(l.users, &member{ID: p.UserID(), Name: p.Name(), Data: a.Data, peer: p})
+		l.users = append(l.users, &member{ID: id, Name: p.Name(), Data: a.Data, peer: p})
 	}
 	info := l.info()
+	transport := l.transport
 	s.lobbies.mu.Unlock()
 
+	if transport == TransportSDR && p.SteamID() == "" {
+		s.opt.Log.Printf("master: WARNING: %s joined SDR lobby %s without a Steam id (as %s); "+
+			"the lobby is no longer Steam-only and the game will fall back to instance/get (direct relay)",
+			p.Name(), l.id, id)
+	}
 	if !found {
 		// MPLobby.onCommand@54985 runs haxe.Unserializer over args.data and
 		// answers false - dropping the joiner - when it yields null, so the
@@ -286,12 +366,12 @@ func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 			data = json.RawMessage(`"z"`)
 		}
 		n := s.lobbies.broadcast(l, p, "lobby/join", map[string]any{
-			"id": l.id, "uid": p.UserID(), "name": p.Name(), "data": data,
+			"id": l.id, "uid": id, "name": p.Name(), "data": data,
 		})
-		s.opt.Log.Printf("master: %s (%s) joined lobby %s, told %d peer(s)",
-			p.Name(), p.UserID(), l.id, n)
+		s.opt.Log.Printf("master: %s (%s) joined lobby %s (%s), told %d peer(s)",
+			p.Name(), id, l.id, transport, n)
 	} else {
-		s.opt.Log.Printf("master: %s (%s) rejoined lobby %s", p.Name(), p.UserID(), l.id)
+		s.opt.Log.Printf("master: %s (%s) rejoined lobby %s", p.Name(), id, l.id)
 	}
 	return info, nil
 }
@@ -324,7 +404,7 @@ func (s *Server) lobbySetData(a lobbyArgs, p Peer) error {
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
-	if l.owner != p.UserID() {
+	if l.owner != l.idOf(p) {
 		return wireErrf("Cannot set data if not owner")
 	}
 	var data map[string]json.RawMessage
@@ -346,14 +426,15 @@ func (s *Server) lobbySetUserData(a lobbyArgs, p Peer) error {
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
+	id := l.idOf(p)
 	s.lobbies.mu.Lock()
 	for _, u := range l.users {
-		if u.ID == p.UserID() {
+		if u.ID == id {
 			u.Data = a.Data
 		}
 	}
 	s.lobbies.mu.Unlock()
-	s.lobbies.broadcast(l, p, "lobby/setUserData", map[string]any{"id": l.id, "uid": p.UserID(), "data": a.Data})
+	s.lobbies.broadcast(l, p, "lobby/setUserData", map[string]any{"id": l.id, "uid": id, "data": a.Data})
 	return nil
 }
 
@@ -367,9 +448,10 @@ func (s *Server) lobbyChat(a lobbyArgs, p Peer) error {
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
+	id := l.idOf(p)
 	n := s.lobbies.broadcast(l, p, "lobby/chat",
-		map[string]any{"id": l.id, "uid": p.UserID(), "msg": a.Msg})
-	s.lobbies.transport(s.opt.Log, l.id, p.UserID(), len(a.Msg), n)
+		map[string]any{"id": l.id, "uid": id, "msg": a.Msg})
+	s.lobbies.transport(s.opt.Log, l.id, id, len(a.Msg), n)
 	return nil
 }
 
@@ -378,13 +460,13 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
-	if l.owner != p.UserID() {
+	if l.owner != l.idOf(p) {
 		return wireErrf("Cannot transfer if not owner")
 	}
 	// The new owner comes from the client, so it is only ever accepted when it
-	// names a member of this lobby: member ids are minted by us (internal/uid)
-	// and echoing back an arbitrary, possibly Steam shaped id would put one
-	// into every LobbyInfo we serve.
+	// names a member of this lobby: member ids are rendered by us (idOf) and
+	// echoing back an arbitrary id would put one the lobby's transport does
+	// not expect into every LobbyInfo we serve.
 	s.lobbies.mu.Lock()
 	known := false
 	for _, u := range l.users {
@@ -477,7 +559,7 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 // dialHost opens the proxy-link and starts relaying the host's pushes to the
 // local game.
 func (s *Server) dialHost(addr string, p Peer) error {
-	cl, err := link.Dial(addr, link.User{ID: p.UserID(), Name: p.Name()},
+	cl, err := link.Dial(addr, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID()},
 		func(cmd string, args json.RawMessage) {
 			if sess := s.localSession(); sess != nil {
 				sess.Push(cmd, args)
