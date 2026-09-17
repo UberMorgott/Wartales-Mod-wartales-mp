@@ -78,8 +78,8 @@ var Patches = []Patch{
 	},
 }
 
-// Magic is the first bytes of a HashLink bytecode image; the proxy uses it to
-// recognise the hlboot.dat read without hooking the file open.
+// Magic is the first bytes of a HashLink bytecode image; the proxy refuses to
+// patch an hlboot.dat that does not start with it.
 const Magic = "HLB"
 
 // Apply rewrites buf in place. Every patch must match exactly once and find the
