@@ -7,6 +7,7 @@
 #
 # Build order (the exe is embedded into the DLL, so it must exist first):
 #   1. gendef reads System32\winmm.dll  -> winmm_stubs.c + winmm.def
+#      hlpatchgen (internal/hlpatch)    -> proxy\hlpatch.h
 #   2. go build                          -> wartales-mp.exe   (the final helper)
 #   3. objcopy wraps that exe            -> embed.o           (a linkable blob)
 #   4. gcc links proxy.c + stubs + MinHook + embed.o + .def -> winmm.dll
@@ -51,6 +52,14 @@ try {
 } finally { Pop-Location }
 $forwards = (Select-String -Path $def -Pattern '=' -SimpleMatch).Count
 Write-Host ("winmm.dll: {0} forwarded exports" -f $forwards)
+
+# 1b. Regenerate the HashLink bytecode patch table from internal/hlpatch, so the
+#     committed header can never drift from the tested Go table.
+Push-Location $repo
+try {
+    & go run ./tools/hlpatchgen -out (Join-Path $PSScriptRoot 'proxy\hlpatch.h')
+    if ($LASTEXITCODE -ne 0) { throw 'hlpatchgen failed' }
+} finally { Pop-Location }
 
 # 2. Build the helper exe first: it is embedded into the DLL below.
 $exe = Join-Path $OutDir 'wartales-mp.exe'

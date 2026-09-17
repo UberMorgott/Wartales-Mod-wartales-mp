@@ -30,7 +30,15 @@
 //     moment it appears -- conf_set_ca is called once, late (first TLS setup),
 //     long after ssl.hdll loads, so the poll wins the race comfortably.
 //
-//  3. Extracts the embedded wartales-mp.exe to %LOCALAPPDATA%\wartales-mp\ (only
+//  3. Patches two bytes of the HashLink bytecode on its way into memory, in the
+//     ReadFile that loads hlboot.dat -- before libhl JITs it and long before any
+//     of it runs. The file on disk is never touched. See hlpatch.h and
+//     internal/hlpatch for what the two bytes are and why the game crashes
+//     ("Null access", mpman/net/Client.hx:13) about a minute into an idle lobby
+//     without them. The hook must exist before the game's entry point runs, so
+//     it is the one thing installed from DllMain.
+//
+//  4. Extracts the embedded wartales-mp.exe to %LOCALAPPDATA%\wartales-mp\ (only
 //     when missing or when the embedded build differs by hash) and starts it
 //     hidden. It watches the game PID and exits with the game on its own.
 
@@ -43,6 +51,7 @@
 #include <string.h>
 
 #include "MinHook.h"
+#include "hlpatch.h"
 
 // ---------------------------------------------------------------------------
 // Forwarding: fill the generated thunk pointer table from the System32 copy.
@@ -189,6 +198,92 @@ static void detour_conf_set_ca(void *conf, hl_ssl_cert *cert) {
 			cert = merged;
 	}
 	real_conf_set_ca(conf, cert);
+}
+
+// ---------------------------------------------------------------------------
+// Hook 3: ReadFile (kernel32) -- patch the HashLink bytecode in flight.
+//
+// The game reads all of hlboot.dat with one fread into a heap buffer and hands
+// that buffer straight to the bytecode reader and the JIT, so the read is the
+// last moment at which the image is both complete and still only data. We do
+// not hook the open: a read that returns megabytes starting with "HLB" is the
+// bytecode and nothing else in the game does that. Anything unexpected (a
+// signature that is missing, ambiguous, or no longer holds the byte we mean to
+// replace -- a game update, say) leaves the image completely untouched, which
+// costs us the fix and nothing else.
+// ---------------------------------------------------------------------------
+
+static BOOL hook_one(void *proc, void *detour, void **orig); // defined below
+
+typedef BOOL(WINAPI *read_file_fn)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+static read_file_fn real_read_file; // MinHook trampoline to the original
+static volatile LONG hl_patched;
+
+// HL_MIN_IMAGE is far below hlboot.dat (19 MB) and far above any read that
+// could start with the magic by accident.
+#define HL_MIN_IMAGE (4u * 1024u * 1024u)
+
+// find_once returns the one occurrence of needle in buf, or NULL if there is
+// none or more than one.
+static const unsigned char *find_once(const unsigned char *buf, size_t n,
+	const unsigned char *needle, size_t len) {
+	const unsigned char *hit = NULL;
+	size_t i;
+
+	if (len == 0 || n < len)
+		return NULL;
+	for (i = 0; i + len <= n; i++) {
+		if (buf[i] != needle[0] || memcmp(buf + i, needle, len) != 0)
+			continue;
+		if (hit != NULL)
+			return NULL; // ambiguous: not the code we reverse-engineered
+		hit = buf + i;
+	}
+	return hit;
+}
+
+// patch_bytecode rewrites the image in place, and only once every patch has
+// resolved to exactly one site holding exactly the byte it expects.
+static BOOL patch_bytecode(unsigned char *buf, size_t n) {
+	unsigned char *at[HL_PATCH_COUNT];
+	unsigned i;
+
+	for (i = 0; i < HL_PATCH_COUNT; i++) {
+		const unsigned char *hit = find_once(buf, n, hl_patches[i].needle, hl_patches[i].len);
+		if (hit == NULL)
+			return FALSE;
+		at[i] = (unsigned char *)hit + hl_patches[i].index;
+		if (*at[i] != hl_patches[i].from)
+			return FALSE;
+	}
+	for (i = 0; i < HL_PATCH_COUNT; i++)
+		*at[i] = hl_patches[i].to;
+	return TRUE;
+}
+
+static BOOL WINAPI detour_read_file(HANDLE file, LPVOID buf, DWORD count,
+	LPDWORD got, LPOVERLAPPED ov) {
+	BOOL ok = real_read_file(file, buf, count, got, ov);
+	if (ok && !hl_patched && ov == NULL && got != NULL && *got >= HL_MIN_IMAGE &&
+			memcmp(buf, HL_MAGIC, sizeof(HL_MAGIC) - 1) == 0) {
+		if (patch_bytecode((unsigned char *)buf, (size_t)*got))
+			hl_patched = 1;
+	}
+	return ok;
+}
+
+// hook_bytecode_loader runs from DllMain: the bytecode is read before the
+// worker thread could possibly start, so this one hook cannot wait for it.
+// Only kernel32 is touched, which is mapped and initialised long before us.
+static void hook_bytecode_loader(void) {
+	HMODULE k32;
+	if (MH_Initialize() != MH_OK)
+		return;
+	k32 = GetModuleHandleW(L"kernel32.dll");
+	if (k32 == NULL)
+		return;
+	hook_one((void *)GetProcAddress(k32, "ReadFile"), (void *)detour_read_file,
+		(void **)&real_read_file);
 }
 
 // ---------------------------------------------------------------------------
@@ -344,10 +439,14 @@ static DWORD WINAPI worker(LPVOID unused) {
 	HMODULE ssl;
 	int tries;
 
+	MH_STATUS st;
+
 	(void)unused;
 	start_helper();
 
-	if (MH_Initialize() != MH_OK)
+	// DllMain already initialised MinHook for the bytecode hook.
+	st = MH_Initialize();
+	if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED)
 		return 0;
 
 	// libhl.dll imports us, so it is already mapped: hook it now.
@@ -377,7 +476,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 	if (reason == DLL_PROCESS_ATTACH) {
 		HANDLE t;
 		DisableThreadLibraryCalls(inst);
-		bind_forwards(); // before anything can call a forwarded export
+		bind_forwards();        // before anything can call a forwarded export
+		hook_bytecode_loader(); // before the game's entry point reads hlboot.dat
 		t = CreateThread(NULL, 0, worker, NULL, 0, NULL);
 		if (t != NULL)
 			CloseHandle(t);
