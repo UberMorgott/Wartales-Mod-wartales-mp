@@ -1,0 +1,8 @@
+# typos' dictionary is not a style guide: a word mapped to itself is declared correct,
+# which is how this repository silences a false positive without switching the check off.
+
+[default.extend-words]
+# UPnP (Universal Plug and Play) — typos splits the identifier and reads `Pn` as `On`.
+Pn = "Pn"
+# "Crockford look-alikes": the plural of "look-alike", split after the hyphen.
+alikes = "alikes"
