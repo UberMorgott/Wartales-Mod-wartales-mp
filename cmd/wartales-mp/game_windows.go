@@ -16,7 +16,7 @@ const gameExe = "Wartales.exe"
 // watchGame finds the game process and returns its PID plus a channel that is
 // closed when it exits.
 //
-// The libhl.dll shim starts us from inside the game, so our parent is normally
+// The winmm.dll proxy starts us from inside the game, so our parent is normally
 // the game itself; the name is checked before trusting the parent PID, because
 // PIDs are reused. If the parent is something else (running wartales-mp.exe by
 // hand), the first Wartales.exe on the machine is used instead.

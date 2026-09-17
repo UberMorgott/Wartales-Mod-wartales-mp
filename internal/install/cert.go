@@ -109,9 +109,10 @@ func TLSConfig(dir string) (*tls.Config, error) {
 	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
 }
 
-// CACertPath returns the path of the generated CA certificate. The ssl.hdll
-// shim reads exactly this file (%ProgramData%\wartales-mp\ca.crt) and appends
-// it to the game's trust chain, so the two must stay in step.
+// CACertPath returns the path of the generated CA certificate. The winmm.dll
+// proxy reads exactly this file (%ProgramData%\wartales-mp\ca.crt) in its
+// ssl_conf_set_ca hook and appends it to the game's trust chain, so the two
+// must stay in step.
 func CACertPath(dir string) string { return filepath.Join(dir, caCertFile) }
 
 func serial() *big.Int {

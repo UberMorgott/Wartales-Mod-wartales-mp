@@ -28,8 +28,8 @@ func runCmd(args []string) error {
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
-	// The shims start us from inside the game, so the certificates have to be
-	// in place without anyone running a setup step first.
+	// The winmm.dll proxy starts us from inside the game, so the certificates
+	// have to be in place without anyone running a setup step first.
 	dir := install.DataDir()
 	if err := install.EnsureCerts(dir); err != nil {
 		return fmt.Errorf("certificates: %w", err)
