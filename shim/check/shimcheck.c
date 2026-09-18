@@ -322,7 +322,11 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 	check(log_contains(log, "sdr: InitRelayNetworkAccess called, relay status 100"), "InitRelayNetworkAccess called early");
 	check(file_starts_with(status, "ok"), "sdr.status says ok");
 	stats(&st);
-	check(st.relay_inits == 1 && st.request_cb_set && st.failed_cb_set, "relay access requested once, session callbacks registered");
+	check(st.relay_inits == 1 && st.request_cb_set && st.failed_cb_set, "relay access requested once, global session callbacks set");
+	check(st.registered_1251 && st.registered_1252, "session request/failed registered through SteamAPI_RegisterCallback (1251/1252)");
+	check(st.size_1251 == 136 && st.size_1252 == 696, "GetCallbackSizeBytes answers sizeof(SessionRequest_t) = 136 and sizeof(SessionFailed_t) = 696");
+	check(log_contains(log, "sdr: session request/failed callbacks registered with SteamAPI_RegisterCallback (1251/1252, flags 0x01/0x01"),
+		"shim.log records the registration with the registered flag set by steam_api");
 
 	// Send type -> reliability flags (EP2PSend -> k_nSteamNetworkingSend_*).
 	check(send(peer, (unsigned char *)"abcde", 5, 2, 0) == 1, "send type 2 (Reliable) succeeds");
@@ -398,10 +402,17 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 
 	// Sessions: incoming requests are accepted automatically; explicit
 	// accept/close still reach Steam; close drops that peer's queued messages.
-	check(fire(THIRD) == 1, "fake raised a session request");
+	check(fire(THIRD) == 1, "fake posted a session request through the registered CCallbackBase");
 	stats(&st);
 	check(st.accepts == 1 && st.last_accept == THIRD, "session request auto-accepted for the requesting peer");
-	check(log_contains(log, "sdr: session request from 1311768467294899695 (type 16): accepted"), "shim.log records the auto-accept");
+	check(log_contains(log, "sdr: session request from 1311768467294899695 (type 16) via SteamAPI_RegisterCallback: accepted"), "shim.log records the auto-accept and the delivery path");
+	{
+		typedef int (*fire_failed_fn)(uint64_t, int, const char *);
+		fire_failed_fn fire_failed = (fire_failed_fn)(void *)GetProcAddress(api, "fake_fire_session_failed");
+		check(fire_failed != NULL && fire_failed(THIRD, 5003, "Timed out attempting to connect") == 1, "fake posted a session failed through the registered CCallbackBase");
+		check(log_contains(log, "sdr: session with 1311768467294899695 FAILED (via SteamAPI_RegisterCallback): state 5 (problem detected locally), end reason 5003 'Timed out attempting to connect'; fake P2P connection"),
+			"shim.log records the session failure with Steam's end reason and debug text");
+	}
 	check(accept(peer) == 1, "accept_p2p_session forwards to AcceptSessionWithUser");
 	stats(&st);
 	check(st.accepts == 2 && st.last_accept == PEER, "explicit accept named the right peer");

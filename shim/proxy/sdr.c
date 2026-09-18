@@ -34,6 +34,21 @@
 //     the new interface, so this file registers the modern session-request
 //     callback and accepts there. accept_p2p_session still works when called.
 //
+// How the session callbacks reach us matters. ISteamNetworkingUtils'
+// SetGlobalCallback_MessagesSessionRequest/Failed accept a function pointer
+// and return true, but with the Steam client (steam_api64 + steamclient) that
+// pointer is never invoked: measured with a stand-alone probe against the
+// game's own steam_api64.dll, only the classic Steam callback pipe delivered
+// SteamNetworkingMessagesSessionRequest_t (1251) and ..SessionFailed_t (1252),
+// during SteamAPI_RunCallbacks, to a CCallbackBase registered with
+// SteamAPI_RegisterCallback -- the same mechanism hlsteam uses for every
+// event the game handles. So the callbacks are registered that way (a
+// CCallbackBase built by hand: vtable of Run/Run/GetCallbackSizeBytes,
+// steam_api_common.h), and the global pointers stay only as a second,
+// harmless path. Without this the host never accepted a session: a guest's
+// connection sat pending until Steam's idle timeout while both sides logged
+// nothing.
+//
 // Fail closed, never fall back. When steam_api64.dll, the Steam client or
 // ISteamNetworkingMessages is unavailable the natives behave as a transport
 // that cannot connect (send fails, nothing is ever available to read), the
@@ -93,6 +108,20 @@ typedef unsigned char (*sdr_set_cb_fn)(void *self, void (*cb)(void *ev));
 typedef int (*sdr_conn_info_fn)(void *self, const sdr_identity *peer, sdr_conn_info *info, void *quick);
 typedef void (*sdr_run_callbacks_fn)(void);
 
+// CCallbackBase (steam_api_common.h): a vtable pointer, then
+// uint8 m_nCallbackFlags and int m_iCallback. The vtable holds Run(void*),
+// Run(void*, bool, SteamAPICall_t) and GetCallbackSizeBytes(); the two Run
+// overloads are given the same handler, so their order in the compiler's
+// vtable does not matter. steam_api's dispatch sets flag 0x01 on registration.
+typedef struct sdr_cb {
+	const void **vtable;
+	unsigned char flags;
+	int32_t icallback;
+} sdr_cb;
+typedef void (*sdr_register_cb_fn)(sdr_cb *cb, int icallback);
+#define SDR_CB_SESSION_REQUEST 1251 // k_iSteamNetworkingMessagesCallbacks + 1
+#define SDR_CB_SESSION_FAILED 1252  // k_iSteamNetworkingMessagesCallbacks + 2
+
 static struct {
 	sdr_hsteamuser_fn get_hsteamuser;
 	sdr_accessor_fn messages_v002;
@@ -107,6 +136,7 @@ static struct {
 	sdr_set_cb_fn on_request;
 	sdr_set_cb_fn on_failed;
 	sdr_conn_info_fn conn_info; // optional: diagnostics only
+	sdr_register_cb_fn register_cb;
 } api;
 
 // Diagnostics: the game's SteamAPI_RunCallbacks is what delivers the session
@@ -138,6 +168,7 @@ static const struct {
 	{"SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus", (void **)&api.relay_status},
 	{"SteamAPI_ISteamNetworkingUtils_SetGlobalCallback_MessagesSessionRequest", (void **)&api.on_request},
 	{"SteamAPI_ISteamNetworkingUtils_SetGlobalCallback_MessagesSessionFailed", (void **)&api.on_failed},
+	{"SteamAPI_RegisterCallback", (void **)&api.register_cb},
 };
 
 // ---------------------------------------------------------------------------
@@ -358,17 +389,17 @@ static void fail(BOOL hard, const char *reason) {
 		sdr_retry_at = GetTickCount() + 2000;
 }
 
-// on_session_request is the modern counterpart of P2PSessionRequest_t; the
+// session_request is the modern counterpart of P2PSessionRequest_t; the
 // game only ever answers the legacy one, which the new interface never raises.
-static void on_session_request(void *ev) {
-	const sdr_identity *peer = (const sdr_identity *)ev; // SteamNetworkingMessagesSessionRequest_t
+// via names the delivery path, for the log.
+static void session_request(const sdr_identity *peer, const char *via) {
 	unsigned char ok = 0;
 	if (peer == NULL || sdr_msgs == NULL)
 		return;
 	ok = api.accept(sdr_msgs, peer);
 	sdr_accepted++;
-	shim_log("sdr: session request from %llu (type %d): %s (RunCallbacks %ld)", (unsigned long long)peer->u.steam_id,
-		peer->type, ok ? "accepted" : "accept FAILED", run_callbacks_count);
+	shim_log("sdr: session request from %llu (type %d) via %s: %s (RunCallbacks %ld)", (unsigned long long)peer->u.steam_id,
+		peer->type, via, ok ? "accepted" : "accept FAILED", run_callbacks_count);
 	if (peer->type == SDR_IDENTITY_STEAMID) {
 		EnterCriticalSection(&sdr_lock);
 		watch_peer(peer->u.steam_id);
@@ -376,19 +407,56 @@ static void on_session_request(void *ev) {
 	}
 }
 
-static void on_session_failed(void *ev) {
-	// SteamNetworkingMessagesSessionFailed_t { SteamNetConnectionInfo_t m_info }.
-	const sdr_conn_info *info = (const sdr_conn_info *)ev;
+static void session_failed(const sdr_conn_info *info, const char *via) {
 	char end_debug[sizeof(info->end_debug)], description[sizeof(info->description)];
 	if (info == NULL)
 		return;
 	memcpy(end_debug, info->end_debug, sizeof(end_debug));
 	memcpy(description, info->description, sizeof(description));
 	end_debug[sizeof(end_debug) - 1] = description[sizeof(description) - 1] = 0;
-	shim_log("sdr: session with %llu FAILED: state %d (%s), end reason %d '%s'; %s",
-		(unsigned long long)info->peer.u.steam_id, info->state, state_name(info->state), info->end_reason,
+	shim_log("sdr: session with %llu FAILED (via %s): state %d (%s), end reason %d '%s'; %s",
+		(unsigned long long)info->peer.u.steam_id, via, info->state, state_name(info->state), info->end_reason,
 		end_debug, description);
 }
+
+// The global function-pointer path (SetGlobalCallback_*). Kept, although the
+// Steam client was never seen to invoke it; see the header comment.
+static void on_session_request(void *ev) { session_request((const sdr_identity *)ev, "global callback"); }
+static void on_session_failed(void *ev) { session_failed((const sdr_conn_info *)ev, "global callback"); }
+
+// The Steam callback pipe (SteamAPI_RegisterCallback), dispatched by the
+// game's SteamAPI_RunCallbacks. Both Run overloads take the payload first and
+// ignore the rest, so the vtable order of the two does not matter.
+static void cb_request_run(sdr_cb *self, void *ev) {
+	(void)self;
+	session_request((const sdr_identity *)ev, "SteamAPI_RegisterCallback"); // SteamNetworkingMessagesSessionRequest_t
+}
+static void cb_request_run_result(sdr_cb *self, void *ev, unsigned char io_failure, uint64_t call) {
+	(void)io_failure;
+	(void)call;
+	cb_request_run(self, ev);
+}
+static int cb_request_size(sdr_cb *self) {
+	(void)self;
+	return (int)sizeof(sdr_identity);
+}
+static void cb_failed_run(sdr_cb *self, void *ev) {
+	(void)self;
+	session_failed((const sdr_conn_info *)ev, "SteamAPI_RegisterCallback"); // SteamNetworkingMessagesSessionFailed_t
+}
+static void cb_failed_run_result(sdr_cb *self, void *ev, unsigned char io_failure, uint64_t call) {
+	(void)io_failure;
+	(void)call;
+	cb_failed_run(self, ev);
+}
+static int cb_failed_size(sdr_cb *self) {
+	(void)self;
+	return (int)sizeof(sdr_conn_info);
+}
+static const void *cb_request_vtable[] = {(const void *)cb_request_run, (const void *)cb_request_run_result, (const void *)cb_request_size};
+static const void *cb_failed_vtable[] = {(const void *)cb_failed_run, (const void *)cb_failed_run_result, (const void *)cb_failed_size};
+static sdr_cb cb_request = {cb_request_vtable, 0, SDR_CB_SESSION_REQUEST};
+static sdr_cb cb_failed = {cb_failed_vtable, 0, SDR_CB_SESSION_FAILED};
 
 static BOOL ready(void);
 
@@ -433,12 +501,18 @@ static BOOL try_init(void) {
 		fail(TRUE, "SteamNetworkingMessages002 unavailable (Steam client too old, or not running)");
 		return FALSE;
 	}
+	// Session callbacks, the way the game itself receives Steam events.
+	api.register_cb(&cb_request, SDR_CB_SESSION_REQUEST);
+	api.register_cb(&cb_failed, SDR_CB_SESSION_FAILED);
+	shim_log("sdr: session request/failed callbacks registered with SteamAPI_RegisterCallback (%d/%d, flags 0x%02x/0x%02x; 0x01 = registered)",
+		SDR_CB_SESSION_REQUEST, SDR_CB_SESSION_FAILED, cb_request.flags, cb_failed.flags);
 	sdr_utils = api.utils_v004();
 	if (sdr_utils == NULL) {
-		shim_log("sdr: SteamNetworkingUtils004 unavailable: no relay warm-up, sessions must be accepted by the game");
+		shim_log("sdr: SteamNetworkingUtils004 unavailable: no relay warm-up");
 	} else {
-		api.on_request(sdr_utils, on_session_request);
-		api.on_failed(sdr_utils, on_session_failed);
+		unsigned char r1 = api.on_request(sdr_utils, on_session_request);
+		unsigned char r2 = api.on_failed(sdr_utils, on_session_failed);
+		shim_log("sdr: SetGlobalCallback_MessagesSessionRequest/Failed = %u/%u (a second path; the Steam client was not seen to use it)", r1, r2);
 		api.init_relay(sdr_utils);
 		relay = api.relay_status(sdr_utils, NULL);
 		sdr_relay_last = relay;

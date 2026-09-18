@@ -248,16 +248,73 @@ EXPORT void fake_inject(uint64_t from, int channel, const void *data, int len) {
 
 EXPORT void fake_set_send_result(int res) { g_send_result = res; }
 
-// fake_fire_session_request raises the modern session-request callback the
-// way SteamAPI_RunCallbacks would; returns 0 when nobody registered one.
+// SteamAPI_RegisterCallback, as steam_api does it: remember the object, set
+// the registered flag. Like the real Steam client, the fake delivers session
+// events ONLY through these objects, never through the SetGlobalCallback_*
+// function pointers (measured; see shim/proxy/sdr.c).
+static CCallbackBase *cb_1251, *cb_1252;
+
+EXPORT void SteamAPI_RegisterCallback(CCallbackBase *cb, int icallback) {
+	typedef int (*size_fn)(CCallbackBase *);
+	int size;
+	if (cb == NULL)
+		return;
+	cb->m_nCallbackFlags |= 0x01; // k_ECallbackFlagsRegistered
+	size = ((size_fn)cb->vtable[2])(cb);
+	EnterCriticalSection(&lock);
+	if (icallback == 1251) {
+		cb_1251 = cb;
+		st.registered_1251 = 1;
+		st.size_1251 = size;
+	} else if (icallback == 1252) {
+		cb_1252 = cb;
+		st.registered_1252 = 1;
+		st.size_1252 = size;
+	}
+	LeaveCriticalSection(&lock);
+}
+
+EXPORT void SteamAPI_UnregisterCallback(CCallbackBase *cb) {
+	if (cb != NULL)
+		cb->m_nCallbackFlags &= (uint8_t)~0x01;
+}
+
+// dispatch calls Run(void*) on a registered object the way SteamAPI_RunCallbacks
+// does. MSVC lays the two Run overloads out in reverse declaration order, so
+// Run(void*) is vtable slot 1; the shim answers either slot identically.
+static void dispatch(CCallbackBase *cb, void *payload) {
+	typedef void (*run_fn)(CCallbackBase *, void *);
+	((run_fn)cb->vtable[1])(cb, payload);
+}
+
+// fake_fire_session_request posts SteamNetworkingMessagesSessionRequest_t the
+// way the Steam client does; returns 0 when nobody registered for it.
 EXPORT int fake_fire_session_request(uint64_t from) {
 	SteamNetworkingIdentity req; // SteamNetworkingMessagesSessionRequest_t is exactly this
-	if (request_cb == NULL)
+	if (cb_1251 == NULL)
 		return 0;
 	memset(&req, 0, sizeof(req));
 	req.m_eType = IDENTITY_STEAMID;
 	req.m_cbSize = 8;
 	req.m_steamID64 = from;
-	request_cb(&req);
+	dispatch(cb_1251, &req);
+	return 1;
+}
+
+// fake_fire_session_failed posts SteamNetworkingMessagesSessionFailed_t with
+// the given end reason and debug text.
+EXPORT int fake_fire_session_failed(uint64_t from, int end_reason, const char *debug) {
+	SteamNetConnectionInfo_t info; // SteamNetworkingMessagesSessionFailed_t { m_info }
+	if (cb_1252 == NULL)
+		return 0;
+	memset(&info, 0, sizeof(info));
+	info.m_identityRemote.m_eType = IDENTITY_STEAMID;
+	info.m_identityRemote.m_cbSize = 8;
+	info.m_identityRemote.m_steamID64 = from;
+	info.m_eState = 5; // k_ESteamNetworkingConnectionState_ProblemDetectedLocally
+	info.m_eEndReason = end_reason;
+	strncpy(info.m_szEndDebug, debug, sizeof(info.m_szEndDebug) - 1);
+	strcpy(info.m_szConnectionDescription, "fake P2P connection");
+	dispatch(cb_1252, &info);
 	return 1;
 }

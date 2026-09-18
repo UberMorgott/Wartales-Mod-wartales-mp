@@ -228,10 +228,25 @@ SteamID, `resolveShortCode` → `join` → пуши `lobby/join`/`lobby/chat` ч
 | `get_p2p_session_data` | `null` («сессии нет»); игра его не вызывает |
 
 Входящие сессии: игра принимает их по легаси-колбэку `P2PSessionRequest_t`, который у нового
-интерфейса не бывает, — поэтому шим регистрирует
-`SetGlobalCallback_MessagesSessionRequest` и принимает сам (и логирует
-`MessagesSessionFailed`). `InitRelayNetworkAccess` вызывается заранее: отдельный поток ждёт
+интерфейса не бывает, — поэтому шим принимает сам по
+`SteamNetworkingMessagesSessionRequest_t` (id 1251) и логирует
+`SteamNetworkingMessagesSessionFailed_t` (1252). Регистрация — **только через
+`SteamAPI_RegisterCallback`** с собранным вручную `CCallbackBase` (vtable
+`Run/Run/GetCallbackSizeBytes`, `steam_api_common.h`), то есть тем же путём, каким hlsteam получает
+все события игры. `SetGlobalCallback_MessagesSessionRequest/Failed` из `ISteamNetworkingUtils`
+возвращает `true`, но со Steam-клиентом (steam_api64 + steamclient) указатель **никогда не
+вызывается**: замерено отдельным пробником против `steam_api64.dll` игры — и запрос сессии, и
+`Timed out attempting to connect` (end 5003) пришли исключительно через `RegisterCallback`
+во время `SteamAPI_RunCallbacks`. На этом и падала первая живая SDR-сессия: хост не принимал
+запрос, гость висел в `connecting`, и обе стороны молчали в логах. Глобальный указатель
+оставлен вторым путём. `InitRelayNetworkAccess` вызывается заранее: отдельный поток ждёт
 `SteamAPI_GetHSteamUser() != 0` и инициализирует транспорт до первого пакета.
+
+Диагностика (не зависит от колбэков): поток раз в секунду опрашивает
+`GetSessionConnectionInfo` по каждому пиру, которому слали или от которого получали, и пишет
+смены состояния / `m_eEndReason` / `m_szEndDebug`; статус relay-сети по переходам;
+`SteamAPI_RunCallbacks` хукается и считается (первый вызов, предупреждение если 5 с тишины при
+висящей сессии); первая отправка каждому пиру с `EResult`, первое сообщение от каждого пира.
 
 Fail closed, без отката: нет `steam_api64.dll`, нет экспорта, `SteamNetworkingMessages002`
 не отдался — нативы ведут себя как транспорт, который не соединяется (send → false, available →

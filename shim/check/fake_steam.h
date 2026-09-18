@@ -69,6 +69,17 @@ typedef struct fake_stats_t {
 	unsigned queued;        // messages waiting in the fake, all channels
 	unsigned conn_infos;    // GetSessionConnectionInfo calls
 	unsigned run_callbacks; // SteamAPI_RunCallbacks calls that reached the fake
+	int registered_1251;    // SteamAPI_RegisterCallback(SteamNetworkingMessagesSessionRequest_t)
+	int registered_1252;    // SteamAPI_RegisterCallback(SteamNetworkingMessagesSessionFailed_t)
+	int size_1251;          // what that object's GetCallbackSizeBytes() answered
+	int size_1252;
 } fake_stats_t;
+
+// CCallbackBase as steam_api sees it (steam_api_common.h): vtable, flags, id.
+typedef struct CCallbackBase {
+	const void **vtable; // Run(void*), Run(void*, bool, SteamAPICall_t), GetCallbackSizeBytes()
+	uint8_t m_nCallbackFlags;
+	int32_t m_iCallback;
+} CCallbackBase;
 
 #endif
