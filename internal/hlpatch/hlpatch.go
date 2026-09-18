@@ -1,7 +1,9 @@
-// Package hlpatch holds the one HashLink bytecode patch wartales-mp applies to
-// the game, and generates the C table the winmm.dll proxy compiles in.
+// Package hlpatch holds the HashLink bytecode patches wartales-mp applies to
+// the game, and generates the C table the winmm.dll proxy compiles in. Every
+// patch rewrites exactly one byte, so no register, op count, jump target or
+// debug line can shift.
 //
-// Why a bytecode patch at all -- the game's own timeout path is fatal:
+// Patch 1+2 -- the game's own timeout path is fatal:
 //
 //	hxbit.NetworkHost.flush@3969 (hxbit/NetworkHost.hx:1387,1390) calls
 //	c.timeout() on every client whose lastMessage is older than clientTimeout
@@ -30,7 +32,15 @@
 // The patch turns each of the two "did this client time out" comparisons into a
 // comparison of clientTimeout with itself, which JNotLt always takes, so the
 // call is skipped and the loop moves on. One byte each, same opcode, same
-// length: no register, op count, jump target or debug line can shift.
+// length.
+//
+// Patch 3 -- the title screen's "join by code" handler @34236
+// (src/ui/win/TitleScreen.hx:646) refuses any code whose length is not
+// exactly 5, the length of the game's own lobby codes; ours are 13, 16 or 25
+// symbols (see internal/code). The JNotEq (0x39) that guards the error branch
+// becomes JSLt (0x30) with the same operands: the error is shown only when the
+// typed code is shorter than 5, so vanilla 5-symbol codes keep working and
+// everything longer reaches joinCode@24714, where the mod's master takes over.
 package hlpatch
 
 import (
@@ -51,7 +61,7 @@ type Patch struct {
 
 // Patches are all patches applied to the bytecode image, in order.
 //
-// Both needles cover the same seven ops of hxbit.NetworkHost.flush@3969, once
+// The first two needles cover the same seven ops of hxbit.NetworkHost.flush@3969, once
 // for the pendingClients loop (NetworkHost.hx:1387) and once for the clients
 // loop (NetworkHost.hx:1390); they differ only in the JNotLt jump offset:
 //
@@ -61,6 +71,18 @@ type Patch struct {
 //	28 0b 06        GetThis     r11 = this.clientTimeout
 //	36 0b 09 kk     JNotLt      if r11 !< r9 jump over  <- r9 becomes r11
 //	1e 01 02 01 10  CallMethod  r1  = r16.timeout()     (proto index 2)
+//
+// The third needle is ops 6..12 of the title screen's join handler @34236;
+// the two four-byte function indices (34237 = 0x85bd, 24714 = 0x608a) make it
+// unique on their own:
+//
+//	47 02                    NullCheck     r2
+//	26 04 02 01              Field         r4 = r2.length
+//	01 06 1e                 Int           r6 = int@30 (= 5)
+//	39 04 06 03              JNotEq        if r4 != r6 jump +3  <- becomes JSLt (0x30)
+//	21 07 c0 00 85 bd        StaticClosure r7 = fn@34237
+//	1a 01 c0 00 60 8a 02 07  Call2         r1 = joinCode@24714(r2, r7)
+//	3a 04                    JAlways       jump +4 (over the error branch)
 var Patches = []Patch{
 	{
 		Name:   "flush/pendingClients timeout (NetworkHost.hx:1387)",
@@ -75,6 +97,13 @@ var Patches = []Patch{
 		Index:  15,
 		From:   0x09,
 		To:     0x0b,
+	},
+	{
+		Name:   "TitleScreen join code length check (TitleScreen.hx:646)",
+		Needle: []byte{0x47, 0x02, 0x26, 0x04, 0x02, 0x01, 0x01, 0x06, 0x1e, 0x39, 0x04, 0x06, 0x03, 0x21, 0x07, 0xc0, 0x00, 0x85, 0xbd, 0x1a, 0x01, 0xc0, 0x00, 0x60, 0x8a, 0x02, 0x07, 0x3a, 0x04},
+		Index:  9,
+		From:   0x39, // JNotEq: error unless length == 5
+		To:     0x30, // JSLt:   error only if length < 5
 	},
 }
 
