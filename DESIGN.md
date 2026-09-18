@@ -24,6 +24,12 @@
    клиенты — `slavepw`. Первый `@`-коннект становится хостом.
 5. Короткий код подключения выдаёт мастер: `lobby/makeShortCode` → `{shortCode}`,
    разрешает `lobby/resolveShortCode` → LobbyInfo. На Steam-протоколе не реализовано вовсе.
+   Приглашение через Steam на этом же протоколе: «пригласить друзей» шлёт
+   `lobby/initInvite {id}` → строка; игра создаёт Steam-лобби (friends-only, 256 мест),
+   пишет строку в его данные под ключом `invite` и открывает оверлей. У друга «Join Game»
+   → `+connect_lobby` → `getRawData("invite")` → `lobby/infoInvite {invite}` → LobbyInfo →
+   `lobby/join {id}`. Наш мастер отвечает на `initInvite` кодом подключения, а `infoInvite`
+   разрешает его как введённый код (или как локальный id лобби).
 6. TLS обязателен и строгий: `AsyncSocket.init@54846` ставит `verifyCert = true`,
    CA грузится из хранилища Windows (`cert_load_defaults@59352`), имя сверяется
    с `master.shirogames.com` (`ssl_set_hostname@59362`).

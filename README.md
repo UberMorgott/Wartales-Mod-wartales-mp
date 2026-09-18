@@ -81,7 +81,16 @@ one of theirs), and it will not break the game if it does not fit any more.
   UPnP and learns the external address via STUN, `stun.l.google.com:19302`,
   and Windows Firewall lets the helper in — guests connect direct instead,
   which is faster.
-- **Guest:** needs nothing either. Enter the join code the host gives you.
+- **Guest:** needs nothing either. Enter the join code the host gives you, or
+  use "Join Game" on the host in your Steam friends list.
+
+**Steam invites.** The game's own "invite friends" button and the friends-list
+"Join Game" work with the mod: the host's game creates a friends-only Steam
+lobby and stores the join code in it, the guest's game reads that code back and
+hands it to its helper, which resolves it exactly like a typed one. Both
+players must run the game through Steam. This path is implemented and covered
+by tests against a fake Steam relay, but has not yet been tried end to end on
+two machines.
 
 The lobby's own transport is chosen when it is created and logged with the
 reason. Direct is chosen only once the port has been **verified**: a
