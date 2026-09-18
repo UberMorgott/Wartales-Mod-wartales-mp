@@ -35,6 +35,12 @@ func main() {
 		err = uninstallCmd()
 	case "code":
 		err = codeCmd(args)
+	case "firewall":
+		if len(args) > 0 && args[0] == "check" {
+			err = firewallCheckCmd()
+		} else {
+			err = firewallCmd(args)
+		}
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -54,15 +60,20 @@ func usage() {
   wartales-mp uninstall           print the one-file uninstall step
   wartales-mp run [flags]         run master + relay, exit with the game
   wartales-mp code encode IP:PORT print the join code for an endpoint
-  wartales-mp code decode CODE    print the endpoint behind a join code
+  wartales-mp code decode CODE    print the routes behind a join code
+  wartales-mp firewall [-port N]  add the inbound Windows Firewall rule the
+                                  direct route needs (run as administrator;
+                                  SDR needs no rule)
+  wartales-mp firewall check      report whether that rule exists
 
 run flags:
   -port N        public TCP port for relay and proxy-link (default 14250)
   -master ADDR   master listen address (default 127.0.0.1:60442)
   -no-watch      keep serving after the game exits
   -transport M   auto (default), direct or sdr: how lobbies we host carry
-                 the game; auto = direct relay when the public endpoint is
-                 verified reachable, otherwise Steam Datagram Relay
+                 the game; auto = direct relay once the public endpoint has
+                 been verified by inbound traffic, otherwise Steam Datagram
+                 Relay; the join code always offers every route available
 
 The winmm.dll proxy in the game folder does the rest: it starts this helper and
 hooks the game's name resolution and CA setup from inside the process.

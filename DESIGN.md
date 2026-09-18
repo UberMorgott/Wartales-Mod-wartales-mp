@@ -64,7 +64,8 @@
 
 Crockford base32, как `UnifiedCode.cs` в PhoenixPoint\Multiplayer2. Direct:
 `[flags:1][ipv4:4][port:2]` → 12 символов + 1 контрольный; SDR: `[flags:1][accountID:4][key:4]`
-→ 15 + 1 (см. «Код подключения: два формата» ниже). Алфавит без `I`, `L`, `O`, `U`.
+→ 15 + 1; оба маршрута → 24 + 1 (см. «Код подключения: три формата» ниже). Алфавит без
+`I`, `L`, `O`, `U`.
 
 ### Лестница транспортов: direct → SDR
 
@@ -78,9 +79,10 @@ Crockford base32, как `UnifiedCode.cs` в PhoenixPoint\Multiplayer2. Direct:
 
 | Ступень | Когда | Что уходит на провод |
 | --- | --- | --- |
-| **direct** (наш relay) | `nat.Endpoint.Reachable` — публичный IPv4 подтверждён (UPnP/STUN) | Session-id `X<hex>` для всех: `uid.Mint` детерминированно отображает `S<steamid>` из `user/login` в `X…`, тот же игрок — тот же id на обоих концах proxy-link |
-| **SDR** (релей Valve), целиком | публичного адреса нет (LAN-only / CGNAT / резолв не удался) — «десять роутеров вглубь», ни порта, ни адреса | настоящие Steam-id игроков ровно как их сообщила игра (`S` + 16 hex, `UserID.hx:29/113`) — игра выводит из них SteamID64 пира; шим переносит легаси-вызовы на `ISteamNetworkingMessages`; код подключения несёт SteamID хоста, и proxy-link (лобби-фаза) тоже едет по SDR через мост (см. ниже) |
-| — (отказ) | публичного адреса нет **и** шим уже сообщил, что SDR в этом процессе невозможен | `lobby/create` отвечает `err "Cannot host: no usable transport: …"` с обеими причинами — честный отказ, а не лобби на пути, который не соединится. «Ещё неизвестно» (шим ждёт Steam API) — НЕ отказ: лобби создаётся, а `lobby/makeShortCode` отвечает `Steam relay not ready yet (…); ask for the code again in a few seconds`, пока мост не поднимется |
+| **direct** (наш relay) | `nat.Endpoint.Verified` — на публичный порт в этом запуске УЖЕ приходило соединение из интернета (`relay.OnInbound` → `nat.Mapper.MarkInbound`, только публичный источник считается). UPnP-маппинг + адрес от STUN (`Reachable`) — лишь подсказка: на живой машине это дало «reachable», а порт снаружи был refused | Session-id `X<hex>` для всех: `uid.Mint` детерминированно отображает `S<steamid>` из `user/login` в `X…`, тот же игрок — тот же id на обоих концах proxy-link |
+| **SDR** (релей Valve), целиком | endpoint не подтверждён (не было входящих) или его нет вовсе — «десять роутеров вглубь», ни порта, ни адреса | настоящие Steam-id игроков ровно как их сообщила игра (`S` + 16 hex, `UserID.hx:29/113`) — игра выводит из них SteamID64 пира; шим переносит легаси-вызовы на `ISteamNetworkingMessages`; код подключения несёт SteamID хоста, и proxy-link (лобби-фаза) тоже едет по SDR через мост (см. ниже). Код при этом ВСЁ РАВНО несёт и endpoint-подсказку первым маршрутом: гость, который до неё дотянется, придёт по TCP — и этим подтвердит endpoint для следующего лобби |
+| direct без подтверждения | SDR в этом процессе невозможен (`unavailable`), а подсказка есть | единственный оставшийся маршрут; в лог — `no SDR, falling back to the unverified endpoint` |
+| — (отказ) | ни endpoint, ни SDR | `lobby/create` отвечает `err "Cannot host: no usable transport: …"` с обеими причинами. «Ещё неизвестно» (шим ждёт Steam API) — НЕ отказ: лобби создаётся, а `lobby/makeShortCode` отвечает `Steam relay not ready yet (…); ask for the code again in a few seconds`, пока мост не поднимется |
 
 Принудительно: `wartales-mp run -transport direct|sdr` (`sdr` при заведомо неработающем SDR
 всё равно отказ). Решение и причина пишутся в `wartales-mp.log`
@@ -131,21 +133,62 @@ hello (uid 1), поток закрывается, ни одна команда �
 закрывает поток. TCP-proxy-link (direct) ключа не требует — как и раньше, доступность порта
 и есть доказательство.
 
-### Код подключения: два формата
+### Код подключения: три формата, один код — оба маршрута
 
 Crockford base32 (без `I`, `L`, `O`, `U`), последний символ — контрольный (сумма тел mod 32),
-бит 7 байта флагов говорит, что внутри; различаются длиной:
+биты 7 и 6 байта флагов говорят, что внутри; различаются длиной:
 
 | Формат | Payload | Длина | Пример |
 | --- | --- | --- | --- |
 | endpoint (direct) | `[flags:1, bit7=0][ipv4:4][port:2]` | 12 + 1 = 13 | `01C0SJ036YN0M` = 88.12.200.3:14250 — как в первом релизе, старые коды декодируются |
 | steam (SDR) | `[flags:1, bit7=1][accountID:4 BE][key:4 BE]` | 15 + 1 = 16 | `G00BRRAEVTPVXVRS` = account 12345678 (SteamID64 `0x0110000100BC614E`), key `deadbeef` |
+| combined (оба) | `[flags:1, bit7=1, bit6=1][ipv4:4][port:2][accountID:4 BE][key:4 BE]` | 24 + 1 = 25 | `R0PSMP226YN01F319VFAVFQFF` = 45.154.88.66:14250, затем account 12345678, key `deadbeef` |
+
+Хост выдаёт combined, когда есть и endpoint (любой IPv4, подтверждённый или нет — даже LAN), и
+SDR-маршрут (мост поднят); только один из них — соответствующий одиночный формат. Endpoint
+пере-резолвится для каждого кода (`nat.Mapper.MaxAge`, 90 с): WAN-адрес меняется между лобби
+(на живой машине чередовались .64/.66), UPnP-шлюз отвечает через раз; смена адреса сбрасывает
+`Verified`. Подтверждённость endpoint'а НИКОГДА не убирает SDR-маршрут из кода.
+
+### Каскад на стороне гостя
+
+`lobbyResolveShortCode` → `cascade`: маршруты пробуются по порядку, и маршрут засчитан только
+когда мастер хоста реально ответил на `lobby/resolveShortCode` через него:
+
+1. **direct**: TCP-connect с таймаутом `DefaultDirectTimeout` = 3 с (refused — мгновенно;
+   молча выброшенный SYN — типичный файрвол — не должен держать игрока: 3 с — один ретрансмит
+   после первого SYN в Windows), затем `link/hello` с ключом из кода и пробная команда с
+   таймаутом 5 с. `ServeLink` хоста сверяет ключ, если гость его предъявил (старые
+   endpoint-коды без ключа принимаются как раньше): адрес мог достаться чужому хелперу —
+   его мастер ответит `Invalid join code`, линк сбрасывается.
+2. **SDR**: `Bridge.Dial(steamID)`, `hello` с ключом, команды с таймаутом 8 с.
+
+Худший случай ≈ 3 + 5 + 8 = 16 с < 20 с таймаута команды у игры. Каждый исход — в
+`wartales-mp.log` (`route direct 45.154.88.66:14250 failed: …`, `falling back to SDR …`,
+`route SDR to SteamID … WORKS`); игрок видит только лишнюю паузу. Если не сработало ничего —
+`Cannot reach the host: direct …: <причина>; SDR to SteamID …: <причина>`. Тесты:
+`TestCascadeDirectWins`, `TestCascadeDirectRefusedFallsBackToSDR`,
+`TestCascadeDirectTimesOutFallsBackToSDR`, `TestCascadeWrongHostBehindTheEndpoint`,
+`TestCascadeBothFail`, `TestIssuedCodeCarriesBothRoutes`, `TestCombinedRoundTrip`.
+
+### Windows Firewall — решение
+
+У хелпера нет входящего правила (на живой машине `Get-NetFirewallApplicationFilter` его не
+нашёл), значит direct не заработает даже при верном маппинге. Хелпер запускается скрытым
+изнутри игры и НЕ запрашивает повышение: UAC-окно без своего окна за полноэкранной игрой
+закроют, и мод молча сломается. Поэтому: при старте `firewall.Check` (`netsh advfirewall
+firewall show rule name=wartales-mp dir=in`) пишет в лог `WARNING: firewall: no inbound rule
+"wartales-mp"; the direct route … cannot work until it exists` с подсказкой запустить
+`wartales-mp firewall`; direct-маршрут остаётся «подсказкой без подтверждения», SDR правила
+не требует. Одно
+ручное действие, только если хочется direct: `wartales-mp firewall` из консоли администратора
+(`netsh … add rule … program=<exe> localport=14250`), `wartales-mp firewall check` — проверить.
 
 SteamID64 восстанавливается из 32-битного account id: у любого игрового аккаунта старшие
 32 бита — `0x01100001` (universe Public, type Individual, instance Desktop). Мастер получает
 SteamID64 хоста из его же `S`-uid (`uid.SteamID64`: 8 байт hex little-endian, старший dword
-xor `0x1100001`). `code.DecodeAny` возвращает либо `Endpoint`, либо `Steam`;
-`wartales-mp code decode` печатает оба.
+xor `0x1100001`). `code.DecodeAny` возвращает `Endpoint` и/или `Steam`; `wartales-mp code
+decode` печатает, что есть.
 
 Порядок запуска: хелпер стартует раньше, чем Steam API игры готов. Пока шим не написал
 `ok bridge=…`, `lobby/create` проходит (SDR = оптимистичный выбор), а `lobby/makeShortCode` и
@@ -280,10 +323,12 @@ false, available false, read null, причина в `shim.log` и `sdr.status` 
 
 ## Границы применимости
 
-Транспорт игры на direct — TCP, поэтому UDP hole punch неприменим. Если у хоста CGNAT и UPnP
-выключен, прямое соединение не построится — мастер выберет SDR целиком: код несёт SteamID,
-лобби-фаза идёт через SDR-мост, игровая — через SDR-транспорт шима; хосту не нужен ни порт, ни
-адрес. Гостю проброс не нужен ни на одной ступени. Что остаётся условием SDR: у обоих запущен
+Транспорт игры на direct — TCP, поэтому UDP hole punch неприменим. Пока на порт хоста не
+приходило соединение из интернета (нет правила файрвола, маппинг не сработал, CGNAT), лобби
+идёт на SDR целиком: код несёт endpoint-подсказку и SteamID, гость пробует direct 3 с и
+переходит на SDR, лобби-фаза идёт через SDR-мост, игровая — через SDR-транспорт шима; хосту
+не нужен ни порт, ни адрес. Первый гость, дошедший по TCP, подтверждает endpoint — следующее
+лобби уже direct. Гостю проброс не нужен ни на одной ступени. Что остаётся условием SDR: у обоих запущен
 Steam-клиент с работающим `SteamNetworkingMessages002` и доступом к релеям Valve (если релеи
 Valve недоступны из сети игрока, SDR не поможет — тогда нужен direct). Сквозной SDR-сеанс двух
 игроков со Steam ещё не прогонялся: проверены семантика нативов и мост на loopback-подделке,

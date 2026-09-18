@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -493,18 +494,72 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	return nil
 }
 
-// lobbyMakeShortCode issues the join code. A direct lobby's code carries our
-// public endpoint; an SDR lobby's code carries our SteamID and the link key,
-// so a guest needs no address at all. Either way the host's master resolves
-// the code to the lobby.
+// lobbyMakeShortCode issues the join code with every route we can offer at
+// this moment, so the guest can cascade: the endpoint (direct, tried first)
+// whenever we have one, verified or not, and the SDR route (our Steam
+// account + the link key) whenever the bridge is up. The endpoint is
+// re-resolved for each code (nat.Mapper.MaxAge): the WAN address can change
+// between lobbies. The host's master resolves the code to the lobby either
+// way.
 func (s *Server) lobbyMakeShortCode(a lobbyArgs, p Peer) (any, error) {
 	l := s.lobbies.get(a.ID)
 	if l == nil {
 		return nil, wireErrf("Unknown lobby %s", a.ID)
 	}
-	if l.transport == TransportSDR {
-		return s.steamShortCode(l, p)
+	ep, epErr := s.endpointRoute()
+	st, sdrWhy := s.steamRoute(p)
+
+	var short string
+	var err error
+	switch {
+	case ep != nil && st != nil:
+		short, err = code.EncodeCombined(*ep, *st)
+	case st != nil:
+		short = code.EncodeSteam(*st)
+	case ep != nil:
+		// No SDR route. A pending bridge on a lobby that needs it is a
+		// "not yet", not a code that could not work.
+		if l.transport == TransportSDR && s.opt.Bridge != nil {
+			if ready, why := s.opt.Bridge.Ready(); !ready && !s.opt.Bridge.Status().Known {
+				s.opt.Log.Printf("master: join code for %s not issued yet: %s", l.id, why)
+				return nil, wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", why)
+			}
+		}
+		short, err = code.Encode(*ep)
+	default:
+		s.opt.Log.Printf("master: join code for %s cannot be issued: endpoint: %v; SDR: %s", l.id, epErr, sdrWhy)
+		if s.opt.Bridge != nil && !s.opt.Bridge.Status().Known {
+			return nil, wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", sdrWhy)
+		}
+		return nil, wireErrf("No route to offer: %v; %s", epErr, sdrWhy)
 	}
+	if err != nil {
+		return nil, err
+	}
+	s.lobbies.mu.Lock()
+	s.lobbies.codes[short] = l.id
+	s.lobbies.mu.Unlock()
+	routes := ""
+	if ep != nil {
+		routes += fmt.Sprintf("direct %s", ep.Addr())
+		if v, _ := s.endpointVerified(); !v {
+			routes += " (unverified)"
+		}
+	}
+	if st != nil {
+		if routes != "" {
+			routes += ", then "
+		}
+		routes += fmt.Sprintf("SDR to SteamID %d", st.SteamID64())
+	} else {
+		routes += "; no SDR route: " + sdrWhy
+	}
+	s.opt.Log.Printf("master: join code for %s is %s (routes: %s)", l.id, short, routes)
+	return map[string]any{"shortCode": short}, nil
+}
+
+// endpointRoute is our endpoint as a code route, if we have an IPv4 one.
+func (s *Server) endpointRoute() (*code.Endpoint, error) {
 	addr, err := s.publicAddr()
 	if err != nil {
 		return nil, fmt.Errorf("no public address: %w", err)
@@ -521,43 +576,53 @@ func (s *Server) lobbyMakeShortCode(a lobbyArgs, p Peer) (any, error) {
 	if ip == nil || ip.To4() == nil {
 		return nil, fmt.Errorf("public address %q is not IPv4", addr)
 	}
-	short, err := code.Encode(code.Endpoint{IP: ip, Port: uint16(port)})
-	if err != nil {
-		return nil, err
-	}
-	s.lobbies.mu.Lock()
-	s.lobbies.codes[short] = a.ID
-	s.lobbies.mu.Unlock()
-	s.opt.Log.Printf("master: join code for %s is %s (%s)", a.ID, short, addr)
-	return map[string]any{"shortCode": short}, nil
+	return &code.Endpoint{IP: ip, Port: uint16(port)}, nil
 }
 
-// steamShortCode is the SDR lobby's join code. It is only handed out once
-// the bridge is up: a code the guest could not yet use would be worse than a
-// clear "ask again in a moment".
-func (s *Server) steamShortCode(l *lobby, p Peer) (any, error) {
+// endpointVerified reports whether inbound from the internet has been seen.
+func (s *Server) endpointVerified() (bool, nat.Endpoint) {
+	if s.opt.Endpoint == nil {
+		return false, nat.Endpoint{}
+	}
+	ep, err := s.opt.Endpoint()
+	return err == nil && ep.Verified, ep
+}
+
+// steamRoute is our SDR route, if the game gave us a Steam id and the bridge
+// is up; otherwise the reason.
+func (s *Server) steamRoute(p Peer) (*code.Steam, string) {
 	id64, ok := uid.SteamID64(p.SteamID())
 	if !ok {
-		return nil, wireErrf("Cannot host over Steam: the game reported no Steam id")
+		return nil, "the game reported no Steam id"
 	}
 	account, ok := code.AccountID(id64)
 	if !ok {
-		return nil, wireErrf("Cannot host over Steam: %d is not a player account", id64)
+		return nil, fmt.Sprintf("%d is not a player account", id64)
 	}
 	if s.opt.Bridge == nil {
-		return nil, wireErrf("Cannot host over Steam: this helper has no SDR bridge")
+		return nil, "this helper has no SDR bridge"
 	}
 	if ready, why := s.opt.Bridge.Ready(); !ready {
-		s.opt.Log.Printf("master: join code for %s not issued yet: %s", l.id, why)
-		return nil, wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", why)
+		return nil, why
 	}
-	short := code.EncodeSteam(code.Steam{AccountID: account, Key: s.opt.LinkKey})
-	s.lobbies.mu.Lock()
-	s.lobbies.codes[short] = l.id
-	s.lobbies.mu.Unlock()
-	s.opt.Log.Printf("master: join code for %s is %s (SDR: SteamID %d, no address needed)", l.id, short, id64)
-	return map[string]any{"shortCode": short}, nil
+	return &code.Steam{AccountID: account, Key: s.opt.LinkKey}, ""
 }
+
+// DefaultDirectTimeout bounds the guest's attempt to connect to the host's
+// endpoint before it falls back to SDR: a refused port fails at once, a
+// silently dropped SYN (the common firewall case) must not keep a player
+// waiting. 3 s is one retransmit past the first SYN on Windows, well inside
+// the game's own 20 s command timeout with the SDR attempt still to come.
+const DefaultDirectTimeout = 3 * time.Second
+
+// directProbeTimeout bounds the first command over a freshly connected
+// direct link: the host answered TCP, so anything slower than this is a
+// wrong host or a dead one, and SDR is the better bet.
+const directProbeTimeout = 5 * time.Second
+
+// sdrCallTimeout bounds commands over the SDR link, so that a dead host
+// surfaces before the game's own 20 s timeout even after a direct attempt.
+const sdrCallTimeout = 8 * time.Second
 
 // lobbyResolveShortCode is where a guest becomes a guest: it decodes the code,
 // opens the proxy-link to that host and asks the host's master for the lobby.
@@ -580,62 +645,101 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 		return s.lobbyInfo(id)
 	}
 
-	if !s.linked() {
-		c, err := code.DecodeAny(a.ShortCode)
+	if s.linked() {
+		raw, _, err := s.forward("lobby/resolveShortCode", args)
+		return raw, err
+	}
+	c, err := code.DecodeAny(a.ShortCode)
+	if err != nil {
+		return nil, wireErrf("Invalid join code")
+	}
+	return s.cascade(c, args, p)
+}
+
+// cascade tries the code's routes in order: direct first (bounded by
+// DefaultDirectTimeout, then one probe command), SDR second. A route counts
+// only when the host's master actually answered lobby/resolveShortCode over
+// it; a refused hello, a dead port or a timeout falls through to the next,
+// and every outcome is logged with its reason. The guest sees nothing of it
+// but a moment's delay.
+func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error) {
+	var failures []string
+	try := func(what string, dial func() (net.Conn, error), key uint32, probe time.Duration) (json.RawMessage, bool) {
+		conn, err := dial()
 		if err != nil {
-			return nil, wireErrf("Invalid join code")
+			s.opt.Log.Printf("master: route %s failed: %v", what, err)
+			failures = append(failures, what+": "+err.Error())
+			return nil, false
 		}
-		switch {
-		case c.Endpoint != nil:
-			// Direct: the host has a public endpoint, connect to it.
-			if err := s.dialHost(c.Endpoint.Addr(), p); err != nil {
-				return nil, wireErrf("Cannot reach host %s: %v", c.Endpoint.Addr(), err)
-			}
-		case c.Steam != nil:
-			// SDR: the host has no address; reach it by SteamID through the bridge.
-			if err := s.dialHostSDR(*c.Steam, p); err != nil {
-				return nil, wireErrf("Cannot reach host over Steam: %v", err)
-			}
+		cl, err := s.attachLink(conn, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Key: key}, what, probe)
+		if err != nil {
+			s.opt.Log.Printf("master: route %s failed: %v", what, err)
+			failures = append(failures, what+": "+err.Error())
+			return nil, false
+		}
+		raw, err := cl.Call("lobby/resolveShortCode", args)
+		if err != nil {
+			// Connected, but not to a master that takes this code: a stale
+			// address now owned by someone else, a refused key, or a dead host.
+			s.opt.Log.Printf("master: route %s answered the probe with an error, dropping it: %v", what, err)
+			failures = append(failures, what+": "+err.Error())
+			s.dropLink(cl)
+			return nil, false
+		}
+		s.opt.Log.Printf("master: route %s WORKS; joining over it", what)
+		return raw, true
+	}
+
+	if c.Endpoint != nil {
+		addr := c.Endpoint.Addr()
+		var key uint32
+		if c.Steam != nil {
+			key = c.Steam.Key
+		}
+		if raw, ok := try("direct "+addr, func() (net.Conn, error) { return s.dialDirect(addr) }, key, directProbeTimeout); ok {
+			return raw, nil
+		}
+		if c.Steam != nil {
+			s.opt.Log.Printf("master: falling back to SDR after the direct route to %s failed", addr)
 		}
 	}
-	raw, ok, err := s.forward("lobby/resolveShortCode", args)
-	if !ok {
-		return nil, wireErrf("Not connected to a host")
+	if c.Steam != nil {
+		target := c.Steam.SteamID64()
+		what := fmt.Sprintf("SDR to SteamID %d", target)
+		if s.opt.Bridge == nil {
+			failures = append(failures, what+": this helper has no SDR bridge")
+		} else if ready, why := s.opt.Bridge.Ready(); !ready {
+			s.opt.Log.Printf("master: route %s deferred: %s", what, why)
+			if len(failures) == 0 {
+				return nil, wireErrf("Steam relay not ready yet (%s); try again in a few seconds", why)
+			}
+			failures = append(failures, what+": not ready ("+why+")")
+		} else if raw, ok := try(what, func() (net.Conn, error) { return s.opt.Bridge.Dial(target) }, c.Steam.Key, sdrCallTimeout); ok {
+			return raw, nil
+		}
 	}
-	return raw, err
+	return nil, wireErrf("Cannot reach the host: %s", strings.Join(failures, "; "))
 }
 
-// dialHost opens the proxy-link over TCP and starts relaying the host's
-// pushes to the local game.
-func (s *Server) dialHost(addr string, p Peer) error {
-	d := net.Dialer{Timeout: 10 * time.Second}
-	c, err := d.DialContext(context.Background(), "tcp", addr)
-	if err != nil {
-		return err
+// dialDirect connects to the host's endpoint within DefaultDirectTimeout
+// (Options.DirectTimeout), through Options.DialDirect when a test supplies one.
+func (s *Server) dialDirect(addr string) (net.Conn, error) {
+	timeout := s.opt.DirectTimeout
+	if timeout <= 0 {
+		timeout = DefaultDirectTimeout
 	}
-	return s.attachLink(c, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID()}, "proxy-link to host "+addr)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if s.opt.DialDirect != nil {
+		return s.opt.DialDirect(ctx, addr)
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", addr)
 }
 
-// dialHostSDR opens the proxy-link as a stream over the SDR bridge. The
-// bridge must be up: a join made while the shim is still bringing SDR up is
-// answered with the reason and the game shows it; the player retries.
-func (s *Server) dialHostSDR(target code.Steam, p Peer) error {
-	if s.opt.Bridge == nil {
-		return fmt.Errorf("this helper has no SDR bridge")
-	}
-	if ready, why := s.opt.Bridge.Ready(); !ready {
-		s.opt.Log.Printf("master: join over SDR to %d deferred: %s", target.SteamID64(), why)
-		return wireErrf("Steam relay not ready yet (%s); try again in a few seconds", why)
-	}
-	c, err := s.opt.Bridge.Dial(target.SteamID64())
-	if err != nil {
-		return err
-	}
-	return s.attachLink(c, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Key: target.Key},
-		fmt.Sprintf("sdr-link to host SteamID %d", target.SteamID64()))
-}
-
-func (s *Server) attachLink(c net.Conn, u link.User, what string) error {
+// attachLink runs the guest side of a link over conn and makes it the
+// master's uplink. probe bounds each command over it.
+func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Duration) (*link.Client, error) {
 	cl, err := link.DialConn(c, u,
 		func(cmd string, args json.RawMessage) {
 			if sess := s.localSession(); sess != nil {
@@ -649,11 +753,22 @@ func (s *Server) attachLink(c net.Conn, u link.User, what string) error {
 			s.opt.Log.Printf("master: %s closed", what)
 		})
 	if err != nil {
-		return err
+		return nil, err
 	}
+	cl.CallTimeout = probe
 	s.mu.Lock()
 	s.client = cl
 	s.mu.Unlock()
 	s.opt.Log.Printf("master: %s established", what)
-	return nil
+	return cl, nil
+}
+
+// dropLink closes a link that turned out not to lead to the host.
+func (s *Server) dropLink(cl *link.Client) {
+	s.mu.Lock()
+	if s.client == cl {
+		s.client = nil
+	}
+	s.mu.Unlock()
+	_ = cl.Close() // it is being discarded; its close error is moot
 }

@@ -1,17 +1,19 @@
 // Package code implements the short join code: Crockford base32 over a small
 // payload whose first byte says what it carries, plus one check symbol.
 //
-// Two layouts exist, told apart by length (and, as a belt, by bit 7 of the
-// flags byte):
+// Three layouts exist, told apart by length (and, as a belt, by bits 7 and 6
+// of the flags byte):
 //
-//	endpoint  [flags:1 bit7=0][ipv4:4][port:2]              7 bytes -> 12 + 1 = 13 symbols
-//	steam     [flags:1 bit7=1][account:4 BE][key:4 BE]       9 bytes -> 15 + 1 = 16 symbols
+//	endpoint  [flags:1 bit7=0][ipv4:4][port:2]                              7 bytes -> 12 + 1 = 13 symbols
+//	steam     [flags:1 bit7=1][account:4 BE][key:4 BE]                       9 bytes -> 15 + 1 = 16 symbols
+//	combined  [flags:1 bit7=1 bit6=1][ipv4:4][port:2][account:4 BE][key:4 BE] 15 bytes -> 24 + 1 = 25 symbols
 //
-// An endpoint code is the direct transport: the guest connects to ip:port.
-// A steam code is the SDR transport: the guest reaches the host through
+// An endpoint route is the direct transport: the guest connects to ip:port.
+// A steam route is the SDR transport: the guest reaches the host through
 // Valve's relay by SteamID64 (rebuilt from the 32-bit account id: every
 // player account is universe 1, type Individual, instance 1), and must
-// present the 32-bit key to the host's master. Old endpoint codes decode as
+// present the 32-bit key to the host's master. A combined code carries both
+// routes and the guest tries them in that order. Old endpoint codes decode as
 // they always did.
 package code
 
@@ -37,8 +39,15 @@ const (
 	// SteamLength is the total number of symbols of a steam join code.
 	SteamLength = steamBodyLen + 1
 
-	// FlagSteam in the flags byte marks the steam layout.
+	combinedPayloadLen = 15 // flags(1) + ipv4(4) + port(2) + account(4) + key(4)
+	combinedBodyLen    = 24 // 15*8/5 exactly
+	// CombinedLength is the total number of symbols of a combined join code.
+	CombinedLength = combinedBodyLen + 1
+
+	// FlagSteam in the flags byte marks a steam route; FlagBoth, together
+	// with it, the combined layout.
 	FlagSteam = 0x80
+	FlagBoth  = 0x40
 
 	// steamIDBase is SteamID64 of account 0 in universe Public, type
 	// Individual, instance Desktop: what every player account is.
@@ -73,10 +82,29 @@ func AccountID(steamID64 uint64) (uint32, bool) {
 	return uint32(steamID64 & 0xffffffff), steamID64&^0xffffffff == steamIDBase
 }
 
-// Code is a decoded join code of either layout: exactly one field is set.
+// Code is a decoded join code: the routes it carries. At least one is set;
+// a combined code sets both.
 type Code struct {
 	Endpoint *Endpoint
 	Steam    *Steam
+}
+
+// EncodeCombined turns an endpoint and a steam route into a 25 symbol code.
+func EncodeCombined(e Endpoint, s Steam) (string, error) {
+	ip4 := e.IP.To4()
+	if ip4 == nil {
+		return "", fmt.Errorf("join code needs an IPv4 address, got %v", e.IP)
+	}
+	if e.Flags&(FlagSteam|FlagBoth) != 0 || s.Flags&(FlagSteam|FlagBoth) != 0 {
+		return "", fmt.Errorf("flags bits 7 and 6 are reserved for the layout")
+	}
+	payload := make([]byte, combinedPayloadLen)
+	payload[0] = e.Flags | s.Flags | FlagSteam | FlagBoth
+	copy(payload[1:5], ip4)
+	binary.BigEndian.PutUint16(payload[5:7], e.Port)
+	binary.BigEndian.PutUint32(payload[7:11], s.AccountID)
+	binary.BigEndian.PutUint32(payload[11:15], s.Key)
+	return encode(payload, combinedBodyLen), nil
 }
 
 var errBadCode = errors.New("invalid join code")
@@ -87,8 +115,8 @@ func Encode(e Endpoint) (string, error) {
 	if ip4 == nil {
 		return "", fmt.Errorf("join code needs an IPv4 address, got %v", e.IP)
 	}
-	if e.Flags&FlagSteam != 0 {
-		return "", fmt.Errorf("endpoint flags 0x%02x: bit 7 is reserved for steam codes", e.Flags)
+	if e.Flags&(FlagSteam|FlagBoth) != 0 {
+		return "", fmt.Errorf("endpoint flags 0x%02x: bits 7 and 6 are reserved for the layout", e.Flags)
 	}
 	payload := []byte{e.Flags, ip4[0], ip4[1], ip4[2], ip4[3], byte(e.Port >> 8 & 0xff), byte(e.Port & 0xff)}
 	return encode(payload, bodyLen), nil
@@ -97,7 +125,7 @@ func Encode(e Endpoint) (string, error) {
 // EncodeSteam turns a host SteamID + key into a 16 symbol join code.
 func EncodeSteam(s Steam) string {
 	payload := make([]byte, steamPayloadLen)
-	payload[0] = s.Flags | FlagSteam
+	payload[0] = s.Flags&^(FlagSteam|FlagBoth) | FlagSteam
 	binary.BigEndian.PutUint32(payload[1:5], s.AccountID)
 	binary.BigEndian.PutUint32(payload[5:9], s.Key)
 	return encode(payload, steamBodyLen)
@@ -166,8 +194,8 @@ func Decode(s string) (Endpoint, error) {
 	if err != nil {
 		return Endpoint{}, err
 	}
-	if c.Endpoint == nil {
-		return Endpoint{}, fmt.Errorf("%w: a steam code, not an endpoint code", errBadCode)
+	if c.Endpoint == nil || c.Steam != nil {
+		return Endpoint{}, fmt.Errorf("%w: not an endpoint-only code", errBadCode)
 	}
 	return *c.Endpoint, nil
 }
@@ -178,8 +206,8 @@ func DecodeSteam(s string) (Steam, error) {
 	if err != nil {
 		return Steam{}, err
 	}
-	if c.Steam == nil {
-		return Steam{}, fmt.Errorf("%w: an endpoint code, not a steam code", errBadCode)
+	if c.Steam == nil || c.Endpoint != nil {
+		return Steam{}, fmt.Errorf("%w: not a steam-only code", errBadCode)
 	}
 	return *c.Steam, nil
 }
@@ -193,8 +221,8 @@ func DecodeAny(s string) (Code, error) {
 		if err != nil {
 			return Code{}, err
 		}
-		if p[0]&FlagSteam != 0 {
-			return Code{}, fmt.Errorf("%w: steam flag on an endpoint-length code", errBadCode)
+		if p[0]&(FlagSteam|FlagBoth) != 0 {
+			return Code{}, fmt.Errorf("%w: layout flags on an endpoint-length code", errBadCode)
 		}
 		return Code{Endpoint: &Endpoint{
 			Flags: p[0],
@@ -206,14 +234,27 @@ func DecodeAny(s string) (Code, error) {
 		if err != nil {
 			return Code{}, err
 		}
-		if p[0]&FlagSteam == 0 {
-			return Code{}, fmt.Errorf("%w: no steam flag on a steam-length code", errBadCode)
+		if p[0]&(FlagSteam|FlagBoth) != FlagSteam {
+			return Code{}, fmt.Errorf("%w: wrong layout flags on a steam-length code", errBadCode)
 		}
 		return Code{Steam: &Steam{
 			Flags:     p[0] &^ FlagSteam,
 			AccountID: binary.BigEndian.Uint32(p[1:5]),
 			Key:       binary.BigEndian.Uint32(p[5:9]),
 		}}, nil
+	case CombinedLength:
+		p, err := decode(norm, combinedBodyLen, combinedPayloadLen)
+		if err != nil {
+			return Code{}, err
+		}
+		if p[0]&(FlagSteam|FlagBoth) != FlagSteam|FlagBoth {
+			return Code{}, fmt.Errorf("%w: wrong layout flags on a combined-length code", errBadCode)
+		}
+		flags := p[0] &^ (FlagSteam | FlagBoth)
+		return Code{
+			Endpoint: &Endpoint{Flags: flags, IP: net.IPv4(p[1], p[2], p[3], p[4]), Port: binary.BigEndian.Uint16(p[5:7])},
+			Steam:    &Steam{Flags: flags, AccountID: binary.BigEndian.Uint32(p[7:11]), Key: binary.BigEndian.Uint32(p[11:15])},
+		}, nil
 	}
 	return Code{}, errBadCode
 }

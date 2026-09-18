@@ -211,7 +211,7 @@ func (w *wsClient) expectNoPush(t *testing.T, d time.Duration) {
 }
 
 // publicEndpoint is the verified-reachable host: the direct relay is chosen.
-var publicEndpoint = nat.Endpoint{Addr: "203.0.113.7:14250", IP: net.IPv4(203, 0, 113, 7), Source: "UPnP", Reachable: true}
+var publicEndpoint = nat.Endpoint{Addr: "203.0.113.7:14250", IP: net.IPv4(203, 0, 113, 7), Source: "UPnP", Reachable: true, Verified: true}
 
 // lanEndpoint is a host nobody on the internet can reach: SDR is chosen.
 var lanEndpoint = nat.Endpoint{Addr: "192.168.1.5:14250", IP: net.IPv4(192, 168, 1, 5), Source: "LAN", Reachable: false,
@@ -264,10 +264,24 @@ func startMasterOpts(t *testing.T, mod func(*Options)) (*Server, string) {
 	if mod != nil {
 		mod(&opt)
 	}
+	// PublicAddr follows Endpoint unless a test set it explicitly.
+	if !modifiedPublicAddr(opt) {
+		opt.PublicAddr = func() (string, error) {
+			e, err := opt.Endpoint()
+			return e.Addr, err
+		}
+	}
 	s := New(opt)
 	go func() { _ = s.ListenAndServe() }() // returns when t.Cleanup closes the server
 	t.Cleanup(s.Close)
 	return s, addr
+}
+
+// modifiedPublicAddr reports whether PublicAddr disagrees with the default
+// endpoint, i.e. a test set it on purpose.
+func modifiedPublicAddr(opt Options) bool {
+	addr, err := opt.PublicAddr()
+	return err != nil || addr != publicEndpoint.Addr
 }
 
 // startBridge runs a bridge against a status file until the test ends and
@@ -336,9 +350,12 @@ func TestJoinOverSDR(t *testing.T) {
 	if err := json.Unmarshal(raw, &short); err != nil {
 		t.Fatal(err)
 	}
-	sc, err := code.DecodeSteam(short.ShortCode)
-	if err != nil || sc.SteamID64() != hostID64 || sc.Key != 0xdeadbeef {
-		t.Fatalf("join code %q = %+v, %v; want SteamID %d key deadbeef", short.ShortCode, sc, err, hostID64)
+	// The host's endpoint is LAN-only, unverified: the code still offers it
+	// first (a LAN guest would take it) and the SDR route after.
+	sc, err := code.DecodeAny(short.ShortCode)
+	if err != nil || sc.Steam == nil || sc.Steam.SteamID64() != hostID64 || sc.Steam.Key != 0xdeadbeef ||
+		sc.Endpoint == nil || sc.Endpoint.Addr() != lanEndpoint.Addr {
+		t.Fatalf("join code %q = %+v, %v; want SteamID %d key deadbeef plus %s", short.ShortCode, sc, err, hostID64, lanEndpoint.Addr)
 	}
 
 	guest := dialMaster(t, guestAddr)
@@ -383,6 +400,262 @@ func TestJoinOverSDR(t *testing.T) {
 	msg := intruder.callErr(t, "lobby/resolveShortCode", map[string]any{"shortCode": tampered, "filters": map[string]any{}})
 	if !strings.Contains(msg, "Invalid join code") {
 		t.Fatalf("tampered code: %q, want the host's refusal", msg)
+	}
+}
+
+// cascadeHost is a host master with both routes on offer: a real TCP
+// proxy-link listener (what the relay's dispatch hands ServeLink) and an SDR
+// identity on the switch. It returns the master, its TCP link address and
+// the host's Steam id.
+func cascadeHost(t *testing.T, sw *sdrbridgetest.Switch, hostID64 uint64, listen bool) (*Server, string) {
+	t.Helper()
+	hostBridge := startBridge(t, sw.Add(t, hostID64), true)
+	hostSrv, _ := startMasterOpts(t, func(o *Options) {
+		o.SDRStatus, o.Bridge, o.LinkKey = hostBridge.Status, hostBridge, 0xdeadbeef
+	})
+	hostBridge.OnPeer = hostSrv.ServeSDRLink
+	if !listen {
+		return hostSrv, ""
+	}
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go hostSrv.ServeLink(c)
+		}
+	}()
+	return hostSrv, ln.Addr().String()
+}
+
+// combinedCode builds the code a host at addr (or none) with the given key
+// would issue.
+func combinedCode(t *testing.T, addr string, hostID64 uint64, key uint32) string {
+	t.Helper()
+	account, _ := code.AccountID(hostID64)
+	st := code.Steam{AccountID: account, Key: key}
+	if addr == "" {
+		return code.EncodeSteam(st)
+	}
+	tcp, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := code.EncodeCombined(code.Endpoint{IP: tcp.IP, Port: uint16(tcp.Port)}, st) //nolint:gosec // a listener port
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// guestFor starts a guest master on the switch with its own bridge (or an
+// unusable one) and returns its game-side client, logged in.
+func guestFor(t *testing.T, sw *sdrbridgetest.Switch, guestID64 uint64, sdrUsable bool, mod func(*Options)) *wsClient {
+	t.Helper()
+	var statusPath string
+	if sdrUsable {
+		statusPath = sw.Add(t, guestID64)
+	} else {
+		statusPath = sw.Unavailable(t, "steam_api64.dll is not loaded in this process")
+	}
+	guestBridge := startBridge(t, statusPath, sdrUsable)
+	_, guestAddr := startMasterOpts(t, func(o *Options) {
+		o.Endpoint = func() (nat.Endpoint, error) { return lanEndpoint, nil }
+		o.SDRStatus, o.Bridge = guestBridge.Status, guestBridge
+		if mod != nil {
+			mod(o)
+		}
+	})
+	guest := dialMaster(t, guestAddr)
+	t.Cleanup(func() { _ = guest.c.Close() })
+	guest.call(t, "user/login", map[string]any{"name": "Guest", "uid": uid.FromSteamID64(guestID64), "version": 2})
+	return guest
+}
+
+// createLobby logs the host's game in and creates a lobby, returning its id.
+func createLobby(t *testing.T, hostSrv *Server, hostID64 uint64) (*wsClient, string) {
+	t.Helper()
+	host := dialMaster(t, hostSrv.opt.Addr)
+	t.Cleanup(func() { _ = host.c.Close() })
+	host.call(t, "user/login", map[string]any{"name": "Host", "uid": uid.FromSteamID64(hostID64), "version": 2})
+	var id string
+	raw := host.call(t, "lobby/create", map[string]any{"props": map[string]any{"maxPlayers": 4}})
+	if err := json.Unmarshal(raw, &id); err != nil {
+		t.Fatal(err)
+	}
+	return host, id
+}
+
+func resolveOK(t *testing.T, guest *wsClient, short, wantID string) {
+	t.Helper()
+	var info struct {
+		ID string `json:"id"`
+	}
+	raw := guest.call(t, "lobby/resolveShortCode", map[string]any{"shortCode": short, "filters": map[string]any{}})
+	if err := json.Unmarshal(raw, &info); err != nil || info.ID != wantID {
+		t.Fatalf("resolveShortCode = %s, %v; want lobby %s", raw, err, wantID)
+	}
+}
+
+const cascadeHostID = uint64(0x0110000100BC614E)
+
+// TestCascadeDirectWins: the endpoint answers, so the guest joins over TCP
+// even though its own SDR is unusable, and the host's code mapping is shared
+// by both routes.
+func TestCascadeDirectWins(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hostSrv, linkAddr := cascadeHost(t, sw, cascadeHostID, true)
+	_, id := createLobby(t, hostSrv, cascadeHostID)
+	short := combinedCode(t, linkAddr, cascadeHostID, 0xdeadbeef)
+	hostSrv.lobbies.mu.Lock()
+	hostSrv.lobbies.codes[short] = id
+	hostSrv.lobbies.mu.Unlock()
+
+	guest := guestFor(t, sw, 0x0110000100000007, false, nil)
+	resolveOK(t, guest, short, id)
+}
+
+// TestCascadeDirectRefusedFallsBackToSDR: the endpoint in the code refuses
+// the connection (nothing listens there), so the guest falls through to SDR
+// and still joins.
+func TestCascadeDirectRefusedFallsBackToSDR(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hostSrv, _ := cascadeHost(t, sw, cascadeHostID, false)
+	_, id := createLobby(t, hostSrv, cascadeHostID)
+	// A port nobody listens on: reserve one and close it.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := ln.Addr().String()
+	_ = ln.Close()
+	short := combinedCode(t, dead, cascadeHostID, 0xdeadbeef)
+	hostSrv.lobbies.mu.Lock()
+	hostSrv.lobbies.codes[short] = id
+	hostSrv.lobbies.mu.Unlock()
+
+	guest := guestFor(t, sw, 0x0110000100000008, true, nil)
+	start := time.Now()
+	resolveOK(t, guest, short, id)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("a refused port must fail fast, took %v", d)
+	}
+}
+
+// TestCascadeDirectTimesOutFallsBackToSDR: the endpoint swallows the SYN (a
+// firewall), the bounded attempt expires, and the guest joins over SDR.
+func TestCascadeDirectTimesOutFallsBackToSDR(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hostSrv, _ := cascadeHost(t, sw, cascadeHostID, false)
+	_, id := createLobby(t, hostSrv, cascadeHostID)
+	short := combinedCode(t, "203.0.113.9:14250", cascadeHostID, 0xdeadbeef)
+	hostSrv.lobbies.mu.Lock()
+	hostSrv.lobbies.codes[short] = id
+	hostSrv.lobbies.mu.Unlock()
+
+	const timeout = 300 * time.Millisecond
+	guest := guestFor(t, sw, 0x0110000100000009, true, func(o *Options) {
+		o.DirectTimeout = timeout
+		o.DialDirect = func(ctx context.Context, addr string) (net.Conn, error) {
+			<-ctx.Done() // a black hole: nothing ever answers
+			return nil, ctx.Err()
+		}
+	})
+	start := time.Now()
+	resolveOK(t, guest, short, id)
+	if d := time.Since(start); d < timeout || d > timeout+2*time.Second {
+		t.Fatalf("expected the direct attempt to last about %v before SDR, took %v", timeout, d)
+	}
+}
+
+// TestCascadeWrongHostBehindTheEndpoint: the address in the code now answers
+// as somebody else's helper (a reused WAN address). Its master refuses the
+// key, the cascade drops that link and reaches the real host over SDR.
+func TestCascadeWrongHostBehindTheEndpoint(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hostSrv, _ := cascadeHost(t, sw, cascadeHostID, false)
+	_, id := createLobby(t, hostSrv, cascadeHostID)
+	// The stranger's helper has its own (different) key, so the probe is refused.
+	stranger, _ := startMasterOpts(t, func(o *Options) { o.LinkKey = 0x01020304 })
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go stranger.ServeLink(c)
+		}
+	}()
+	short := combinedCode(t, ln.Addr().String(), cascadeHostID, 0xdeadbeef)
+	hostSrv.lobbies.mu.Lock()
+	hostSrv.lobbies.codes[short] = id
+	hostSrv.lobbies.mu.Unlock()
+
+	guest := guestFor(t, sw, 0x0110000100000010, true, nil)
+	resolveOK(t, guest, short, id)
+}
+
+// TestCascadeBothFail: nothing works and the error names both routes.
+func TestCascadeBothFail(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := ln.Addr().String()
+	_ = ln.Close()
+	short := combinedCode(t, dead, 0x0110000100000999, 0xdeadbeef) // nobody on the switch has that id
+	guest := guestFor(t, sw, 0x0110000100000011, true, nil)
+	msg := guest.callErr(t, "lobby/resolveShortCode", map[string]any{"shortCode": short, "filters": map[string]any{}})
+	if !strings.Contains(msg, "direct "+dead) || !strings.Contains(msg, "SDR to SteamID") || !strings.Contains(msg, "EResult 3") {
+		t.Fatalf("both-fail error = %q", msg)
+	}
+}
+
+// TestIssuedCodeCarriesBothRoutes: a host with an unverified endpoint and a
+// ready bridge issues a combined code; the endpoint is offered but the lobby
+// itself is on SDR, and a verified endpoint makes the lobby direct.
+func TestIssuedCodeCarriesBothRoutes(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hinted := nat.Endpoint{Addr: "45.154.88.66:14250", IP: net.IPv4(45, 154, 88, 66), Source: "UPnP+STUN", Reachable: true}
+	bridge := startBridge(t, sw.Add(t, cascadeHostID), true)
+	srv, _ := startMasterOpts(t, func(o *Options) {
+		o.PublicAddr = func() (string, error) { return hinted.Addr, nil }
+		o.Endpoint = func() (nat.Endpoint, error) { return hinted, nil }
+		o.SDRStatus, o.Bridge, o.LinkKey = bridge.Status, bridge, 0xdeadbeef
+	})
+	host, id := createLobby(t, srv, cascadeHostID)
+	if srv.lobbies.get(id).transport != TransportSDR {
+		t.Fatal("an unverified endpoint must not put the lobby on the direct relay")
+	}
+	var short struct {
+		ShortCode string `json:"shortCode"`
+	}
+	raw := host.call(t, "lobby/makeShortCode", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &short); err != nil {
+		t.Fatal(err)
+	}
+	c, err := code.DecodeAny(short.ShortCode)
+	if err != nil || c.Endpoint == nil || c.Steam == nil {
+		t.Fatalf("code %q = %+v, %v; want both routes", short.ShortCode, c, err)
+	}
+	if c.Endpoint.Addr() != hinted.Addr || c.Steam.SteamID64() != cascadeHostID || c.Steam.Key != 0xdeadbeef {
+		t.Fatalf("routes = %s / %d key %x", c.Endpoint.Addr(), c.Steam.SteamID64(), c.Steam.Key)
 	}
 }
 
@@ -441,8 +714,11 @@ func TestSDRJoinBeforeTheBridgeIsReady(t *testing.T) {
 		ShortCode string `json:"shortCode"`
 	}
 	raw = w.call(t, "lobby/makeShortCode", map[string]any{"id": id})
-	if err := json.Unmarshal(raw, &short); err != nil || len(short.ShortCode) != code.SteamLength {
-		t.Fatalf("makeShortCode once ready = %s, %v", raw, err)
+	if err := json.Unmarshal(raw, &short); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := code.DecodeAny(short.ShortCode); err != nil || c.Steam == nil {
+		t.Fatalf("makeShortCode once ready = %s: %+v, %v; want an SDR route", raw, c, err)
 	}
 }
 

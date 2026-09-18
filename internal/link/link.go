@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -164,18 +165,24 @@ const helloUID = 1
 // Client is the guest's connection to the host's master.
 type Client struct {
 	out *conn
+	// CallTimeout bounds one Call; zero means the package default.
+	CallTimeout time.Duration
 
 	mu      sync.Mutex
 	uid     int
 	pending map[int]chan Envelope
 	closed  bool
 	refused string // the host's answer to our hello, when it said no
+	cause   error  // why the connection ended, when the transport said
 }
 
 // closedErr is the error a call gets on a closed link.
 func (c *Client) closedErr() error {
 	if c.refused != "" {
 		return fmt.Errorf("link: host refused the connection: %s", c.refused)
+	}
+	if c.cause != nil {
+		return fmt.Errorf("link: connection closed: %w", c.cause)
 	}
 	return errors.New("link: connection closed")
 }
@@ -203,6 +210,11 @@ func DialConn(c net.Conn, u User, onPush func(cmd string, args json.RawMessage),
 		for {
 			e, err := readEnvelope(br)
 			if err != nil {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+					cl.mu.Lock()
+					cl.cause = err // e.g. the SDR bridge's reason for dropping the stream
+					cl.mu.Unlock()
+				}
 				return
 			}
 			if e.UID < 0 { // reply
@@ -239,6 +251,10 @@ func DialConn(c net.Conn, u User, onPush func(cmd string, args json.RawMessage),
 // Call forwards a command to the host's master and waits for its reply.
 func (c *Client) Call(cmd string, args json.RawMessage) (json.RawMessage, error) {
 	ch := make(chan Envelope, 1)
+	timeout := c.CallTimeout
+	if timeout <= 0 {
+		timeout = CallTimeout
+	}
 	c.mu.Lock()
 	if c.closed {
 		err := c.closedErr()
@@ -269,7 +285,7 @@ func (c *Client) Call(cmd string, args json.RawMessage) (json.RawMessage, error)
 			return nil, fmt.Errorf("%s", msg)
 		}
 		return e.Args, nil
-	case <-time.After(CallTimeout):
+	case <-time.After(timeout):
 		c.mu.Lock()
 		delete(c.pending, n)
 		c.mu.Unlock()

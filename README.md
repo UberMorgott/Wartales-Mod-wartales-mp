@@ -11,13 +11,17 @@ wartales-mp replaces the rendezvous with a local one. The game talks to a master
 server running on `127.0.0.1` instead of Shiro's, and that master tells the game
 how to connect. There are exactly two ways, tried in this order:
 
-1. **Direct** — straight to the host's machine, when the host has a verified
-   public address. Neither Shiro's infrastructure nor any relay is in the path,
-   and it is the faster of the two.
+1. **Direct** — straight to the host's machine, when the host's public port
+   has actually been reached from the internet. Neither Shiro's infrastructure
+   nor any relay is in the path, and it is the faster of the two.
 2. **SDR** — Valve's modern relay network (Steam Datagram Relay) through
    `ISteamNetworkingMessages`, for everything: the lobby and the game. The host
    needs no open port and no public address at all — behind any number of
-   NATs, the join code carries the host's Steam id instead of an address.
+   NATs, the join code carries the host's Steam id as well as its address.
+
+One join code carries both routes. The guest tries the direct one first (a
+few seconds at most) and falls through to SDR on its own; you only notice a
+short pause.
 
 The game's own legacy Steam P2P path (`ISteamNetworking`, the old relay that
 is the one that fails) has been removed: the mod diverts those calls for good
@@ -65,22 +69,42 @@ one of theirs), and it will not break the game if it does not fit any more.
 
 ## Hosting
 
-- **Host:** nothing is required. With a public address and an open inbound
-  TCP port (`14250` by default; the mod tries UPnP and learns the external
-  address via STUN, `stun.l.google.com:19302`) the session runs direct, which
-  is faster. Without one — CGNAT, a locked-down router, "ten routers deep" —
-  it runs over SDR, and only Steam has to be running.
+- **Host:** nothing is required. Only Steam has to be running: the session
+  runs over SDR behind CGNAT, a locked-down router, "ten routers deep". If
+  the host's public port (`14250` by default) is reachable — the mod tries
+  UPnP and learns the external address via STUN, `stun.l.google.com:19302`,
+  and Windows Firewall lets the helper in — guests connect direct instead,
+  which is faster.
 - **Guest:** needs nothing either. Enter the join code the host gives you.
 
-The transport is chosen per lobby, when it is created, and logged with the
-reason: a verified public address means direct; otherwise SDR, and the lobby's
-player ids are then the players' real Steam ids so that the game takes its
-Steam path — which the mod carries over SDR. `wartales-mp run -transport
+The lobby's own transport is chosen when it is created and logged with the
+reason. Direct is chosen only once the port has been **verified**: a
+connection from the internet actually arrived on it during this run. A UPnP
+mapping plus a public address from STUN is treated as a hint, not proof — on a
+real machine it claimed reachability while the port was refused from outside.
+Until verified, the lobby runs over SDR, but the join code still offers the
+hinted address as its first route; the first guest who gets through over TCP
+verifies it, and the next lobby is direct. `wartales-mp run -transport
 direct|sdr` forces one.
 
-The join code tells the two apart by length: 13 symbols carry `ip:port`
-(direct), 16 symbols carry the host's Steam account and a per-run key (SDR),
-for example `G00BRRAEVTPVXVRS`. Old codes keep working.
+The join code tells the layouts apart by length: 13 symbols carry `ip:port`
+only (direct), 16 symbols carry the host's Steam account and a per-run key
+(SDR), 25 symbols carry both, for example `R0PSMP226YN01F319VFAVFQFF` =
+`45.154.88.66:14250` then Steam account `12345678`. Old codes keep working.
+
+**Windows Firewall.** The direct route also needs an inbound rule for the
+helper, and the helper never asks for elevation: it runs hidden, started from
+inside the game, and a UAC prompt behind a full-screen game would be dismissed
+and fail silently. So the mod only checks and reports (`WARNING: firewall: no
+inbound rule "wartales-mp"` in `wartales-mp.log`), and the direct route simply
+stays unverified until you add it — once, from an administrator prompt:
+
+```powershell
+wartales-mp firewall          # adds the inbound rule for the helper, TCP 14250
+wartales-mp firewall check    # reports whether it exists
+```
+
+SDR needs no rule; without one, sessions still work, over Valve's relay.
 
 Timing: the helper starts before the game's Steam client is ready. Until the
 mod reports SDR up, creating a lobby works, but asking for the join code (or
@@ -142,8 +166,12 @@ with stand-in `steam.hdll` / `steam_api64.dll` libraries:
 
 Verified in Go tests: two helpers behind a fake SDR switch, a host with no
 address issuing a Steam join code, the guest resolving it, joining and chatting
-through the bridge, a tampered key refused, and a join attempted before SDR is
-up answered with the retry error.
+through the bridge, a tampered key refused, a join attempted before SDR is up
+answered with the retry error; and the cascade — direct wins when the port
+answers, a refused port falls through to SDR at once, a silent port falls
+through after the bounded wait, a stranger behind a reused address is refused
+by key and SDR reaches the real host, and a combined code round-trips and
+rejects every corrupted symbol.
 
 Not yet verified:
 
@@ -206,11 +234,13 @@ and exits with it. It runs three things:
 | proxy-link | the same public port | forwards a guest's master commands to the host's master |
 
 The host's lobby state is authoritative. When the host asks for a join code, the
-helper encodes either its public endpoint (`ip:port`, discovered via UPnP then
-STUN) or, on SDR, its Steam account plus a key, into a short Crockford-base32
-code. A guest entering that code decodes it, opens a proxy-link to the host's
-master — over TCP to that endpoint, or as a stream over the SDR bridge to that
-Steam id — and from then on both games see one lobby. The guest's game then
+helper encodes its endpoint (`ip:port`, re-discovered via UPnP then STUN for
+each code, since the address can change) and, when the SDR bridge is up, its
+Steam account plus a key, into one Crockford-base32 code. A guest entering
+that code tries the routes in order: a proxy-link over TCP to the endpoint
+(3 s to connect, 5 s for the first answer), then a stream over the SDR bridge
+to that Steam id (8 s per command) — well inside the game's own 20 s — and
+from then on both games see one lobby. The guest's game then
 connects to the host's relay directly (direct transport) or, when the host's
 master decided on SDR, both games take their Steam path and the shim carries
 it over Valve's relay network. The decision travels inside the code and the

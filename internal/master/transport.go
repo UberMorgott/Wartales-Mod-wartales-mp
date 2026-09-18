@@ -47,15 +47,24 @@ var errNoTransport = errors.New("no usable transport")
 
 // chooseTransport decides a lobby's transport at creation:
 //
-//   - a verified public endpoint (nat.Endpoint.Reachable) keeps the direct
-//     relay, which needs no third party at all and stays the faster rung;
+//   - a VERIFIED public endpoint (nat.Endpoint.Verified: inbound from the
+//     internet has actually arrived on the port this run) keeps the direct
+//     relay, which needs no third party at all and stays the faster rung. A
+//     UPnP mapping plus a STUN address is only a hint and never enough: it
+//     was seen to be wrong on a real machine (mapping present, address
+//     public, port refused from outside);
 //   - otherwise SDR for everything, lobby phase included (the join code then
-//     carries our SteamID and the proxy-link rides the SDR bridge), unless
-//     the shim has already reported that SDR cannot work in this game
-//     process, in which case the lobby is refused with the reasons rather
-//     than quietly created on a path that cannot connect. "Not known yet" is
-//     not a refusal: the shim may still be waiting for the Steam API, and the
-//     join code request is what fails, with a retry hint, until it is ready.
+//     carries our SteamID and the proxy-link rides the SDR bridge). The join
+//     code still offers the hinted endpoint as its first route, so guests
+//     that can reach it do, and their arrival is what verifies it for the
+//     next lobby;
+//   - if the shim has reported that SDR cannot work in this game process, a
+//     hinted endpoint is used unverified (and logged as such) because it is
+//     the only route left; with no endpoint at all the lobby is refused with
+//     the reasons rather than quietly created on a path that cannot connect.
+//     "Not known yet" is not a refusal: the shim may still be waiting for the
+//     Steam API, and the join code request is what fails, with a retry hint,
+//     until it is ready.
 //
 // mode forces either transport; forcing SDR against a known-bad SDR is still
 // refused. The returned string is the reason, for the log.
@@ -64,8 +73,11 @@ func chooseTransport(mode string, ep nat.Endpoint, epErr error, sdr SDRStatus) (
 		if epErr != nil {
 			return "public endpoint unknown (" + epErr.Error() + ")"
 		}
+		if ep.Verified {
+			return fmt.Sprintf("public endpoint %s verified reachable (inbound seen; via %s)", ep.Addr, ep.Source)
+		}
 		if ep.Reachable {
-			return fmt.Sprintf("public endpoint %s reachable (via %s)", ep.Addr, ep.Source)
+			return fmt.Sprintf("public endpoint %s hinted by %s but UNVERIFIED (no inbound seen yet)", ep.Addr, ep.Source)
 		}
 		if ep.Warning != "" {
 			return fmt.Sprintf("endpoint %s not internet-reachable: %s", ep.Addr, ep.Warning)
@@ -97,10 +109,14 @@ func chooseTransport(mode string, ep nat.Endpoint, epErr error, sdr SDRStatus) (
 		return TransportDirect, "", fmt.Errorf("unknown transport mode %q", mode)
 	}
 
-	if epErr == nil && ep.Reachable {
+	if epErr == nil && ep.Verified {
 		return TransportDirect, endpoint(), nil
 	}
 	if sdr.Known && !sdr.OK {
+		if epErr == nil && ep.Reachable {
+			// The only route left is the unproven one: take it, and say so.
+			return TransportDirect, "no SDR, falling back to the unverified endpoint: " + endpoint() + "; " + sdrState(), nil
+		}
 		return TransportDirect, "", fmt.Errorf("%w: %s; %s", errNoTransport, endpoint(), sdrState())
 	}
 	return TransportSDR, endpoint() + "; " + sdrState(), nil

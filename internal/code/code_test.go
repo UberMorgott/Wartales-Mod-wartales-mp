@@ -10,7 +10,7 @@ func TestRoundTrip(t *testing.T) {
 	cases := []Endpoint{
 		{Flags: 0, IP: net.IPv4(127, 0, 0, 1), Port: 14250},
 		{Flags: 1, IP: net.IPv4(0, 0, 0, 0), Port: 0},
-		{Flags: 0x7f, IP: net.IPv4(255, 255, 255, 255), Port: 65535},
+		{Flags: 0x3f, IP: net.IPv4(255, 255, 255, 255), Port: 65535},
 		{Flags: 0, IP: net.IPv4(88, 12, 200, 3), Port: 1},
 	}
 	for _, want := range cases {
@@ -92,7 +92,7 @@ func TestEndpointCodesAreUnchanged(t *testing.T) {
 	}
 	for _, e := range []Endpoint{
 		{IP: net.IPv4(88, 12, 200, 3), Port: 14250},
-		{Flags: 0x7f, IP: net.IPv4(255, 255, 255, 255), Port: 65535},
+		{Flags: 0x3f, IP: net.IPv4(255, 255, 255, 255), Port: 65535},
 		{IP: net.IPv4(0, 0, 0, 0), Port: 0},
 	} {
 		s, err := Encode(e)
@@ -117,7 +117,7 @@ func TestSteamRoundTrip(t *testing.T) {
 		{AccountID: 0, Key: 0},
 		{AccountID: 0xffffffff, Key: 0xffffffff},
 		{AccountID: 12345678, Key: 0xdeadbeef},
-		{Flags: 0x7f, AccountID: 1, Key: 2},
+		{Flags: 0x3f, AccountID: 1, Key: 2}, // bits 7 and 6 belong to the layout
 	}
 	for _, want := range cases {
 		s := EncodeSteam(want)
@@ -156,6 +156,58 @@ func TestSteamRoundTrip(t *testing.T) {
 		if _, err := DecodeSteam(bad); err == nil {
 			t.Fatalf("DecodeSteam(%q) accepted a corrupted symbol %d", bad, i)
 		}
+	}
+}
+
+func TestCombinedRoundTrip(t *testing.T) {
+	ep := Endpoint{IP: net.IPv4(45, 154, 88, 66), Port: 14250}
+	st := Steam{AccountID: 12345678, Key: 0xdeadbeef}
+	s, err := EncodeCombined(ep, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s) != CombinedLength {
+		t.Fatalf("EncodeCombined = %q, want %d symbols", s, CombinedLength)
+	}
+	// [c0][2d 9a 58 42][37 aa][00 bc 61 4e][de ad be ef] as a 120-bit stream,
+	// computed independently.
+	const want = "R0PSMP226YN01F319VFAVFQFF"
+	if s != want {
+		t.Fatalf("EncodeCombined = %q, want %q", s, want)
+	}
+	c, err := DecodeAny(s)
+	if err != nil || c.Endpoint == nil || c.Steam == nil {
+		t.Fatalf("DecodeAny(%q) = %+v, %v", s, c, err)
+	}
+	if !c.Endpoint.IP.Equal(ep.IP) || c.Endpoint.Port != ep.Port || *c.Steam != st {
+		t.Fatalf("round trip: %+v / %+v", c.Endpoint, c.Steam)
+	}
+	if c.Steam.SteamID64() != 0x0110000100BC614E {
+		t.Fatalf("SteamID64 = %x", c.Steam.SteamID64())
+	}
+	// The single-route decoders refuse it: a caller that ignores one route
+	// would silently lose the cascade.
+	if _, err := Decode(s); err == nil {
+		t.Fatal("Decode accepted a combined code")
+	}
+	if _, err := DecodeSteam(s); err == nil {
+		t.Fatal("DecodeSteam accepted a combined code")
+	}
+	// Corrupting any symbol is caught.
+	for i := range CombinedLength {
+		idx := strings.IndexByte(Alphabet, s[i])
+		bad := s[:i] + string(Alphabet[(idx+1)%32]) + s[i+1:]
+		if _, err := DecodeAny(bad); err == nil {
+			t.Fatalf("DecodeAny(%q) accepted a corrupted symbol %d", bad, i)
+		}
+	}
+	// Reserved bits in the callers' flags are refused.
+	if _, err := EncodeCombined(Endpoint{Flags: FlagBoth, IP: ep.IP, Port: 1}, st); err == nil {
+		t.Fatal("bit 6 of the flags is reserved")
+	}
+	// The three layouts never collide: distinct lengths.
+	if Length == SteamLength || SteamLength == CombinedLength || Length == CombinedLength {
+		t.Fatal("layouts must differ in length")
 	}
 }
 

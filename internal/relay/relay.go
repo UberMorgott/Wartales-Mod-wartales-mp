@@ -44,6 +44,9 @@ type Server struct {
 	HostPW  string
 	SlavePW string
 	Log     *log.Logger
+	// OnInbound, if set, sees the source of every accepted connection: it is
+	// how the public endpoint gets verified as reachable.
+	OnInbound func(net.Addr)
 
 	mu      sync.Mutex
 	clients map[uint16]*client
@@ -97,6 +100,9 @@ func (s *Server) dispatch(c net.Conn, onLink func(net.Conn)) {
 	if err != nil {
 		_ = c.Close() // the peer never sent anything; nothing to report to
 		return
+	}
+	if s.OnInbound != nil {
+		s.OnInbound(c.RemoteAddr()) // it spoke: the port is reachable from there
 	}
 	if string(head) == "GET " {
 		s.Log.Printf("relay: accepted websocket from %s", c.RemoteAddr())

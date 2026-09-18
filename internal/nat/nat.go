@@ -22,30 +22,63 @@ import (
 const MappingLease = 2 * time.Hour
 
 // Endpoint is the address we hand out, plus how honest we can be about it.
+//
+// Reachable is only a HINT: a router that answered UPnP and a STUN server
+// that saw a public address prove nothing about inbound traffic (a firewall
+// rule missing on this machine, a mapping the router silently dropped, a
+// second NAT). Verified is the proof: a connection from a public address has
+// actually arrived on the port during this run.
 type Endpoint struct {
 	Addr      string // "ip:port"
 	IP        net.IP
 	Source    string // "UPnP", "STUN", "UPnP+STUN" (mapped port + STUN address), "LAN"
-	Reachable bool   // true only when IP is a public IPv4
+	Reachable bool   // IP is a public IPv4 (a hint, see above)
+	Verified  bool   // inbound from the internet has been seen on the port this run
 	Mapped    bool   // a UPnP port mapping is in place
 	Warning   string // why the endpoint is not internet-reachable
+	At        time.Time
 }
+
+// DefaultMaxAge is how old a resolved endpoint may be before it is resolved
+// again: the WAN address can change between lobbies (observed alternating on
+// a carrier that hands out two), and the UPnP gateway may answer one time and
+// not the next.
+const DefaultMaxAge = 90 * time.Second
 
 // Mapper resolves and caches the public "ip:port" for our relay port.
 type Mapper struct {
-	Port int
-	Log  *log.Logger
+	Port   int
+	Log    *log.Logger
+	MaxAge time.Duration // 0 = DefaultMaxAge; negative = never re-resolve
 
-	mu     sync.Mutex
-	igd    *IGD
-	ep     Endpoint
-	done   bool
-	mapped bool
+	mu           sync.Mutex
+	igd          *IGD
+	ep           Endpoint
+	done         bool
+	mapped       bool
+	verifiedFrom net.IP
 }
 
 // NewMapper creates a mapper for the given public TCP port.
 func NewMapper(port int, logger *log.Logger) *Mapper {
 	return &Mapper{Port: port, Log: logger}
+}
+
+// MarkInbound records that a connection arrived on the port from ip. Only a
+// public source proves internet reachability; a LAN guest proves nothing
+// about the router. Reports whether the endpoint is now verified.
+func (m *Mapper) MarkInbound(ip net.IP) bool {
+	if !IsPublicIPv4(ip) {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.verifiedFrom == nil {
+		m.verifiedFrom = ip
+		m.ep.Verified = true
+		m.Log.Printf("nat: inbound connection from %s: the public endpoint is now VERIFIED reachable", ip)
+	}
+	return true
 }
 
 // Addr returns the cached public endpoint, resolving it on first use.
@@ -62,18 +95,35 @@ func (m *Mapper) Addr() (string, error) {
 func (m *Mapper) Endpoint() (Endpoint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.done {
+	maxAge := m.MaxAge
+	if maxAge == 0 {
+		maxAge = DefaultMaxAge
+	}
+	if m.done && (maxAge < 0 || time.Since(m.ep.At) < maxAge) {
 		return m.ep, nil
 	}
 	ep, err := m.resolve()
 	if err != nil {
+		if m.done {
+			m.Log.Printf("nat: re-resolving the public endpoint failed (%v), keeping %s", err, m.ep.Addr)
+			return m.ep, nil
+		}
 		return Endpoint{}, err
 	}
 	ep.Addr = net.JoinHostPort(ep.IP.String(), strconv.Itoa(m.Port))
 	ep.Mapped = m.mapped
+	ep.At = time.Now()
+	// Verification is per address: a new WAN address starts unproven.
+	ep.Verified = m.verifiedFrom != nil && m.done && m.ep.IP.Equal(ep.IP)
+	if m.done && !m.ep.IP.Equal(ep.IP) {
+		m.Log.Printf("nat: public address changed %s -> %s", m.ep.IP, ep.IP)
+	}
 	m.ep, m.done = ep, true
-	note := ""
-	if !ep.Reachable {
+	note := ", unverified"
+	switch {
+	case ep.Verified:
+		note = ", verified by inbound traffic"
+	case !ep.Reachable:
 		note = ", NOT internet-reachable"
 	}
 	m.Log.Printf("nat: public endpoint %s (source %s%s)", ep.Addr, ep.Source, note)

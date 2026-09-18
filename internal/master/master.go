@@ -6,6 +6,7 @@
 package master
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/link"
@@ -59,9 +61,15 @@ type Options struct {
 	// Bridge carries the proxy-link over SDR; nil means the lobby phase can
 	// only travel over TCP.
 	Bridge *sdrbridge.Bridge
-	// LinkKey is embedded in steam join codes; a proxy-link over SDR must
-	// present it.
+	// LinkKey is embedded in join codes that carry an SDR route; a proxy-link
+	// over SDR must present it, and one over TCP must when it presents any.
 	LinkKey uint32
+
+	// DirectTimeout bounds a guest's connect to the host's endpoint before
+	// the cascade moves on to SDR (0 = DefaultDirectTimeout).
+	DirectTimeout time.Duration
+	// DialDirect replaces the TCP dialer of the direct route (tests).
+	DialDirect func(ctx context.Context, addr string) (net.Conn, error)
 }
 
 // Server is the master.
@@ -144,9 +152,17 @@ func (s *Server) isClosed() bool {
 }
 
 // ServeLink handles one guest's proxy-link connection over TCP (host role,
-// direct transport). The guest proved it can reach us by connecting.
+// direct transport). A guest holding a code with our key presents it and it
+// must match: a stale address may now be somebody else's host. A guest with
+// an endpoint-only code (no key) is still served, as it always was.
 func (s *Server) ServeLink(c net.Conn) {
-	s.serveLink(c, "proxy-link", nil)
+	s.serveLink(c, "proxy-link", func(u link.User) error {
+		if u.Key != 0 && u.Key != s.opt.LinkKey {
+			s.opt.Log.Printf("proxy-link: connection from %s refused: wrong join code key", c.RemoteAddr())
+			return wireErrf("Invalid join code")
+		}
+		return nil
+	})
 }
 
 // ServeSDRLink handles one guest's proxy-link stream over the SDR bridge

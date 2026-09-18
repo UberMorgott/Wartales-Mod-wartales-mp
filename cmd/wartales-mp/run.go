@@ -16,6 +16,7 @@ import (
 
 	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/code"
+	"github.com/UberMorgott/wartales-mp/internal/firewall"
 	"github.com/UberMorgott/wartales-mp/internal/install"
 	"github.com/UberMorgott/wartales-mp/internal/master"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
@@ -92,8 +93,32 @@ func runCmd(args []string) error {
 		LinkKey:    binary.BigEndian.Uint32(key[:]),
 	})
 	bridge.OnPeer = ms.ServeSDRLink
-	logger.Printf("transport mode %s (direct relay when the public endpoint is verified, else SDR for everything)", *transport)
+	// A connection arriving on the public port from the internet is the only
+	// proof the endpoint is reachable; UPnP and STUN are hints.
+	rl.OnInbound = func(a net.Addr) {
+		if tcp, ok := a.(*net.TCPAddr); ok {
+			mapper.MarkInbound(tcp.IP)
+		}
+	}
+	logger.Printf("transport mode %s (direct relay once the public endpoint is verified by inbound traffic, else SDR for everything; "+
+		"the join code offers both routes)", *transport)
 	defer ms.Close()
+
+	// The direct route also needs an inbound firewall rule for this exe. The
+	// helper never asks for elevation (it runs hidden, behind the game), so
+	// the state is only reported; `wartales-mp firewall` adds the rule.
+	go func() {
+		st, err := firewall.Check(context.Background())
+		switch {
+		case err != nil:
+			logger.Printf("firewall: cannot check the inbound rule: %v", err)
+		case st.Present:
+			logger.Printf("firewall: %s", st.Detail)
+		default:
+			logger.Printf("WARNING: firewall: %s; the direct route (TCP %d inbound) cannot work until it exists: "+
+				"run `wartales-mp firewall` once from an elevated prompt. SDR needs no rule.", st.Detail, *port)
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -137,6 +162,35 @@ func runCmd(args []string) error {
 
 func installCmd() error   { return install.Install(os.Stdout) }
 func uninstallCmd() error { return install.Uninstall(os.Stdout) }
+
+// firewallCmd adds the inbound rule for this executable. It is the one step
+// that needs elevation, and the only one the user is ever asked to do, and
+// only if they want the direct route; SDR works without it.
+func firewallCmd(args []string) error {
+	fs := flag.NewFlagSet("firewall", flag.ContinueOnError)
+	port := fs.Int("port", 14250, "public TCP port the rule allows")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := firewall.Add(context.Background(), exe, *port); err != nil {
+		return err
+	}
+	fmt.Printf("firewall: inbound rule %q added for %s, TCP %d\n", firewall.RuleName, exe, *port)
+	return nil
+}
+
+func firewallCheckCmd() error {
+	st, err := firewall.Check(context.Background())
+	if err != nil {
+		return err
+	}
+	fmt.Println("firewall:", st.Detail)
+	return nil
+}
 
 func codeCmd(args []string) error {
 	if len(args) != 2 {

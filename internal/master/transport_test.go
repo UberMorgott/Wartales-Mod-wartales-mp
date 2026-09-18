@@ -10,7 +10,10 @@ import (
 )
 
 func TestChooseTransport(t *testing.T) {
-	public := nat.Endpoint{Addr: "198.51.100.7:14250", IP: net.IPv4(198, 51, 100, 7), Source: "UPnP", Reachable: true}
+	public := nat.Endpoint{Addr: "198.51.100.7:14250", IP: net.IPv4(198, 51, 100, 7), Source: "UPnP", Reachable: true, Verified: true}
+	// hinted is the live case that started this: UPnP mapped, STUN public,
+	// port refused from outside. Reachable, never Verified.
+	hinted := nat.Endpoint{Addr: "45.154.88.66:14250", IP: net.IPv4(45, 154, 88, 66), Source: "UPnP+STUN", Reachable: true}
 	lan := nat.Endpoint{Addr: "192.168.1.5:14250", IP: net.IPv4(192, 168, 1, 5), Source: "LAN", Reachable: false,
 		Warning: "no public address found: UPnP=192.168.0.1 (private (RFC1918)), STUN=none; the join code works on the LAN only"}
 	sdrOK := SDRStatus{Known: true, OK: true}
@@ -27,9 +30,12 @@ func TestChooseTransport(t *testing.T) {
 		wantErr bool
 		reason  string // substring the log line must carry
 	}{
-		{"auto, reachable endpoint -> direct", ModeAuto, public, nil, sdrOK, TransportDirect, false, "reachable (via UPnP)"},
-		{"auto, reachable endpoint, SDR unknown -> direct", "", public, nil, sdrUnknown, TransportDirect, false, "reachable"},
-		{"auto, reachable endpoint, SDR bad -> direct", ModeAuto, public, nil, sdrBad, TransportDirect, false, "reachable"},
+		{"auto, verified endpoint -> direct", ModeAuto, public, nil, sdrOK, TransportDirect, false, "verified reachable"},
+		{"auto, verified endpoint, SDR unknown -> direct", "", public, nil, sdrUnknown, TransportDirect, false, "verified"},
+		{"auto, verified endpoint, SDR bad -> direct", ModeAuto, public, nil, sdrBad, TransportDirect, false, "verified"},
+		{"auto, hinted-only endpoint, SDR ready -> SDR", ModeAuto, hinted, nil, sdrOK, TransportSDR, false, "UNVERIFIED"},
+		{"auto, hinted-only endpoint, SDR unknown -> SDR", ModeAuto, hinted, nil, sdrUnknown, TransportSDR, false, "UNVERIFIED"},
+		{"auto, hinted-only endpoint, SDR bad -> direct, flagged", ModeAuto, hinted, nil, sdrBad, TransportDirect, false, "unverified endpoint"},
 		{"auto, LAN only, SDR ready -> SDR", ModeAuto, lan, nil, sdrOK, TransportSDR, false, "SDR ready"},
 		{"auto, LAN only, SDR unknown -> SDR (optimistic)", ModeAuto, lan, nil, sdrUnknown, TransportSDR, false, "SDR status unknown"},
 		{"auto, endpoint error, SDR ready -> SDR", ModeAuto, nat.Endpoint{}, errors.New("could not determine any address"), sdrOK, TransportSDR, false, "public endpoint unknown"},
