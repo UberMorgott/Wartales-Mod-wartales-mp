@@ -886,7 +886,9 @@ func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Dur
 	s.mu.Lock()
 	s.client = cl
 	s.mu.Unlock()
-	s.opt.Log.Printf("master: %s established", what)
+	// Over SDR this only means the hello left for the shim; the first reply
+	// (or the probe's timeout) is what proves the host was reached.
+	s.opt.Log.Printf("master: %s: link open, hello sent; waiting for the host's first reply", what)
 	return cl, nil
 }
 

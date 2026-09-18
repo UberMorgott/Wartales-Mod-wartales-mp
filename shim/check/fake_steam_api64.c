@@ -175,6 +175,33 @@ EXPORT void SteamAPI_SteamNetworkingMessage_t_Release(SteamNetworkingMessage_t *
 	LeaveCriticalSection(&lock);
 }
 
+// The session with whoever we last sent to is "connected"; everyone else: none.
+EXPORT int SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo(void *self, const SteamNetworkingIdentity *peer,
+	SteamNetConnectionInfo_t *info, void *quick) {
+	int state;
+	(void)quick;
+	if (self != &g_msgs || peer == NULL || peer->m_eType != IDENTITY_STEAMID)
+		return 0;
+	EnterCriticalSection(&lock);
+	st.conn_infos++;
+	state = st.sends > 0 && peer->m_steamID64 == st.last_send_to ? 3 : 0; // k_ESteamNetworkingConnectionState_Connected
+	LeaveCriticalSection(&lock);
+	if (info != NULL) {
+		memset(info, 0, sizeof(*info));
+		info->m_identityRemote = *peer;
+		info->m_eState = state;
+		info->m_idPOPRelay = state == 3 ? 0x666b6521 : 0; // "fke!"
+		strcpy(info->m_szConnectionDescription, state == 3 ? "fake loopback connection" : "no connection");
+	}
+	return state;
+}
+
+EXPORT void SteamAPI_RunCallbacks(void) {
+	EnterCriticalSection(&lock);
+	st.run_callbacks++;
+	LeaveCriticalSection(&lock);
+}
+
 EXPORT void SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(void *self) {
 	if (self == &g_utils)
 		st.relay_inits++;

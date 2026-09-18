@@ -65,6 +65,12 @@ C_ASSERT(offsetof(sdr_msg, peer) == 16);
 C_ASSERT(offsetof(sdr_msg, release) == 184);
 C_ASSERT(offsetof(sdr_msg, channel) == 192);
 C_ASSERT(sizeof(sdr_msg) == 216);
+C_ASSERT(offsetof(sdr_conn_info, state) == 176);
+C_ASSERT(offsetof(sdr_conn_info, end_reason) == 180);
+C_ASSERT(offsetof(sdr_conn_info, end_debug) == 184);
+C_ASSERT(offsetof(sdr_conn_info, description) == 312);
+C_ASSERT(offsetof(sdr_conn_info, flags) == 440);
+C_ASSERT(sizeof(sdr_conn_info) == 696);
 
 // k_nSteamNetworkingSend_*
 #define SDR_SEND_UNRELIABLE 0
@@ -84,6 +90,8 @@ typedef void (*sdr_release_fn)(sdr_msg *m);
 typedef void (*sdr_init_relay_fn)(void *self);
 typedef int (*sdr_relay_status_fn)(void *self, void *details);
 typedef unsigned char (*sdr_set_cb_fn)(void *self, void (*cb)(void *ev));
+typedef int (*sdr_conn_info_fn)(void *self, const sdr_identity *peer, sdr_conn_info *info, void *quick);
+typedef void (*sdr_run_callbacks_fn)(void);
 
 static struct {
 	sdr_hsteamuser_fn get_hsteamuser;
@@ -98,7 +106,20 @@ static struct {
 	sdr_relay_status_fn relay_status;
 	sdr_set_cb_fn on_request;
 	sdr_set_cb_fn on_failed;
+	sdr_conn_info_fn conn_info; // optional: diagnostics only
 } api;
+
+// Diagnostics: the game's SteamAPI_RunCallbacks is what delivers the session
+// callbacks below, so it is counted; the count is 0 until the hook is in.
+static sdr_run_callbacks_fn real_run_callbacks;
+static volatile LONG run_callbacks_count;
+static BOOL run_callbacks_hooked;
+
+static void detour_run_callbacks(void) {
+	if (InterlockedIncrement(&run_callbacks_count) == 1)
+		shim_log("sdr: the game called SteamAPI_RunCallbacks for the first time (Steam callbacks are being dispatched)");
+	real_run_callbacks();
+}
 
 // Resolved by name; a missing export is a hard failure with the name logged.
 static const struct {
@@ -172,6 +193,126 @@ static struct {
 // Counters for the log.
 static unsigned long sdr_sent, sdr_send_failed, sdr_received, sdr_dropped, sdr_accepted;
 
+// ---------------------------------------------------------------------------
+// Session diagnostics. Every peer we send to or hear from is watched: a
+// thread polls GetSessionConnectionInfo once a second and logs each change of
+// state / end reason, plus the relay status and whether the game keeps
+// calling SteamAPI_RunCallbacks. None of it depends on Steam callbacks
+// firing, which is the point.
+// ---------------------------------------------------------------------------
+
+#define SDR_WATCH_MAX 16
+
+static struct {
+	uint64_t id;
+	int state;
+	int end_reason;
+	DWORD state_since;
+	BOOL stuck_logged;
+} sdr_watch[SDR_WATCH_MAX];
+static unsigned sdr_watch_n;
+static int sdr_relay_last = -1000;
+static BOOL sdr_diag_started;
+
+static const char *state_name(int s) {
+	switch (s) {
+	case 0: return "none";
+	case 1: return "connecting";
+	case 2: return "finding route";
+	case 3: return "connected";
+	case 4: return "closed by peer";
+	case 5: return "problem detected locally";
+	case -1: return "fin wait";
+	case -2: return "linger";
+	case -3: return "dead";
+	default: return "?";
+	}
+}
+
+// watch_peer starts following id; returns TRUE when it is new. Lock held.
+static BOOL watch_peer(uint64_t id) {
+	unsigned i;
+	for (i = 0; i < sdr_watch_n; i++)
+		if (sdr_watch[i].id == id)
+			return FALSE;
+	if (sdr_watch_n == SDR_WATCH_MAX)
+		return FALSE;
+	sdr_watch[sdr_watch_n].id = id;
+	sdr_watch[sdr_watch_n].state = -1000; // unknown yet
+	sdr_watch[sdr_watch_n].end_reason = 0;
+	sdr_watch[sdr_watch_n].state_since = GetTickCount();
+	sdr_watch[sdr_watch_n].stuck_logged = FALSE;
+	sdr_watch_n++;
+	return TRUE;
+}
+
+// diag_tick polls what is watched. Lock held.
+static void diag_tick(void) {
+	unsigned i;
+	int relay;
+	DWORD now = GetTickCount();
+	static DWORD last_run_count_change;
+	static LONG last_run_count = -1;
+	static BOOL run_warned;
+	LONG runs = run_callbacks_count;
+
+	if (state != SDR_READY)
+		return;
+	if (sdr_utils != NULL) {
+		relay = api.relay_status(sdr_utils, NULL);
+		if (relay != sdr_relay_last) {
+			shim_log("sdr: relay network status %d -> %d (100 = current, 2 = waiting, 3 = attempting, <0 = failed)", sdr_relay_last, relay);
+			sdr_relay_last = relay;
+		}
+	}
+	if (runs != last_run_count) {
+		last_run_count = runs;
+		last_run_count_change = now;
+		run_warned = FALSE;
+	} else if (run_callbacks_hooked && sdr_watch_n > 0 && !run_warned && now - last_run_count_change > 5000) {
+		run_warned = TRUE;
+		shim_log("sdr: WARNING: the game has not called SteamAPI_RunCallbacks for 5 s (%ld calls so far); "
+			"session request/failed callbacks cannot be delivered while that lasts", runs);
+	}
+	if (api.conn_info == NULL)
+		return;
+	for (i = 0; i < sdr_watch_n; i++) {
+		sdr_identity peer;
+		sdr_conn_info info;
+		int st;
+		identity_of(&peer, sdr_watch[i].id);
+		memset(&info, 0, sizeof(info));
+		st = api.conn_info(sdr_msgs, &peer, &info, NULL);
+		info.end_debug[sizeof(info.end_debug) - 1] = 0;
+		info.description[sizeof(info.description) - 1] = 0;
+		if (st != sdr_watch[i].state || info.end_reason != sdr_watch[i].end_reason) {
+			shim_log("sdr: session with %llu: state %d (%s)%s%s, end reason %d '%s', relay POP %u, RunCallbacks %ld; %s",
+				(unsigned long long)sdr_watch[i].id, st, state_name(st),
+				sdr_watch[i].state == -1000 ? "" : " was ", sdr_watch[i].state == -1000 ? "" : state_name(sdr_watch[i].state),
+				info.end_reason, info.end_debug, (unsigned)info.pop_relay, runs, info.description);
+			sdr_watch[i].state = st;
+			sdr_watch[i].end_reason = info.end_reason;
+			sdr_watch[i].state_since = now;
+			sdr_watch[i].stuck_logged = FALSE;
+		} else if ((st == 1 || st == 2) && !sdr_watch[i].stuck_logged && now - sdr_watch[i].state_since > 10000) {
+			sdr_watch[i].stuck_logged = TRUE;
+			shim_log("sdr: session with %llu still %s after 10 s (no answer from the peer's Steam client yet); %s",
+				(unsigned long long)sdr_watch[i].id, state_name(st), info.description);
+		}
+	}
+}
+
+static DWORD WINAPI diag_thread(LPVOID unused) {
+	(void)unused;
+	for (;;) {
+		Sleep(1000);
+		EnterCriticalSection(&sdr_lock);
+		diag_tick();
+		LeaveCriticalSection(&sdr_lock);
+	}
+	return 0; // not reached
+}
+
 static void sdr_init_lock(void) {
 	if (!sdr_lock_ready) {
 		InitializeCriticalSection(&sdr_lock);
@@ -226,18 +367,27 @@ static void on_session_request(void *ev) {
 		return;
 	ok = api.accept(sdr_msgs, peer);
 	sdr_accepted++;
-	shim_log("sdr: session request from %llu (type %d): %s", (unsigned long long)peer->u.steam_id,
-		peer->type, ok ? "accepted" : "accept FAILED");
+	shim_log("sdr: session request from %llu (type %d): %s (RunCallbacks %ld)", (unsigned long long)peer->u.steam_id,
+		peer->type, ok ? "accepted" : "accept FAILED", run_callbacks_count);
+	if (peer->type == SDR_IDENTITY_STEAMID) {
+		EnterCriticalSection(&sdr_lock);
+		watch_peer(peer->u.steam_id);
+		LeaveCriticalSection(&sdr_lock);
+	}
 }
 
 static void on_session_failed(void *ev) {
-	// SteamNetworkingMessagesSessionFailed_t { SteamNetConnectionInfo_t m_info }:
-	// m_identityRemote is the first field of the info struct.
-	const sdr_identity *peer = (const sdr_identity *)ev;
-	if (peer == NULL)
+	// SteamNetworkingMessagesSessionFailed_t { SteamNetConnectionInfo_t m_info }.
+	const sdr_conn_info *info = (const sdr_conn_info *)ev;
+	char end_debug[sizeof(info->end_debug)], description[sizeof(info->description)];
+	if (info == NULL)
 		return;
-	shim_log("sdr: session with %llu FAILED (Steam reports the connection dropped)",
-		(unsigned long long)peer->u.steam_id);
+	memcpy(end_debug, info->end_debug, sizeof(end_debug));
+	memcpy(description, info->description, sizeof(description));
+	end_debug[sizeof(end_debug) - 1] = description[sizeof(description) - 1] = 0;
+	shim_log("sdr: session with %llu FAILED: state %d (%s), end reason %d '%s'; %s",
+		(unsigned long long)info->peer.u.steam_id, info->state, state_name(info->state), info->end_reason,
+		end_debug, description);
 }
 
 static BOOL ready(void);
@@ -291,7 +441,25 @@ static BOOL try_init(void) {
 		api.on_failed(sdr_utils, on_session_failed);
 		api.init_relay(sdr_utils);
 		relay = api.relay_status(sdr_utils, NULL);
+		sdr_relay_last = relay;
 		shim_log("sdr: InitRelayNetworkAccess called, relay status %d (100 = current)", relay);
+	}
+	// Diagnostics, all optional: a missing export only costs the detail.
+	api.conn_info = (sdr_conn_info_fn)(void *)GetProcAddress(mod, "SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo");
+	if (api.conn_info == NULL)
+		shim_log("sdr: steam_api64.dll lacks GetSessionConnectionInfo; session states will not be logged");
+	if (!run_callbacks_hooked) {
+		void *rc = (void *)GetProcAddress(mod, "SteamAPI_RunCallbacks");
+		run_callbacks_hooked = rc != NULL && hook_one("steam_api64!SteamAPI_RunCallbacks", rc, (void *)detour_run_callbacks, (void **)&real_run_callbacks);
+		if (!run_callbacks_hooked)
+			shim_log("sdr: SteamAPI_RunCallbacks not hooked; callback dispatch will not be counted");
+	}
+	if (!sdr_diag_started) {
+		HANDLE t = CreateThread(NULL, 0, diag_thread, NULL, 0, NULL);
+		if (t != NULL) {
+			CloseHandle(t);
+			sdr_diag_started = TRUE;
+		}
 	}
 	state = SDR_READY;
 	sdr_last_reason[0] = 0;
@@ -324,6 +492,10 @@ int sdr_bridge_send(uint64_t peer, const void *data, uint32_t len, int channel) 
 	identity_of(&to, peer);
 	EnterCriticalSection(&sdr_lock);
 	res = api.send(sdr_msgs, &to, data, len, SDR_SEND_RELIABLE | SDR_SEND_NO_NAGLE | SDR_SEND_AUTO_RESTART, channel);
+	if (watch_peer(peer) || res != SDR_RESULT_OK)
+		shim_log("sdr: bridge send to %llu: %lu bytes on channel %d = EResult %d (1 = OK), relay status %d, RunCallbacks %ld",
+			(unsigned long long)peer, (unsigned long)len, channel, res,
+			sdr_utils != NULL ? api.relay_status(sdr_utils, NULL) : -1000, run_callbacks_count);
 	LeaveCriticalSection(&sdr_lock);
 	return res;
 }
@@ -460,11 +632,11 @@ static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int l
 
 	EnterCriticalSection(&sdr_lock);
 	res = api.send(sdr_msgs, &to, data, (uint32_t)length, flags, channel);
+	if (watch_peer(to.u.steam_id))
+		shim_log("sdr: first packet to %llu: %d bytes, type %d -> flags 0x%x, channel %d = EResult %d (1 = OK)",
+			(unsigned long long)to.u.steam_id, length, type, flags, channel, res);
 	if (res == SDR_RESULT_OK) {
 		sdr_sent++;
-		if (sdr_sent == 1)
-			shim_log("sdr: first packet sent to %llu, %d bytes, type %d -> flags 0x%x, channel %d",
-				(unsigned long long)to.u.steam_id, length, type, flags, channel);
 	} else {
 		sdr_send_failed++;
 		if (res != last_res || (DWORD)(GetTickCount() - last_log) > 5000) {
@@ -510,7 +682,7 @@ static vuid detour_read_p2p_packet(unsigned char *data, int max_length, uint32_t
 	memcpy(data, m->data, (size_t)n);
 	from = m->peer.u.steam_id;
 	api.release(m);
-	if (sdr_received == 1)
+	if (watch_peer(from) || sdr_received == 1)
 		shim_log("sdr: first packet received from %llu, %d bytes, channel %d", (unsigned long long)from, n, channel);
 	LeaveCriticalSection(&sdr_lock);
 	if (length != NULL)

@@ -33,6 +33,22 @@ typedef struct SteamNetworkingMessage_t {
 	uint16_t _pad1__;
 } SteamNetworkingMessage_t;
 
+typedef struct SteamNetConnectionInfo_t {
+	SteamNetworkingIdentity m_identityRemote;
+	int64_t m_nUserData;
+	uint32_t m_hListenSocket;
+	uint8_t m_addrRemote[18]; // SteamNetworkingIPAddr: 16-byte IP + uint16 port
+	uint16_t m__pad1;
+	uint32_t m_idPOPRemote;
+	uint32_t m_idPOPRelay;
+	int32_t m_eState;
+	int32_t m_eEndReason;
+	char m_szEndDebug[128];
+	char m_szConnectionDescription[128];
+	int32_t m_nFlags;
+	uint32_t reserved[63];
+} SteamNetConnectionInfo_t;
+
 // What the fake observed. Read through fake_stats().
 typedef struct fake_stats_t {
 	unsigned sends;         // successful SendMessageToUser calls
@@ -51,6 +67,8 @@ typedef struct fake_stats_t {
 	int request_cb_set;     // SetGlobalCallback_MessagesSessionRequest called
 	int failed_cb_set;      // SetGlobalCallback_MessagesSessionFailed called
 	unsigned queued;        // messages waiting in the fake, all channels
+	unsigned conn_infos;    // GetSessionConnectionInfo calls
+	unsigned run_callbacks; // SteamAPI_RunCallbacks calls that reached the fake
 } fake_stats_t;
 
 #endif

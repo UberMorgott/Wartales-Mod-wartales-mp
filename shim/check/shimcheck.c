@@ -377,6 +377,25 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 	from = read(buf, sizeof(buf), &len, 0);
 	check(from != NULL && get_uid(from) == OTHER && len == 10, "a message from another peer reports that peer's SteamID");
 
+	// Diagnostics: the watch thread reports the session state of a peer we
+	// sent to, and the game's RunCallbacks calls are counted through the hook.
+	check(wait_log(log, "sdr: first packet to 72623859790382856: 5 bytes, type 2 -> flags 0x29, channel 0 = EResult 1", 2000),
+		"shim.log records the first packet to a peer with its EResult");
+	check(wait_log(log, "sdr: session with 72623859790382856: state 3 (connected), end reason 0 '', relay POP 1718314273", 5000),
+		"the session watch logs the peer's connection state from GetSessionConnectionInfo");
+	{
+		void (*run)(void) = (void (*)(void))(void *)GetProcAddress(api, "SteamAPI_RunCallbacks");
+		check(run != NULL, "fake exports SteamAPI_RunCallbacks");
+		if (run != NULL) {
+			run();
+			run();
+			stats(&st);
+			check(st.run_callbacks == 2, "the RunCallbacks hook passes the call through to Steam");
+			check(wait_log(log, "sdr: the game called SteamAPI_RunCallbacks for the first time", 2000),
+				"shim.log records that the game dispatches Steam callbacks");
+		}
+	}
+
 	// Sessions: incoming requests are accepted automatically; explicit
 	// accept/close still reach Steam; close drops that peer's queued messages.
 	check(fire(THIRD) == 1, "fake raised a session request");

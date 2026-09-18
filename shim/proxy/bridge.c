@@ -118,12 +118,23 @@ static void send_err(uint64_t peer, const char *text) { write_frame(FR_ERR, peer
 // at 20 ms: the proxy-link is command traffic, not the game loop.
 static DWORD WINAPI pump_thread(LPVOID unused) {
 	sdr_msg *batch[32];
+	uint64_t seen[16];
+	unsigned seen_n = 0, k;
 	int n, i;
 	(void)unused;
 	for (;;) {
 		n = sdr_bridge_receive(BRIDGE_CHANNEL, batch, 32);
 		for (i = 0; i < n; i++) {
 			sdr_msg *m = batch[i];
+			if (m->peer.type == SDR_IDENTITY_STEAMID) {
+				for (k = 0; k < seen_n && seen[k] != m->peer.u.steam_id; k++)
+					;
+				if (k == seen_n && seen_n < sizeof(seen) / sizeof(seen[0])) {
+					seen[seen_n++] = m->peer.u.steam_id;
+					shim_log("bridge: first message from %llu on channel %d, %d bytes", (unsigned long long)m->peer.u.steam_id,
+						BRIDGE_CHANNEL, m->size);
+				}
+			}
 			if (m->peer.type == SDR_IDENTITY_STEAMID && m->size >= 0 && write_frame(FR_RECV, m->peer.u.steam_id, m->data, (uint32_t)m->size)) {
 				frames_in++;
 				bytes_in += (unsigned long)m->size;
