@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"strings"
 )
 
 // PFChars are the platform characters mpman.UserID.getPlatform@25195 accepts:
@@ -42,16 +43,20 @@ func IsSession(id string) bool {
 	return len(id) >= minLen && id[0] == Session
 }
 
-// steamLen is the length of a Steam id as mpman.UserID.fromPlatform builds it:
-// 'S' followed by 8 bytes in hex (the SteamID64 with its high dword xor'ed
-// with 0x1100001, see UserID.hx:29/113).
-const steamLen = 1 + 16
+// steamHex is the hex digits of a full Steam id as mpman.UserID.fromPlatform
+// builds it: 'S' followed by the 8 little-endian bytes of the SteamID64 with
+// its high dword xor'ed with 0x1100001 (UserID.hx:113-115). The printer then
+// strips every trailing '0' (UserID.hx:116-118), and the parser (UserID.hx:22-29)
+// allocates 8 zero bytes and fills only the digits it was given, so a live id
+// is "S" + 1..16 hex digits: "S9f792402" for account 0x0224799f, never the
+// 17-character form.
+const steamHex = 16
 
 // IsSteam reports whether id is a well-formed Steam id the game can turn back
 // into a SteamID64. Only such an id may be put on the wire when a lobby runs
 // over SDR: the game derives the peer's SteamID from it.
 func IsSteam(id string) bool {
-	if len(id) != steamLen || id[0] != 'S' {
+	if len(id) < 2 || len(id) > 1+steamHex || id[0] != 'S' {
 		return false
 	}
 	for _, c := range id[1:] {
@@ -74,7 +79,8 @@ func SteamID64(id string) (uint64, bool) {
 	if !IsSteam(id) {
 		return 0, false
 	}
-	b, err := hex.DecodeString(id[1:])
+	digits := id[1:] + strings.Repeat("0", steamHex-len(id[1:])) // the parser's zero-filled buffer
+	b, err := hex.DecodeString(digits)
 	if err != nil {
 		return 0, false
 	}
@@ -82,11 +88,12 @@ func SteamID64(id string) (uint64, bool) {
 	return v ^ (steamXor << 32), true
 }
 
-// FromSteamID64 is the inverse: the id the game reports for a SteamID64.
+// FromSteamID64 is the inverse: the id the game reports for a SteamID64, with
+// the trailing zeros stripped the way UserID.hx:117 prints it.
 func FromSteamID64(steamID64 uint64) string {
 	var b [8]byte
 	binary.LittleEndian.PutUint64(b[:], steamID64^(steamXor<<32))
-	return "S" + hex.EncodeToString(b[:])
+	return "S" + strings.TrimRight(hex.EncodeToString(b[:]), "0")
 }
 
 // Ensure returns id when it is already a Session id and a minted one otherwise.
