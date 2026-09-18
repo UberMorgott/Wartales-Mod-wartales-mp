@@ -63,7 +63,7 @@ Nothing in the game folder is renamed, replaced or edited. `winmm.dll` is a new
 file that Windows loads because it searches the application directory before
 `System32` for this name.
 
-The game's bytecode (`hlboot.dat`) is not modified either. Three bytes in it have
+The game's bytecode (`hlboot.dat`) is not modified either. Six bytes in it have
 to change (see "How it works"), so the mod keeps a patched **copy** under
 `%LOCALAPPDATA%\wartales-mp\hlboot.dat` and hands the game that copy when it
 opens the file. The original on disk is only ever read. If a game update moves
@@ -222,14 +222,15 @@ needs no patch for it.
    that is left alone. Instead, the mod's own CA is appended to the chain the
    game configures, so the local master is trusted. Certificate verification is
    never disabled.
-4. **Patches three bytes of the bytecode, in a copy.** In this build, the client
+4. **Patches six bytes of the bytecode, in a copy.** In this build, the client
    timeout path is fatal for every role: about a minute of sitting in a lobby
    ends in a `Null access` crash. Two bytes turn the timeout comparison into one
-   that is never true, so the crash cannot fire. The third byte relaxes the
-   title screen's "join by code" check from "exactly 5 symbols" to "at least
-   5", so the mod's 13/16/25-symbol codes are accepted and vanilla codes still
-   work. The patches are applied to a copy under `%LOCALAPPDATA%`, never to the
-   file in the game folder.
+   that is never true, so the crash cannot fire. The other four relax the
+   title screen's "join by code" field, which is built around 5-symbol codes
+   (input cap, truncation, validation, submit check), to accept at least 5
+   and up to 32 symbols, so the mod's 13/16/25-symbol codes are accepted and
+   vanilla codes still work. The patches are applied to a copy under
+   `%LOCALAPPDATA%`, never to the file in the game folder.
 5. **Moves the game's Steam transport onto SDR.** The game's Steam path is
    built on the deprecated `ISteamNetworking` P2P calls in `steam.hdll`. The
    mod hooks those six calls and re-implements them on

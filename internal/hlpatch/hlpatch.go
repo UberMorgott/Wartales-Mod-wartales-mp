@@ -34,13 +34,21 @@
 // call is skipped and the loop moves on. One byte each, same opcode, same
 // length.
 //
-// Patch 3 -- the title screen's "join by code" handler @34236
-// (src/ui/win/TitleScreen.hx:646) refuses any code whose length is not
-// exactly 5, the length of the game's own lobby codes; ours are 13, 16 or 25
-// symbols (see internal/code). The JNotEq (0x39) that guards the error branch
-// becomes JSLt (0x30) with the same operands: the error is shown only when the
-// typed code is shorter than 5, so vanilla 5-symbol codes keep working and
-// everything longer reaches joinCode@24714, where the mod's master takes over.
+// Patches 3..6 -- the title screen's "join by code" field is built by
+// joinWithCode2@23875 (src/ui/win/TitleScreen.hx:638-661) around the length
+// of the game's own lobby codes, 5, in four places; ours are 13, 16 or 25
+// symbols (see internal/code). All four load the 5 from int constant #30:
+//
+//   - the submit handler @34236 (TitleScreen.hx:646) and the validate
+//     closure @34233 (:641) refuse any other length: their JNotEq (0x39)
+//     becomes JSLt (0x30) with the same operands, so only a code shorter than
+//     5 is refused, vanilla 5-symbol codes keep working and everything longer
+//     reaches joinCode@24714, where the mod's master takes over;
+//   - InputText.maxLen (:640) and the substr(0, 5) in the formatText closure
+//     @34234 (:642) cap what can be typed and what is kept: their Int operand
+//     is redirected from int constant #30 (5) to #19 (32), which leaves room
+//     for a 25-symbol code with a few separators and keeps the widget sane.
+//     Both indices fit one varint byte, so nothing shifts.
 package hlpatch
 
 import (
@@ -83,6 +91,34 @@ type Patch struct {
 //	21 07 c0 00 85 bd        StaticClosure r7 = fn@34237
 //	1a 01 c0 00 60 8a 02 07  Call2         r1 = joinCode@24714(r2, r7)
 //	3a 04                    JAlways       jump +4 (over the error branch)
+//
+// The fourth is the whole validate closure @34233 (8 ops):
+//
+//	47 00          NullCheck r0
+//	26 02 00 01    Field     r2 = r0.length
+//	01 03 1e       Int       r3 = int@30 (= 5)
+//	39 02 03 02    JNotEq    if r2 != r3 jump +2  <- becomes JSLt (0x30)
+//	03 01 01       Bool      r1 = true
+//	3a 01          JAlways   jump +1
+//	03 01 00       Bool      r1 = false
+//	43 01          Ret       r1
+//
+// The fifth is ops 8..12 of joinWithCode2@23875, where maxLen is set:
+//
+//	52 06                New           r6 = new {formatText, maxLen, validate}
+//	01 07 1e             Int           r7 = int@30 (= 5)  <- int@19 (= 32)
+//	3b 08 07             ToDyn         r8 = r7
+//	27 06 01 08          SetField      r6.maxLen = r8
+//	21 09 c0 00 85 b9    StaticClosure r9 = fn@34233
+//
+// The sixth is ops 6..11 of the formatText closure @34234, the substr cap:
+//
+//	47 01                NullCheck r1
+//	01 06 01             Int       r6 = int@1 (= 0)
+//	01 07 1e             Int       r7 = int@30 (= 5)  <- int@19 (= 32)
+//	3b 08 07             ToDyn     r8 = r7
+//	1b 01 08 01 06 08    Call3     r1 = substr@8(r1, r6, r8)
+//	19 01 c0 00 5b 53 01 Call1     r1 = trim@23379(r1)
 var Patches = []Patch{
 	{
 		Name:   "flush/pendingClients timeout (NetworkHost.hx:1387)",
@@ -104,6 +140,27 @@ var Patches = []Patch{
 		Index:  9,
 		From:   0x39, // JNotEq: error unless length == 5
 		To:     0x30, // JSLt:   error only if length < 5
+	},
+	{
+		Name:   "TitleScreen join code validate closure (TitleScreen.hx:641)",
+		Needle: []byte{0x47, 0x00, 0x26, 0x02, 0x00, 0x01, 0x01, 0x03, 0x1e, 0x39, 0x02, 0x03, 0x02, 0x03, 0x01, 0x01, 0x3a, 0x01, 0x03, 0x01, 0x00, 0x43, 0x01},
+		Index:  9,
+		From:   0x39, // JNotEq: false unless length == 5
+		To:     0x30, // JSLt:   false only if length < 5
+	},
+	{
+		Name:   "TitleScreen join code maxLen (TitleScreen.hx:640)",
+		Needle: []byte{0x52, 0x06, 0x01, 0x07, 0x1e, 0x3b, 0x08, 0x07, 0x27, 0x06, 0x01, 0x08, 0x21, 0x09, 0xc0, 0x00, 0x85, 0xb9},
+		Index:  4,
+		From:   0x1e, // int@30 = 5
+		To:     0x13, // int@19 = 32
+	},
+	{
+		Name:   "TitleScreen join code formatText substr (TitleScreen.hx:642)",
+		Needle: []byte{0x47, 0x01, 0x01, 0x06, 0x01, 0x01, 0x07, 0x1e, 0x3b, 0x08, 0x07, 0x1b, 0x01, 0x08, 0x01, 0x06, 0x08, 0x19, 0x01, 0xc0, 0x00, 0x5b, 0x53, 0x01},
+		Index:  7,
+		From:   0x1e, // int@30 = 5
+		To:     0x13, // int@19 = 32
 	},
 }
 
