@@ -1190,3 +1190,103 @@ func TestLobbyLifecycle(t *testing.T) {
 		t.Fatalf("resolveShortCode = %s", raw)
 	}
 }
+
+// TestSteamInviteLocal: lobby/initInvite answers the join code itself (it is
+// what the host's game writes into the Steam lobby's "invite" data), and
+// lobby/infoInvite takes that code, a bare lobby id, or garbage.
+func TestSteamInviteLocal(t *testing.T) {
+	addr := startMaster(t)
+	w := dialMaster(t, addr)
+	defer func() { _ = w.c.Close() }()
+	w.call(t, "user/login", map[string]any{"name": "Host", "uid": "S00", "version": 2})
+
+	var id string
+	raw := w.call(t, "lobby/create", map[string]any{"props": map[string]any{"maxPlayers": 4}})
+	if err := json.Unmarshal(raw, &id); err != nil {
+		t.Fatal(err)
+	}
+
+	var invite string
+	raw = w.call(t, "lobby/initInvite", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &invite); err != nil {
+		t.Fatalf("lobby/initInvite = %s: %v; want a JSON string", raw, err)
+	}
+	if c, err := code.DecodeAny(invite); err != nil || c.Endpoint == nil {
+		t.Fatalf("invite %q = %+v, %v; want a join code with the direct route", invite, c, err)
+	}
+
+	var info struct {
+		ID string `json:"id"`
+	}
+	for _, v := range []string{invite, id} {
+		raw = w.call(t, "lobby/infoInvite", map[string]any{"invite": v})
+		if err := json.Unmarshal(raw, &info); err != nil || info.ID != id {
+			t.Fatalf("lobby/infoInvite %q = %s, %v; want lobby %s", v, raw, err, id)
+		}
+	}
+	if msg := w.callErr(t, "lobby/infoInvite", map[string]any{"invite": "not-a-code"}); !strings.Contains(msg, "Invalid join code") {
+		t.Fatalf("lobby/infoInvite garbage = %q", msg)
+	}
+	if msg := w.callErr(t, "lobby/initInvite", map[string]any{"id": "Lnope"}); !strings.Contains(msg, "Unknown lobby") {
+		t.Fatalf("lobby/initInvite unknown = %q", msg)
+	}
+}
+
+// TestSteamJoinGameOverSDR is the Steam friends-list "Join Game": the guest's
+// game hands its helper the invite value read from the host's Steam lobby,
+// which must resolve and join exactly like a typed code, here over SDR.
+func TestSteamJoinGameOverSDR(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	const hostID64, guestID64 = uint64(0x0110000100BC614E), uint64(0x0110000100000007)
+	hostSteam, guestSteam := uid.FromSteamID64(hostID64), uid.FromSteamID64(guestID64)
+
+	hostBridge := startBridge(t, sw.Add(t, hostID64), true)
+	hostSrv, _ := startMasterOpts(t, func(o *Options) {
+		o.Endpoint = func() (nat.Endpoint, error) { return lanEndpoint, nil }
+		o.SDRStatus, o.Bridge = hostBridge.Status, hostBridge
+		o.LinkKey = 0xdeadbeef
+	})
+	hostBridge.OnPeer = hostSrv.ServeSDRLink
+	host, id := createLobby(t, hostSrv, hostID64)
+
+	var invite string
+	raw := host.call(t, "lobby/initInvite", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &invite); err != nil {
+		t.Fatalf("lobby/initInvite = %s: %v", raw, err)
+	}
+	if c, err := code.DecodeAny(invite); err != nil || c.Steam == nil || c.Steam.SteamID64() != hostID64 {
+		t.Fatalf("invite %q = %+v, %v; want the host's SDR route", invite, c, err)
+	}
+
+	guest := guestFor(t, sw, guestID64, true, nil)
+	var info struct {
+		ID    string `json:"id"`
+		Owner string `json:"owner"`
+		Users []struct {
+			ID string `json:"id"`
+		} `json:"users"`
+	}
+	raw = guest.call(t, "lobby/infoInvite", map[string]any{"invite": invite})
+	if err := json.Unmarshal(raw, &info); err != nil || info.ID != id || info.Owner != hostSteam {
+		t.Fatalf("lobby/infoInvite over SDR = %s, %v", raw, err)
+	}
+	raw = guest.call(t, "lobby/join", map[string]any{"id": id, "data": `{"ready":false}`})
+	if err := json.Unmarshal(raw, &info); err != nil || len(info.Users) != 2 ||
+		info.Users[0].ID != hostSteam || info.Users[1].ID != guestSteam {
+		t.Fatalf("lobby/join after Join Game = %s, %v", raw, err)
+	}
+	if join := host.readPush(t, "lobby/join"); !strings.Contains(string(join), guestSteam) {
+		t.Fatalf("lobby/join push = %s", join)
+	}
+
+	// A guest asking for the code (inviting its own friends) still hands out
+	// the host's route, not its own.
+	raw = guest.call(t, "lobby/initInvite", map[string]any{"id": id})
+	var again string
+	if err := json.Unmarshal(raw, &again); err != nil {
+		t.Fatalf("guest lobby/initInvite = %s: %v", raw, err)
+	}
+	if c, err := code.DecodeAny(again); err != nil || c.Steam == nil || c.Steam.SteamID64() != hostID64 {
+		t.Fatalf("guest's invite %q = %+v, %v; want the host's SDR route", again, c, err)
+	}
+}

@@ -245,7 +245,7 @@ func (s *Server) lobbyCommand(cmd string, args json.RawMessage, p Peer) (any, er
 	case "lobby/info":
 		return s.lobbyInfo(a.ID)
 	case "lobby/infoInvite":
-		return s.lobbyInfo(a.Invite)
+		return s.lobbyInfoInvite(a, args, p)
 	case "lobby/setData":
 		return nil, s.lobbySetData(a, p)
 	case "lobby/setUserData":
@@ -258,6 +258,8 @@ func (s *Server) lobbyCommand(cmd string, args json.RawMessage, p Peer) (any, er
 		return nil, nil
 	case "lobby/makeShortCode":
 		return s.lobbyMakeShortCode(a, p)
+	case "lobby/initInvite":
+		return s.lobbyInitInvite(a, p)
 	case "lobby/resolveShortCode":
 		return s.lobbyResolveShortCode(a, args, p)
 	}
@@ -502,10 +504,42 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 // between lobbies. The host's master resolves the code to the lobby either
 // way.
 func (s *Server) lobbyMakeShortCode(a lobbyArgs, p Peer) (any, error) {
-	l := s.lobbies.get(a.ID)
-	if l == nil {
-		return nil, wireErrf("Unknown lobby %s", a.ID)
+	short, err := s.issueCode(a.ID, p)
+	if err != nil {
+		return nil, err
 	}
+	return map[string]any{"shortCode": short}, nil
+}
+
+// lobbyInitInvite is the Steam "invite friends" path. The game asks for it
+// once per lobby, before it creates a friends-only Steam lobby, and writes
+// the string we answer into that lobby's "invite" data. A friend who clicks
+// "Join Game" hands the same string to their own helper as lobby/infoInvite,
+// so it must reach our lobby on its own: it is the join code.
+func (s *Server) lobbyInitInvite(a lobbyArgs, p Peer) (any, error) {
+	short, err := s.issueCode(a.ID, p)
+	if err != nil {
+		return nil, err
+	}
+	s.opt.Log.Printf("master: Steam invite for %s carries the join code %s", a.ID, short)
+	return short, nil
+}
+
+// issueCode issues the join code for a lobby and remembers it. The SDR route
+// is always the owner's: a guest asking for the code (inviting its own Steam
+// friends) must still send them to the host.
+func (s *Server) issueCode(id string, p Peer) (string, error) {
+	l := s.lobbies.get(id)
+	if l == nil {
+		return "", wireErrf("Unknown lobby %s", id)
+	}
+	s.lobbies.mu.Lock()
+	for _, u := range l.users {
+		if u.ID == l.owner && u.peer != nil {
+			p = u.peer
+		}
+	}
+	s.lobbies.mu.Unlock()
 	ep, epErr := s.endpointRoute()
 	st, sdrWhy := s.steamRoute(p)
 
@@ -522,19 +556,19 @@ func (s *Server) lobbyMakeShortCode(a lobbyArgs, p Peer) (any, error) {
 		if l.transport == TransportSDR && s.opt.Bridge != nil {
 			if ready, why := s.opt.Bridge.Ready(); !ready && !s.opt.Bridge.Status().Known {
 				s.opt.Log.Printf("master: join code for %s not issued yet: %s", l.id, why)
-				return nil, wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", why)
+				return "", wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", why)
 			}
 		}
 		short, err = code.Encode(*ep)
 	default:
 		s.opt.Log.Printf("master: join code for %s cannot be issued: endpoint: %v; SDR: %s", l.id, epErr, sdrWhy)
 		if s.opt.Bridge != nil && !s.opt.Bridge.Status().Known {
-			return nil, wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", sdrWhy)
+			return "", wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", sdrWhy)
 		}
-		return nil, wireErrf("No route to offer: %v; %s", epErr, sdrWhy)
+		return "", wireErrf("No route to offer: %v; %s", epErr, sdrWhy)
 	}
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	s.lobbies.mu.Lock()
 	s.lobbies.codes[short] = l.id
@@ -555,7 +589,34 @@ func (s *Server) lobbyMakeShortCode(a lobbyArgs, p Peer) (any, error) {
 		routes += "; no SDR route: " + sdrWhy
 	}
 	s.opt.Log.Printf("master: join code for %s is %s (routes: %s)", l.id, short, routes)
-	return map[string]any{"shortCode": short}, nil
+	return short, nil
+}
+
+// lobbyInfoInvite serves a Steam "Join Game": the value is what
+// lobby/initInvite answered on the host, so it resolves like a typed join
+// code and the game's lobby/join that follows is forwarded to the host as
+// usual. A bare lobby id, which is what the vanilla master used, still works
+// locally.
+func (s *Server) lobbyInfoInvite(a lobbyArgs, args json.RawMessage, p Peer) (any, error) {
+	if s.lobbies.get(a.Invite) != nil {
+		return s.lobbyInfo(a.Invite)
+	}
+	if p.Remote() {
+		s.lobbies.mu.Lock()
+		id := s.lobbies.codes[a.Invite]
+		s.lobbies.mu.Unlock()
+		if id == "" {
+			return nil, nil
+		}
+		return s.lobbyInfo(id)
+	}
+	resolve, err := json.Marshal(map[string]any{"shortCode": a.Invite, "filters": map[string]any{}})
+	if err != nil {
+		return nil, err
+	}
+	var b lobbyArgs
+	_ = json.Unmarshal(resolve, &b)
+	return s.lobbyResolveShortCode(b, resolve, p)
 }
 
 // endpointRoute is our endpoint as a code route, if we have an IPv4 one.
