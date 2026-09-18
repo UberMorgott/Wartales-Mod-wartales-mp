@@ -46,6 +46,12 @@ That is the whole installation. No launch options, no `hosts` file, no
 certificate installed into Windows, no registry change, no administrator
 rights, and nothing injected from outside.
 
+> **Antivirus note.** The released `winmm.dll` is UPX-packed, and packed DLLs
+> that load into a game process draw antivirus false positives more often than
+> plain binaries. If yours flags it, you can build an unpacked, byte-for-byte
+> equivalent DLL yourself with `.\shim\build.ps1` (without `-Release`) — see
+> [Building](#building).
+
 ## Uninstall
 
 Delete `winmm.dll` from the game folder. The game goes back to vanilla
@@ -256,9 +262,34 @@ The full design is in [DESIGN.md](DESIGN.md) (Russian).
 Windows, with `go`, `gcc` and `objcopy` on `PATH`:
 
 ```powershell
-.\shim\build.ps1     # produces dist\winmm.dll -- the only file players need
-.\shim\check.ps1     # verifies the DLL without launching the game
+.\shim\build.ps1            # unstripped, unpacked -- for development/debugging
+.\shim\build.ps1 -Release   # the GitHub release asset: stripped + UPX-packed
+.\shim\check.ps1            # verifies the DLL (whatever is in dist\) without the game
 ```
+
+### Release build (the uploaded asset)
+
+`-Release` produces the `winmm.dll` published on GitHub. It strips symbols
+(`-ldflags "-s -w"` for the embedded exe, `-s -Wl,--strip-all` for the DLL) and
+UPX-packs both stages: the embedded `wartales-mp.exe` (~8.0 MB → ~2.5 MB) and
+the final DLL. Because the embedded exe is already compressed, the DLL barely
+shrinks at that last step, but the whole artifact drops from ~11.8 MB (unpacked)
+to ~2.6 MB.
+
+**Antivirus trade-off (read this).** UPX-packed binaries raise antivirus
+false positives noticeably, and this DLL is loaded into a running game process,
+which makes heuristic engines more suspicious still. The release asset is
+packed to keep the download small; if your AV flags it, or you simply prefer an
+unpacked file, build your own with plain `.\shim\build.ps1` (no `-Release`) —
+byte-identical behaviour, no packing, no stripping. Packing was verified not to
+break anything (see below); it is a size/AV trade-off, not a correctness one.
+
+The packed DLL is verified after the build, not assumed: its export table still
+lists all 180 names at their original ordinals (byte-for-byte identical to the
+unpacked build, `go run ./tools/gendef -in dist\winmm.dll -list`), `shim\check.ps1`
+passes in both modes against the packed DLL (forwarding thunks, the `CreateFileW`
+hook and MinHook, the SDR transport and bridge all work), and the packed
+embedded exe still runs (`wartales-mp code decode …`).
 
 `check.ps1` loads the built DLL into a test process, opens the real
 `hlboot.dat` through it and compares the result against the expected patched
