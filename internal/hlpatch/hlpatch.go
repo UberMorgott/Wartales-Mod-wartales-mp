@@ -49,6 +49,19 @@
 //     is redirected from int constant #30 (5) to #19 (32), which leaves room
 //     for a 25-symbol code with a few separators and keeps the widget sane.
 //     Both indices fit one varint byte, so nothing shifts.
+//
+// Patch 7 -- the host's "missing DLC" gate. LobbyState.missingDlcs@24647
+// (src/Lobby.hx:424-431) walks the loaded save's DLC list (loadSave.wtdc) and
+// reports the first DLC that any player's `dlcs` array lacks, or is null for;
+// LoadMultiGame @43004 shows it as the "players are missing DLC" text instead
+// of the start button and canStart@24646 refuses to start. A player's `dlcs`
+// only arrives through the setDlcs RPC (LobbyState.update@24653), i.e. over
+// the lobby transport, and on our master that array is not something we can
+// vouch for, so the gate is disabled: the loop's bounds check (op 12, JSGte
+// r6 >= r8 where r8 = wtdc.length) compares r8 with itself, never iterates,
+// and the function returns []. The Join reply itself never depended on it:
+// the hxbit Join handler @26417 (Lobby.hx:523-534) runs userCanJoin@24635
+// (status, slots, maxPlayers) and sync(), no DLC check.
 package hlpatch
 
 import (
@@ -119,6 +132,22 @@ type Patch struct {
 //	3b 08 07             ToDyn     r8 = r7
 //	1b 01 08 01 06 08    Call3     r1 = substr@8(r1, r6, r8)
 //	19 01 c0 00 5b 53 01 Call1     r1 = trim@23379(r1)
+//
+// The seventh is ops 9..20 of missingDlcs@24647, the `for (dlc in wtdc)` loop
+// head (Lobby.hx:426), unique through its registers and the +48 exit offset:
+//
+//	42                   Label
+//	47 04                NullCheck r4                 (wtdc)
+//	26 08 04 00          Field     r8 = r4.length
+//	31 06 08 30          JSGte     if r6 >= r8 jump +48 (loop exit)  <- r6 becomes r8
+//	26 08 04 00          Field     r8 = r4.length
+//	34 06 08 02          JULt      if r6 < r8 jump +2
+//	06 0a                Null      r10
+//	3a 03                JAlways   +3
+//	26 0c 04 01          Field     r12 = r4.array
+//	4d 0b 0c 06          GetArray  r11 = r12[r6]
+//	40 0a 0b             UnsafeCast r10 = r11
+//	16 06                Incr      r6
 var Patches = []Patch{
 	{
 		Name:   "flush/pendingClients timeout (NetworkHost.hx:1387)",
@@ -161,6 +190,13 @@ var Patches = []Patch{
 		Index:  7,
 		From:   0x1e, // int@30 = 5
 		To:     0x13, // int@19 = 32
+	},
+	{
+		Name:   "LobbyState.missingDlcs never reports a DLC (Lobby.hx:426)",
+		Needle: []byte{0x42, 0x47, 0x04, 0x26, 0x08, 0x04, 0x00, 0x31, 0x06, 0x08, 0x30, 0x26, 0x08, 0x04, 0x00, 0x34, 0x06, 0x08, 0x02, 0x06, 0x0a, 0x3a, 0x03, 0x26, 0x0c, 0x04, 0x01, 0x4d, 0x0b, 0x0c, 0x06, 0x40, 0x0a, 0x0b, 0x16, 0x06},
+		Index:  8,
+		From:   0x06, // r6 = loop index
+		To:     0x08, // r8 = wtdc.length, i.e. r8 >= r8 -> exit at once, return []
 	},
 }
 
