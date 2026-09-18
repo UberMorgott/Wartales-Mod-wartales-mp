@@ -32,8 +32,8 @@ the old relay.
 ## Status
 
 This is an early release. Read the verification section below before you rely on
-it: the single-machine path is verified in detail, an actual two-player session
-is not.
+it: a first two-machine session has gone through (v0.1.3, 2026-09-18), but
+not every path has been exercised yet.
 
 ## Install
 
@@ -88,9 +88,9 @@ one of theirs), and it will not break the game if it does not fit any more.
 "Join Game" work with the mod: the host's game creates a friends-only Steam
 lobby and stores the join code in it, the guest's game reads that code back and
 hands it to its helper, which resolves it exactly like a typed one. Both
-players must run the game through Steam. This path is implemented and covered
-by tests against a fake Steam relay, but has not yet been tried end to end on
-two machines.
+players must run the game through Steam. This path is verified end to end
+(v0.1.3): host pressed "Invite friends", guest joined via the Steam
+friends-list "Join Game", and the session ran to completion over SDR.
 
 The lobby's own transport is chosen when it is created and logged with the
 reason. Direct is chosen only once the port has been **verified**: a
@@ -188,20 +188,30 @@ through after the bounded wait, a stranger behind a reused address is refused
 by key and SDR reaches the real host, and a combined code round-trips and
 rejects every corrupted symbol.
 
+Verified — first two-machine session (v0.1.3, 2026-09-18):
+
+- host (Steam friend, no UPnP, unverified public endpoint) created a lobby
+  and pressed "Invite friends"; guest joined via the Steam friends-list
+  "Join Game",
+- lobby handshake, DLC list exchange, lobby chat, PrepareStart / StartClients
+  all completed through the local masters linked over Steam relay
+  (`SteamAPI_RegisterCallback` accepted the SDR session request),
+- in-game traffic ran over `ISteamNetworkingMessages` with an ICE (direct)
+  route: the host shim counters read sent 2286 / received 1263 packets,
+  0 failed, 0 dropped,
+- the session closed cleanly (guest left, host received lobby/leave,
+  reconnect lobby created).
+
 Not yet verified:
 
-- **an actual second player joining by code.** No end-to-end session has ever
-  been run, on either transport. The guest path — resolving a code, the
-  proxy-link to the host's master, the guest's game connecting to the host's
-  relay — is implemented and unit-tested, but it has never carried a real
-  second player.
-- **SDR against Valve's real relay.** The shim's transport and bridge are
-  proven against loopback stand-ins, not against a running Steam client;
-  whether the real `SteamNetworkingMessages002` accepts sessions and delivers
-  between two accounts, on channel 0 and on channel 100, has not been
-  observed.
+- **joining by typing the code.** The patched 5..32 field accepted a
+  25-symbol code in an earlier run, and `resolveShortCode` resolved it, but
+  the full join-by-code flow was not exercised in the successful session.
+- **the direct TCP relay route between two machines.** Worked once
+  (2026-09-18 19:26) for the lobby phase only, before the packet
+  re-addressing fix.
 
-Treat the two-player path as untested. Reports with both log files are useful.
+Reports with both log files are still useful.
 
 ## How it works
 
