@@ -207,7 +207,7 @@ func (w *wsClient) expectNoPush(t *testing.T, d time.Duration) {
 	if _, err := io.ReadFull(w.br, h[:]); err != nil {
 		return // timed out: nothing was pushed, which is what we want
 	}
-	t.Fatal("a frame arrived, but the sender must not see its own lobby/chat")
+	t.Fatal("a frame arrived where none was due (a push to the wrong peer, or a second reply to one request)")
 }
 
 // publicEndpoint is the verified-reachable host: the direct relay is chosen.
@@ -714,6 +714,9 @@ func TestGuestRejoinBurstKeepsMembership(t *testing.T) {
 		}
 		guestUID = info.Users[1].ID
 	}
+	// Every request got exactly one reply: the game raises "Missing callb
+	// #<uid>" (Connection.hx:129) on a second one.
+	guest.expectNoPush(t, 250*time.Millisecond)
 	l := hostSrv.lobbies.get(id)
 	if l == nil {
 		t.Fatal("the lobby vanished on the host")
