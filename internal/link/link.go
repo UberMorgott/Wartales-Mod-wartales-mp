@@ -35,6 +35,7 @@ type User struct {
 	ID    string `json:"uid"`
 	Name  string `json:"name"`
 	Steam string `json:"steam,omitempty"` // the real Steam id, for a lobby on SDR
+	Game  string `json:"game,omitempty"`  // the id the guest's game calls its own (its user/login uid)
 	Key   uint32 `json:"key,omitempty"`   // from the join code; a link over SDR must present it
 }
 
@@ -77,6 +78,9 @@ func (p *Peer) UserID() string { return p.user.ID }
 
 // SteamID returns the guest's real Steam id, or "" when it reported none.
 func (p *Peer) SteamID() string { return p.user.Steam }
+
+// GameID returns the id the guest's game calls its own, or "" for an old guest.
+func (p *Peer) GameID() string { return p.user.Game }
 
 // Name returns the guest's display name.
 func (p *Peer) Name() string { return p.user.Name }

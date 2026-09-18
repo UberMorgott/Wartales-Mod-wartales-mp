@@ -32,6 +32,12 @@ type Peer interface {
 	// SteamID is the real Steam id the player's game reported, or "" when it
 	// reported none (or one that is not well-formed). An SDR lobby emits it.
 	SteamID() string
+	// GameID is the id the player's game calls its own: the "uid" of its
+	// user/login, verbatim. LobbyService.onMessage@54929 drops every lobby
+	// packet whose target is not exactly this string (LobbyService.hx:101),
+	// so a packet addressed to a member id we minted is re-addressed to it
+	// before delivery (see lobbyChat). "" when unknown.
+	GameID() string
 	Name() string
 	Remote() bool
 	Push(cmd string, args any)
@@ -203,12 +209,14 @@ type session struct {
 	mu    sync.Mutex
 	uid   string
 	steam string
+	game  string // the id the game reported in user/login, verbatim
 	name  string
 	push  int
 }
 
 func (p *session) UserID() string  { return p.uid }
 func (p *session) SteamID() string { return p.steam }
+func (p *session) GameID() string  { return p.game }
 func (p *session) Name() string    { return p.name }
 func (p *session) Remote() bool    { return false }
 

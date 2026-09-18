@@ -453,16 +453,79 @@ func (s *Server) lobbySetUserData(a lobbyArgs, p Peer) error {
 // haxe.Serializer string of LobbyMessageData.Packet(Bytes, targetUid). See
 // decomp/SERVER-CONTRACT.md §7. The fan-out must reach every other member,
 // which then filters on the target uid embedded in the payload.
+//
+// That filter (LobbyService.onMessage@54929, LobbyService.hx:101) compares the
+// target with getUser().id, the id the game reported in user/login, which is
+// not the member id we render for it in a direct-relay lobby (a minted Session
+// id) or for a member without a Steam id. Both games address packets to the
+// member ids they know from the LobbyInfo and the pushes, so every packet
+// would be dropped as "not for me" on arrival: the guest's Join never reached
+// the host's LobbyUserService and the host never answered. The packet is
+// therefore re-addressed to the recipient's own id before it is delivered;
+// nothing else in "msg" is touched, and every other member still gets it
+// verbatim, as the vanilla server sent it.
 func (s *Server) lobbyChat(a lobbyArgs, p Peer) error {
 	l := s.lobbies.get(a.ID)
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
 	id := l.idOf(p)
-	n := s.lobbies.broadcast(l, p, "lobby/chat",
-		map[string]any{"id": l.id, "uid": id, "msg": a.Msg})
-	s.lobbies.transport(s.opt.Log, l.id, id, len(a.Msg), n)
+	type delivery struct {
+		to  Peer
+		msg json.RawMessage
+	}
+	s.lobbies.mu.Lock()
+	to := make([]delivery, 0, len(l.users))
+	for _, u := range l.users {
+		if u.peer == nil || u.ID == id {
+			continue
+		}
+		to = append(to, delivery{u.peer, retarget(a.Msg, u.ID, u.peer.GameID())})
+	}
+	s.lobbies.mu.Unlock()
+	for _, d := range to {
+		d.to.Push("lobby/chat", map[string]any{"id": l.id, "uid": id, "msg": d.msg})
+	}
+	s.lobbies.transport(s.opt.Log, l.id, id, len(a.Msg), len(to))
 	return nil
+}
+
+// retarget rewrites the target uid of a LobbyMessageData.Packet from the
+// member id we rendered to the id that member's game calls its own. msg is the
+// JSON string the sender passed as "msg": haxe.Serializer output whose last
+// value is the target, a 'y' string ("y" + length + ":" + url-encoded text).
+// Anything that does not end in exactly Packet(..., member) - a plain
+// LobbyMessage, a packet for someone else, an unknown format - is returned
+// untouched.
+func retarget(msg json.RawMessage, member, game string) json.RawMessage {
+	if game == "" || game == member || !plainID(game) {
+		return msg
+	}
+	var s string
+	if json.Unmarshal(msg, &s) != nil {
+		return msg
+	}
+	tail := "y" + strconv.Itoa(len(member)) + ":" + member
+	if !strings.HasSuffix(s, tail) || !strings.Contains(s, "LobbyMessageData") {
+		return msg
+	}
+	s = strings.TrimSuffix(s, tail) + "y" + strconv.Itoa(len(game)) + ":" + game
+	out, err := json.Marshal(s)
+	if err != nil {
+		return msg
+	}
+	return out
+}
+
+// plainID reports whether id survives haxe's StringTools.urlEncode unchanged,
+// so it can be spliced into a serialized 'y' string as is.
+func plainID(id string) bool {
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '-' && c != '_' && c != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
@@ -732,7 +795,7 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 			failures = append(failures, what+": "+err.Error())
 			return nil, false
 		}
-		cl, err := s.attachLink(conn, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Key: key}, what, probe)
+		cl, err := s.attachLink(conn, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Game: p.GameID(), Key: key}, what, probe)
 		if err != nil {
 			s.opt.Log.Printf("master: route %s failed: %v", what, err)
 			failures = append(failures, what+": "+err.Error())
@@ -803,9 +866,12 @@ func (s *Server) dialDirect(addr string) (net.Conn, error) {
 func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Duration) (*link.Client, error) {
 	cl, err := link.DialConn(c, u,
 		func(cmd string, args json.RawMessage) {
-			if sess := s.localSession(); sess != nil {
-				sess.Push(cmd, args)
+			sess := s.localSession()
+			if sess == nil {
+				s.opt.Log.Printf("master: %s pushed %s %s, but no game is connected; dropped", what, cmd, applog.Trunc(args))
+				return
 			}
+			sess.Push(cmd, args)
 		},
 		func() {
 			s.mu.Lock()

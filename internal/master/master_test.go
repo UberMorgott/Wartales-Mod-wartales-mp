@@ -522,6 +522,66 @@ func TestCascadeDirectWins(t *testing.T) {
 	resolveOK(t, guest, short, id)
 }
 
+// TestLobbyTransportOverLink is TestLobbyTransport with the guest behind a
+// proxy-link (direct TCP, the route of the first two-machine session): the
+// guest's Join packet must reach the host's game as a lobby/chat push, and
+// the host's answer must come back through the link to the guest's game.
+func TestLobbyTransportOverLink(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hostSrv, linkAddr := cascadeHost(t, sw, cascadeHostID, true)
+	host, id := createLobby(t, hostSrv, cascadeHostID)
+	short := combinedCode(t, linkAddr, cascadeHostID, 0xdeadbeef)
+	hostSrv.lobbies.mu.Lock()
+	hostSrv.lobbies.codes[short] = id
+	hostSrv.lobbies.mu.Unlock()
+
+	guest := guestFor(t, sw, 0x0110000100000007, false, nil)
+	resolveOK(t, guest, short, id)
+	var info struct {
+		Owner string `json:"owner"`
+		Users []struct {
+			ID string `json:"id"`
+		} `json:"users"`
+	}
+	raw := guest.call(t, "lobby/join", map[string]any{"id": id, "data": "og"})
+	if err := json.Unmarshal(raw, &info); err != nil || len(info.Users) != 2 {
+		t.Fatalf("lobby/join over the link = %s, %v", raw, err)
+	}
+	hostUID, guestUID := info.Owner, info.Users[1].ID
+	if join := host.readPush(t, "lobby/join"); !strings.Contains(string(join), guestUID) {
+		t.Fatalf("lobby/join push = %s", join)
+	}
+
+	// Each game addresses the packet to the member id it knows, and must get
+	// it back addressed to the id it calls its own (LobbyService.hx:101).
+	hostGame, guestGame := uid.FromSteamID64(cascadeHostID), uid.FromSteamID64(0x0110000100000007)
+	const packet = `wy26:mpman.net.LobbyMessageDatay6:Packet:2s12:/v8AAQIDBAUGBw==`
+	guest.call(t, "lobby/chat", map[string]any{"id": id, "msg": packet + haxeString(hostUID)})
+	var chat struct {
+		ID  string `json:"id"`
+		UID string `json:"uid"`
+		Msg string `json:"msg"`
+	}
+	if err := json.Unmarshal(host.readPush(t, "lobby/chat"), &chat); err != nil {
+		t.Fatal(err)
+	}
+	if chat.ID != id || chat.UID != guestUID || chat.Msg != packet+haxeString(hostGame) {
+		t.Fatalf("lobby/chat push on the host = %+v, want id %s uid %s target %s", chat, id, guestUID, hostGame)
+	}
+
+	host.call(t, "lobby/chat", map[string]any{"id": id, "msg": packet + haxeString(guestUID)})
+	if err := json.Unmarshal(guest.readPush(t, "lobby/chat"), &chat); err != nil {
+		t.Fatal(err)
+	}
+	if chat.ID != id || chat.UID != hostUID || chat.Msg != packet+haxeString(guestGame) {
+		t.Fatalf("lobby/chat push on the guest = %+v, want id %s uid %s target %s", chat, id, hostUID, guestGame)
+	}
+	host.expectNoPush(t, 250*time.Millisecond)
+}
+
+// haxeString is haxe.Serializer's encoding of a plain string.
+func haxeString(s string) string { return "y" + strconv.Itoa(len(s)) + ":" + s }
+
 // TestCascadeDirectRefusedFallsBackToSDR: the endpoint in the code refuses
 // the connection (nothing listens there), so the guest falls through to SDR
 // and still joins.
@@ -1087,10 +1147,12 @@ func TestLobbyTransport(t *testing.T) {
 		t.Fatalf("lobby/join push = %s", join)
 	}
 
-	// A guest packet addressed to the lobby owner. The exact bytes are a
-	// haxe.Serializer enum value; the server treats them as opaque text.
-	up := `wy20:mpman.net.LobbyMessageDatay6:Packet:2s12:` +
-		`/v8AAQIDBAUGBw==y` + strconv.Itoa(len(hostUID)) + `:` + hostUID
+	// A guest packet addressed to the lobby owner by the member id the guest
+	// knows. The bytes are a haxe.Serializer enum value the server leaves
+	// alone; only the target is re-addressed to the id the host's game calls
+	// its own ("S00", its user/login uid), or LobbyService.hx:101 drops it.
+	const packet = `wy26:mpman.net.LobbyMessageDatay6:Packet:2s12:/v8AAQIDBAUGBw==`
+	up := packet + haxeString(hostUID)
 	guest.call(t, "lobby/chat", map[string]any{"id": id, "msg": up})
 
 	got := host.readPush(t, "lobby/chat")
@@ -1108,21 +1170,39 @@ func TestLobbyTransport(t *testing.T) {
 	if chat.UID != guestUID {
 		t.Fatalf("lobby/chat push uid = %q, want the sender %q", chat.UID, guestUID)
 	}
-	if chat.Msg != up {
-		t.Fatalf("lobby/chat push msg = %q, want it forwarded verbatim", chat.Msg)
+	if chat.Msg != packet+haxeString("S00") {
+		t.Fatalf("lobby/chat push msg = %q, want the packet re-addressed to S00", chat.Msg)
 	}
 
-	// ... and the answer the host sends back through its LobbyUserService.
-	down := `wy20:mpman.net.LobbyMessageDatay6:Packet:2s8:AAECAwQFBgc=y` +
-		strconv.Itoa(len(guestUID)) + `:` + guestUID
-	host.call(t, "lobby/chat", map[string]any{"id": id, "msg": down})
+	// ... and the answer the host sends back through its LobbyUserService,
+	// addressed to the guest's member id, arrives addressed to "S01".
+	const answer = `wy26:mpman.net.LobbyMessageDatay6:Packet:2s8:AAECAwQFBgc=`
+	host.call(t, "lobby/chat", map[string]any{"id": id, "msg": answer + haxeString(guestUID)})
 
 	got = guest.readPush(t, "lobby/chat")
 	if err := json.Unmarshal(got, &chat); err != nil {
 		t.Fatal(err)
 	}
-	if chat.UID != hostUID || chat.Msg != down {
+	if chat.UID != hostUID || chat.Msg != answer+haxeString("S01") {
 		t.Fatalf("lobby/chat push back to the guest = %s", got)
+	}
+
+	// A packet for somebody else, and a plain LobbyMessage, travel verbatim.
+	other := packet + haxeString("Xnobody")
+	host.call(t, "lobby/chat", map[string]any{"id": id, "msg": other})
+	if err := json.Unmarshal(guest.readPush(t, "lobby/chat"), &chat); err != nil {
+		t.Fatal(err)
+	}
+	if chat.Msg != other {
+		t.Fatalf("lobby/chat push for another member = %q, want it verbatim", chat.Msg)
+	}
+	plain := `wy12:LobbyMessagey4:Join:1` + haxeString(guestUID)
+	host.call(t, "lobby/chat", map[string]any{"id": id, "msg": plain})
+	if err := json.Unmarshal(guest.readPush(t, "lobby/chat"), &chat); err != nil {
+		t.Fatal(err)
+	}
+	if chat.Msg != plain {
+		t.Fatalf("lobby/chat push of a plain LobbyMessage = %q, want it verbatim", chat.Msg)
 	}
 
 	// The sender never sees its own packet: onMessage@54929 would hand it to
