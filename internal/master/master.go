@@ -212,7 +212,18 @@ type session struct {
 	game  string // the id the game reported in user/login, verbatim
 	name  string
 	push  int
+	// queue carries the game's commands to the one goroutine that answers
+	// them, in arrival order. A forwarded command blocks on the host, so the
+	// read loop must not answer inline; but the game fires lobby/leave,
+	// user/login and lobby/join back to back when it re-joins a lobby, and a
+	// join forwarded before the leave ends with the host dropping a member
+	// its game believes is in.
+	queue chan link.Envelope
 }
+
+// queueDepth bounds the commands waiting on a blocked one; the game waits for
+// every reply and sends a handful at most, so this is never reached.
+const queueDepth = 64
 
 func (p *session) UserID() string  { return p.uid }
 func (p *session) SteamID() string { return p.steam }
@@ -259,9 +270,18 @@ func (s *Server) serve(c net.Conn) {
 		s.opt.Log.Printf("master: handshake from %s failed: %v", peer, err)
 		return
 	}
-	sess := &session{srv: s, ws: ws}
+	sess := &session{srv: s, ws: ws, queue: make(chan link.Envelope, queueDepth)}
+	go s.answerAll(sess)
+	defer close(sess.queue)
+	// The game opens two sockets at startup (master.shirogames.com and
+	// master2.shirogames.com, getMPManConfig@14965) and drops the second at
+	// once, so a socket does not become the game's connection by merely
+	// arriving: the first one keeps it, and user/login moves it to whichever
+	// socket the game actually speaks on (adoptLocal).
 	s.mu.Lock()
-	s.local = sess
+	if s.local == nil {
+		s.local = sess
+	}
 	s.mu.Unlock()
 	s.opt.Log.Printf("master: game connected from %s (ident %q, headers %s)",
 		peer, ws.Ident, applog.Trunc(headerLine(ws.Headers)))
@@ -294,7 +314,15 @@ func (s *Server) serve(c net.Conn) {
 			s.opt.Log.Printf("master: <- push reply #%d %s", -e.UID, applog.Trunc(e.Args))
 			continue // the game answering one of our pushes
 		}
-		go s.answer(sess, e)
+		sess.queue <- e
+	}
+}
+
+// answerAll answers the session's commands one after the other until the
+// read loop closes the queue.
+func (s *Server) answerAll(sess *session) {
+	for e := range sess.queue {
+		s.answer(sess, e)
 	}
 }
 
@@ -391,11 +419,25 @@ func (s *Server) linked() bool {
 	return s.client != nil
 }
 
-// localSession returns the game's connection, if any.
+// localSession returns the game's connection, if any: where pushes from the
+// host's master go while we are a guest.
 func (s *Server) localSession() *session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.local
+}
+
+// adoptLocal makes p the game's connection when it is a local socket: the
+// game logs in on the socket it will use, and does so again before most
+// commands, so the socket that logs in is by definition the live one.
+func (s *Server) adoptLocal(p Peer) {
+	sess, ok := p.(*session)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	s.local = sess
+	s.mu.Unlock()
 }
 
 // Close stops the listener, drops every game connection and releases the link

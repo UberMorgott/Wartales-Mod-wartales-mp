@@ -579,6 +579,156 @@ func TestLobbyTransportOverLink(t *testing.T) {
 	host.expectNoPush(t, 250*time.Millisecond)
 }
 
+// TestGuestPushSurvivesSecondSocketAndRelogin replays the guest of the
+// 2026-09-18 two-machine session: at startup the game opens a second master
+// socket (master2.shirogames.com) and drops it at once, and it sends
+// user/login again before every command on the socket it keeps. The host's
+// lobby/chat replies over the link must still reach that socket; they were
+// all dropped with "no game is connected".
+func TestGuestPushSurvivesSecondSocketAndRelogin(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hostSrv, linkAddr := cascadeHost(t, sw, cascadeHostID, true)
+	host, id := createLobby(t, hostSrv, cascadeHostID)
+	short := combinedCode(t, linkAddr, cascadeHostID, 0xdeadbeef)
+	hostSrv.lobbies.mu.Lock()
+	hostSrv.lobbies.codes[short] = id
+	hostSrv.lobbies.mu.Unlock()
+
+	guest := guestFor(t, sw, 0x0110000100000007, false, nil)
+	second := dialMaster(t, guest.c.RemoteAddr().String())
+	_ = second.c.Close() // master2: connected, never logs in, EOF at once
+	time.Sleep(100 * time.Millisecond)
+
+	login := map[string]any{"name": "Guest", "uid": uid.FromSteamID64(0x0110000100000007), "version": 2}
+	guest.call(t, "user/login", login)
+	resolveOK(t, guest, short, id)
+	guest.call(t, "user/login", login)
+	var info struct {
+		Owner string `json:"owner"`
+	}
+	if err := json.Unmarshal(guest.call(t, "lobby/join", map[string]any{"id": id, "data": "og"}), &info); err != nil {
+		t.Fatal(err)
+	}
+	host.readPush(t, "lobby/join")
+
+	const packet = `wy26:mpman.net.LobbyMessageDatay6:Packet:2s3::P8`
+	guest.call(t, "user/login", login)
+	host.call(t, "lobby/chat", map[string]any{"id": id, "msg": packet + haxeString(uid.FromSteamID64(0x0110000100000007))})
+	var chat struct {
+		ID  string `json:"id"`
+		UID string `json:"uid"`
+	}
+	if err := json.Unmarshal(guest.readPush(t, "lobby/chat"), &chat); err != nil {
+		t.Fatal(err)
+	}
+	if chat.ID != id || chat.UID != info.Owner {
+		t.Fatalf("lobby/chat push on the guest = %+v, want id %s from %s", chat, id, info.Owner)
+	}
+}
+
+// send fires a command without waiting for its reply and returns its uid.
+func (w *wsClient) send(t *testing.T, cmd string, args any) int {
+	t.Helper()
+	w.uid++
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := json.Marshal(map[string]any{"uid": w.uid, "cmd": cmd, "args": json.RawMessage(raw)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.writeMasked(t, frame)
+	return w.uid
+}
+
+// await reads frames until the reply to uid arrives, answering pushes on
+// the way, and returns it as (args, error text).
+func (w *wsClient) await(t *testing.T, uid int) (json.RawMessage, string) {
+	t.Helper()
+	for {
+		payload := w.readFrame(t)
+		var e struct {
+			UID  int             `json:"uid"`
+			Cmd  string          `json:"cmd"`
+			Args json.RawMessage `json:"args"`
+		}
+		if err := json.Unmarshal(payload, &e); err != nil {
+			t.Fatalf("bad frame %q: %v", payload, err)
+		}
+		if e.UID > 0 {
+			reply, _ := json.Marshal(map[string]any{"uid": -e.UID, "args": true})
+			w.writeMasked(t, reply)
+			continue
+		}
+		if e.UID != -uid {
+			continue
+		}
+		if e.Cmd == "err" {
+			return nil, string(e.Args)
+		}
+		return e.Args, ""
+	}
+}
+
+// TestGuestRejoinBurstKeepsMembership: the player clicks Join again on a
+// lobby the game is already in. The game then fires lobby/leave, user/login
+// and lobby/join back to back (guest log of 2026-09-18, #9-#11) without
+// waiting for replies; the host must end up with the guest as a member
+// exactly once, which needs the commands forwarded in the order they came.
+func TestGuestRejoinBurstKeepsMembership(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hostSrv, linkAddr := cascadeHost(t, sw, cascadeHostID, true)
+	host, id := createLobby(t, hostSrv, cascadeHostID)
+	short := combinedCode(t, linkAddr, cascadeHostID, 0xdeadbeef)
+	hostSrv.lobbies.mu.Lock()
+	hostSrv.lobbies.codes[short] = id
+	hostSrv.lobbies.mu.Unlock()
+
+	guestID64 := uint64(0x0110000100000007)
+	guest := guestFor(t, sw, guestID64, false, nil)
+	resolveOK(t, guest, short, id)
+	guest.call(t, "lobby/join", map[string]any{"id": id, "data": "og"})
+	host.readPush(t, "lobby/join")
+
+	login := map[string]any{"name": "Guest", "uid": uid.FromSteamID64(guestID64), "version": 2}
+	guestUID := "" // the member id the host renders for the guest (a Session id: direct link)
+	for range 5 {
+		leave := guest.send(t, "lobby/leave", map[string]any{"id": id})
+		guest.send(t, "user/login", login)
+		join := guest.send(t, "lobby/join", map[string]any{"id": id, "data": "og"})
+		if _, msg := guest.await(t, leave); msg != "" {
+			t.Fatalf("lobby/leave: %s", msg)
+		}
+		raw, msg := guest.await(t, join)
+		if msg != "" {
+			t.Fatalf("lobby/join: %s", msg)
+		}
+		var info struct {
+			Users []struct {
+				ID string `json:"id"`
+			} `json:"users"`
+		}
+		if err := json.Unmarshal(raw, &info); err != nil || len(info.Users) != 2 {
+			t.Fatalf("lobby/join after leave = %s, %v; want host and guest", raw, err)
+		}
+		guestUID = info.Users[1].ID
+	}
+	l := hostSrv.lobbies.get(id)
+	if l == nil {
+		t.Fatal("the lobby vanished on the host")
+	}
+	hostSrv.lobbies.mu.Lock()
+	var members []string
+	for _, u := range l.users {
+		members = append(members, u.ID)
+	}
+	hostSrv.lobbies.mu.Unlock()
+	if len(members) != 2 || members[1] != guestUID {
+		t.Fatalf("host lobby members = %v, want the host and the guest once", members)
+	}
+}
+
 // haxeString is haxe.Serializer's encoding of a plain string.
 func haxeString(s string) string { return "y" + strconv.Itoa(len(s)) + ":" + s }
 

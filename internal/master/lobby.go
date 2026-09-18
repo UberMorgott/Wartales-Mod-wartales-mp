@@ -336,6 +336,14 @@ func (s *Server) lobbyCreate(a lobbyArgs, p Peer) (any, error) {
 	return l.id, nil
 }
 
+// A guest that joins the same lobby a second time without having left is
+// simply refreshed ("rejoined"). Note that the game itself cannot survive
+// that: the new Lobby's constructor (Lobby.hx:512-513) leaves Lobby.inst
+// first, which removes the id from MPLobby.LOBBIES (MPLobby.hx:254), and the
+// HostWT.connect that follows the join reply throws "Lobby not found <id>"
+// from LobbyService.connectTo (LobbyService.hx:130). No answer of ours
+// changes that; it only happens when the first join hung (see answerAll and
+// adoptLocal) and the player clicked Join again.
 func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 	l := s.lobbies.get(a.ID)
 	if l == nil {

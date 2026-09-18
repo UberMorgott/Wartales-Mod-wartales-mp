@@ -78,6 +78,7 @@ func (s *Server) userLogin(args json.RawMessage, p Peer) (any, error) {
 	var a loginArgs
 	_ = json.Unmarshal(args, &a)
 	adopt(p, a)
+	s.adoptLocal(p)
 	s.opt.Log.Printf("master: login %s (%s)", p.Name(), p.UserID())
 	return map[string]any{
 		"sid":     makeSID(p.UserID(), p.Name()),
@@ -92,6 +93,7 @@ func (s *Server) userSession(args json.RawMessage, p Peer) (any, error) {
 	var a loginArgs
 	_ = json.Unmarshal(args, &a)
 	adopt(p, a)
+	s.adoptLocal(p)
 	return map[string]any{
 		"accept":  true,
 		"version": 2,
