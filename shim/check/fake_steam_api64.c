@@ -18,8 +18,16 @@
 #include "fake_steam.h"
 
 #define EXPORT __declspec(dllexport)
-#define CHANNELS 8
+#define CHANNELS 9 // 0..7 for the game, slot 8 = channel 100 (the bridge)
+#define BRIDGE_CHANNEL 100
 #define IDENTITY_STEAMID 16
+
+// slot maps a Steam channel number onto a queue, or -1.
+static int slot(int channel) {
+	if (channel >= 0 && channel < 8)
+		return channel;
+	return channel == BRIDGE_CHANNEL ? 8 : -1;
+}
 
 typedef struct node {
 	SteamNetworkingMessage_t *m;
@@ -53,6 +61,7 @@ static void release(SteamNetworkingMessage_t *m) {
 }
 
 static void enqueue(uint64_t from, int channel, const void *data, int len) {
+	int q = slot(channel);
 	SteamNetworkingMessage_t *m = (SteamNetworkingMessage_t *)calloc(1, sizeof(*m));
 	node *n = (node *)calloc(1, sizeof(*n));
 	m->m_pData = malloc((size_t)len + 1);
@@ -64,11 +73,11 @@ static void enqueue(uint64_t from, int channel, const void *data, int len) {
 	m->m_nChannel = channel;
 	m->m_pfnRelease = release;
 	n->m = m;
-	if (queue[channel].tail != NULL)
-		queue[channel].tail->next = n;
+	if (queue[q].tail != NULL)
+		queue[q].tail->next = n;
 	else
-		queue[channel].head = n;
-	queue[channel].tail = n;
+		queue[q].head = n;
+	queue[q].tail = n;
 	st.queued++;
 }
 
@@ -82,7 +91,7 @@ EXPORT int SteamAPI_ISteamNetworkingMessages_SendMessageToUser(void *self, const
 	const void *data, uint32_t len, int flags, int channel) {
 	int res;
 	EnterCriticalSection(&lock);
-	if (self != &g_msgs || to == NULL || to->m_eType != IDENTITY_STEAMID || channel < 0 || channel >= CHANNELS)
+	if (self != &g_msgs || to == NULL || to->m_eType != IDENTITY_STEAMID || slot(channel) < 0)
 		res = 8; // k_EResultInvalidParam
 	else
 		res = g_send_result;
@@ -101,15 +110,15 @@ EXPORT int SteamAPI_ISteamNetworkingMessages_SendMessageToUser(void *self, const
 
 EXPORT int SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel(void *self, int channel,
 	SteamNetworkingMessage_t **out, int max) {
-	int n = 0;
-	if (self != &g_msgs || channel < 0 || channel >= CHANNELS)
+	int n = 0, q = slot(channel);
+	if (self != &g_msgs || q < 0)
 		return -1;
 	EnterCriticalSection(&lock);
-	while (n < max && queue[channel].head != NULL) {
-		node *h = queue[channel].head;
-		queue[channel].head = h->next;
-		if (queue[channel].head == NULL)
-			queue[channel].tail = NULL;
+	while (n < max && queue[q].head != NULL) {
+		node *h = queue[q].head;
+		queue[q].head = h->next;
+		if (queue[q].head == NULL)
+			queue[q].tail = NULL;
 		out[n++] = h->m;
 		free(h);
 		st.queued--;
@@ -203,6 +212,8 @@ EXPORT void fake_stats(fake_stats_t *out) {
 }
 
 EXPORT void fake_inject(uint64_t from, int channel, const void *data, int len) {
+	if (slot(channel) < 0)
+		return;
 	EnterCriticalSection(&lock);
 	enqueue(from, channel, data, len);
 	LeaveCriticalSection(&lock);

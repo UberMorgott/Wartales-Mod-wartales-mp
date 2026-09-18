@@ -1,6 +1,7 @@
 package master
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/code"
@@ -153,38 +155,43 @@ func (s *store) peerGone(p Peer) {
 	if p == nil || p.UserID() == "" {
 		return
 	}
+	// What is left of each lobby is snapshotted under the lock: another
+	// member may be leaving at the same moment.
+	type left struct {
+		l      *lobby
+		id     string // the leaver, as this lobby knew it
+		owner  string
+		remain int
+	}
 	s.mu.Lock()
-	var affected []*lobby
+	var affected []left
 	for _, l := range s.lobbies {
 		id := l.idOf(p)
 		for i, u := range l.users {
 			if u.ID == id {
 				l.users = append(l.users[:i], l.users[i+1:]...)
-				affected = append(affected, l)
+				if len(l.users) == 0 {
+					delete(s.lobbies, l.id)
+					break
+				}
+				if l.owner == id {
+					l.owner = l.users[0].ID
+				}
+				affected = append(affected, left{l: l, id: id, owner: l.owner, remain: len(l.users)})
 				break
 			}
 		}
 	}
-	for _, l := range affected {
-		if len(l.users) == 0 {
-			delete(s.lobbies, l.id)
-			continue
-		}
-		if l.owner == l.idOf(p) {
-			l.owner = l.users[0].ID
-		}
-	}
 	s.mu.Unlock()
 
-	for _, l := range affected {
-		id := l.idOf(p)
+	for _, a := range affected {
 		if s.srv != nil {
 			s.srv.opt.Log.Printf("master: %s left lobby %s, %d member(s) remain, owner %s",
-				id, l.id, len(l.users), l.owner)
+				a.id, a.l.id, a.remain, a.owner)
 		}
-		s.broadcast(l, p, "lobby/leave", map[string]any{"id": l.id, "uid": id})
-		if l.owner != id && len(l.users) > 0 {
-			s.broadcast(l, p, "lobby/transfer", map[string]any{"id": l.id, "uid": l.owner})
+		s.broadcast(a.l, p, "lobby/leave", map[string]any{"id": a.l.id, "uid": a.id})
+		if a.owner != a.id {
+			s.broadcast(a.l, p, "lobby/transfer", map[string]any{"id": a.l.id, "uid": a.owner})
 		}
 	}
 }
@@ -249,7 +256,7 @@ func (s *Server) lobbyCommand(cmd string, args json.RawMessage, p Peer) (any, er
 	case "lobby/report":
 		return nil, nil
 	case "lobby/makeShortCode":
-		return s.lobbyMakeShortCode(a)
+		return s.lobbyMakeShortCode(a, p)
 	case "lobby/resolveShortCode":
 		return s.lobbyResolveShortCode(a, args, p)
 	}
@@ -486,11 +493,17 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	return nil
 }
 
-// lobbyMakeShortCode encodes our public endpoint into the join code. Guests
-// only need the endpoint: the host's master resolves the code to the lobby.
-func (s *Server) lobbyMakeShortCode(a lobbyArgs) (any, error) {
-	if s.lobbies.get(a.ID) == nil {
+// lobbyMakeShortCode issues the join code. A direct lobby's code carries our
+// public endpoint; an SDR lobby's code carries our SteamID and the link key,
+// so a guest needs no address at all. Either way the host's master resolves
+// the code to the lobby.
+func (s *Server) lobbyMakeShortCode(a lobbyArgs, p Peer) (any, error) {
+	l := s.lobbies.get(a.ID)
+	if l == nil {
 		return nil, wireErrf("Unknown lobby %s", a.ID)
+	}
+	if l.transport == TransportSDR {
+		return s.steamShortCode(l, p)
 	}
 	addr, err := s.publicAddr()
 	if err != nil {
@@ -519,6 +532,33 @@ func (s *Server) lobbyMakeShortCode(a lobbyArgs) (any, error) {
 	return map[string]any{"shortCode": short}, nil
 }
 
+// steamShortCode is the SDR lobby's join code. It is only handed out once
+// the bridge is up: a code the guest could not yet use would be worse than a
+// clear "ask again in a moment".
+func (s *Server) steamShortCode(l *lobby, p Peer) (any, error) {
+	id64, ok := uid.SteamID64(p.SteamID())
+	if !ok {
+		return nil, wireErrf("Cannot host over Steam: the game reported no Steam id")
+	}
+	account, ok := code.AccountID(id64)
+	if !ok {
+		return nil, wireErrf("Cannot host over Steam: %d is not a player account", id64)
+	}
+	if s.opt.Bridge == nil {
+		return nil, wireErrf("Cannot host over Steam: this helper has no SDR bridge")
+	}
+	if ready, why := s.opt.Bridge.Ready(); !ready {
+		s.opt.Log.Printf("master: join code for %s not issued yet: %s", l.id, why)
+		return nil, wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", why)
+	}
+	short := code.EncodeSteam(code.Steam{AccountID: account, Key: s.opt.LinkKey})
+	s.lobbies.mu.Lock()
+	s.lobbies.codes[short] = l.id
+	s.lobbies.mu.Unlock()
+	s.opt.Log.Printf("master: join code for %s is %s (SDR: SteamID %d, no address needed)", l.id, short, id64)
+	return map[string]any{"shortCode": short}, nil
+}
+
 // lobbyResolveShortCode is where a guest becomes a guest: it decodes the code,
 // opens the proxy-link to that host and asks the host's master for the lobby.
 func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer) (any, error) {
@@ -541,12 +581,21 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 	}
 
 	if !s.linked() {
-		ep, err := code.Decode(a.ShortCode)
+		c, err := code.DecodeAny(a.ShortCode)
 		if err != nil {
 			return nil, wireErrf("Invalid join code")
 		}
-		if err := s.dialHost(ep.Addr(), p); err != nil {
-			return nil, wireErrf("Cannot reach host %s: %v", ep.Addr(), err)
+		switch {
+		case c.Endpoint != nil:
+			// Direct: the host has a public endpoint, connect to it.
+			if err := s.dialHost(c.Endpoint.Addr(), p); err != nil {
+				return nil, wireErrf("Cannot reach host %s: %v", c.Endpoint.Addr(), err)
+			}
+		case c.Steam != nil:
+			// SDR: the host has no address; reach it by SteamID through the bridge.
+			if err := s.dialHostSDR(*c.Steam, p); err != nil {
+				return nil, wireErrf("Cannot reach host over Steam: %v", err)
+			}
 		}
 	}
 	raw, ok, err := s.forward("lobby/resolveShortCode", args)
@@ -556,10 +605,38 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 	return raw, err
 }
 
-// dialHost opens the proxy-link and starts relaying the host's pushes to the
-// local game.
+// dialHost opens the proxy-link over TCP and starts relaying the host's
+// pushes to the local game.
 func (s *Server) dialHost(addr string, p Peer) error {
-	cl, err := link.Dial(addr, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID()},
+	d := net.Dialer{Timeout: 10 * time.Second}
+	c, err := d.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.attachLink(c, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID()}, "proxy-link to host "+addr)
+}
+
+// dialHostSDR opens the proxy-link as a stream over the SDR bridge. The
+// bridge must be up: a join made while the shim is still bringing SDR up is
+// answered with the reason and the game shows it; the player retries.
+func (s *Server) dialHostSDR(target code.Steam, p Peer) error {
+	if s.opt.Bridge == nil {
+		return fmt.Errorf("this helper has no SDR bridge")
+	}
+	if ready, why := s.opt.Bridge.Ready(); !ready {
+		s.opt.Log.Printf("master: join over SDR to %d deferred: %s", target.SteamID64(), why)
+		return wireErrf("Steam relay not ready yet (%s); try again in a few seconds", why)
+	}
+	c, err := s.opt.Bridge.Dial(target.SteamID64())
+	if err != nil {
+		return err
+	}
+	return s.attachLink(c, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Key: target.Key},
+		fmt.Sprintf("sdr-link to host SteamID %d", target.SteamID64()))
+}
+
+func (s *Server) attachLink(c net.Conn, u link.User, what string) error {
+	cl, err := link.DialConn(c, u,
 		func(cmd string, args json.RawMessage) {
 			if sess := s.localSession(); sess != nil {
 				sess.Push(cmd, args)
@@ -569,7 +646,7 @@ func (s *Server) dialHost(addr string, p Peer) error {
 			s.mu.Lock()
 			s.client = nil
 			s.mu.Unlock()
-			s.opt.Log.Printf("master: proxy-link to the host closed")
+			s.opt.Log.Printf("master: %s closed", what)
 		})
 	if err != nil {
 		return err
@@ -577,6 +654,6 @@ func (s *Server) dialHost(addr string, p Peer) error {
 	s.mu.Lock()
 	s.client = cl
 	s.mu.Unlock()
-	s.opt.Log.Printf("master: proxy-link to host %s established", addr)
+	s.opt.Log.Printf("master: %s established", what)
 	return nil
 }

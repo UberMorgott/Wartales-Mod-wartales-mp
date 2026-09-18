@@ -36,6 +36,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
 #include "../proxy/hlpatch.h"
 #include "fake_steam.h"
@@ -403,6 +405,151 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 	check(legacy() == 0, "the legacy hlsteam bodies were never called");
 }
 
+// ------------------------------------------------------------- bridge check
+
+// Frames on the bridge socket: [type:u8][peer:u64 LE][len:u32 LE][payload].
+enum { FR_AUTH = 0, FR_SEND = 1, FR_RECV = 2, FR_ERR = 3 };
+#define BRIDGE_CHANNEL 100
+
+static int send_frame(SOCKET s, unsigned char type, uint64_t peer, const void *payload, uint32_t len) {
+	unsigned char head[13];
+	head[0] = type;
+	memcpy(head + 1, &peer, 8);
+	memcpy(head + 9, &len, 4);
+	if (send(s, (const char *)head, 13, 0) != 13)
+		return 0;
+	return len == 0 || send(s, (const char *)payload, (int)len, 0) == (int)len;
+}
+
+static int recv_exact(SOCKET s, unsigned char *p, int n) {
+	while (n > 0) {
+		int k = recv(s, (char *)p, n, 0);
+		if (k <= 0)
+			return 0;
+		p += k;
+		n -= k;
+	}
+	return 1;
+}
+
+// recv_frame reads one frame into type/peer/buf (NUL-terminated); 0 on close
+// or timeout.
+static int recv_frame(SOCKET s, unsigned char *type, uint64_t *peer, unsigned char *buf, uint32_t cap, uint32_t *len) {
+	unsigned char head[13];
+	if (!recv_exact(s, head, 13))
+		return 0;
+	*type = head[0];
+	memcpy(peer, head + 1, 8);
+	memcpy(len, head + 9, 4);
+	if (*len >= cap || !recv_exact(s, buf, (int)*len))
+		return 0;
+	buf[*len] = 0;
+	return 1;
+}
+
+static SOCKET bridge_connect(unsigned short port) {
+	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	struct sockaddr_in a;
+	DWORD tmo = 5000;
+	memset(&a, 0, sizeof(a));
+	a.sin_family = AF_INET;
+	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	a.sin_port = htons(port);
+	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tmo, sizeof(tmo));
+	if (connect(s, (struct sockaddr *)&a, sizeof(a)) != 0) {
+		closesocket(s);
+		return INVALID_SOCKET;
+	}
+	return s;
+}
+
+typedef void (*set_result_fn)(int);
+
+static void check_bridge(int with_api, HMODULE api, const wchar_t *log, const wchar_t *scratch, avail_fn avail) {
+	wchar_t status_path[MAX_PATH * 2];
+	size_t n;
+	unsigned char *status;
+	char token[64] = {0};
+	unsigned port = 0;
+	SOCKET s;
+	WSADATA wsa;
+	unsigned char type, buf[256];
+	uint64_t peer;
+	uint32_t len, size;
+	fake_stats_t st;
+	stats_fn stats = api != NULL ? (stats_fn)(void *)GetProcAddress(api, "fake_stats") : NULL;
+	inject_fn inject = api != NULL ? (inject_fn)(void *)GetProcAddress(api, "fake_inject") : NULL;
+	set_result_fn set_result = api != NULL ? (set_result_fn)(void *)GetProcAddress(api, "fake_set_send_result") : NULL;
+	const uint64_t PEER = 0x0102030405060708ULL, OTHER = 0x00000000AABBCCDDULL;
+
+	wcscpy(status_path, scratch);
+	wcscat(status_path, L"\\wartales-mp\\sdr.status");
+	status = read_raw(status_path, &n);
+	if (status == NULL) {
+		check(0, "sdr.status exists");
+		return;
+	}
+	status[n] = 0;
+	printf("      sdr.status: %s", (char *)status);
+	if (!with_api) {
+		check(strncmp((char *)status, "unavailable", 11) == 0 && strstr((char *)status, "bridge=") == NULL,
+			"nosdr: no bridge is advertised, the helper is told SDR is unavailable");
+		free(status);
+		return;
+	}
+	check(sscanf((char *)status, "ok bridge=127.0.0.1:%u token=%63s", &port, token) == 2 && port > 0 && strlen(token) == 32,
+		"sdr.status advertises the bridge port and a 32-hex token");
+	free(status);
+	check(log_contains(log, "bridge: listening on 127.0.0.1:"), "shim.log records the bridge listener");
+	if (port == 0 || stats == NULL || inject == NULL || set_result == NULL)
+		return;
+	WSAStartup(MAKEWORD(2, 2), &wsa);
+
+	// A wrong token is refused before anything else.
+	s = bridge_connect((unsigned short)port);
+	check(s != INVALID_SOCKET, "bridge accepts a loopback connection");
+	check(send_frame(s, FR_AUTH, 0, "0000000000000000000000000000000000000000", 32) &&
+			recv_frame(s, &type, &peer, buf, sizeof(buf), &len) == 0,
+		"a wrong token gets the connection closed");
+	closesocket(s);
+	check(wait_log(log, "bridge: connection without a valid token refused", 5000), "shim.log records the refused token");
+
+	// The real helper handshake.
+	s = bridge_connect((unsigned short)port);
+	check(s != INVALID_SOCKET && send_frame(s, FR_AUTH, 0, token, 32), "bridge connection with the token");
+	check(wait_log(log, "bridge: helper connected and authenticated", 5000), "shim.log records the authenticated helper");
+
+	// SEND goes to the peer reliably on channel 100 and, on the loopback fake,
+	// comes straight back as RECV from that peer.
+	check(send_frame(s, FR_SEND, PEER, "lobby-hello", 11), "SEND frame to the peer");
+	check(recv_frame(s, &type, &peer, buf, sizeof(buf), &len) && type == FR_RECV && peer == PEER && len == 11 &&
+			memcmp(buf, "lobby-hello", 11) == 0,
+		"RECV frame comes back from that peer with the same 11 bytes");
+	stats(&st);
+	check(st.last_channel == BRIDGE_CHANNEL && st.last_flags == (8 | 1 | 32) && st.last_send_to == PEER,
+		"bridge sends on channel 100, Reliable|NoNagle|AutoRestart");
+
+	// A message from another peer on channel 100 reaches the helper tagged
+	// with that peer; the game's channels never see it.
+	inject(OTHER, BRIDGE_CHANNEL, "from-other", 10);
+	check(recv_frame(s, &type, &peer, buf, sizeof(buf), &len) && type == FR_RECV && peer == OTHER && len == 10,
+		"RECV from another peer is tagged with that peer's SteamID");
+	size = 0;
+	check(avail(&size, 0) == 0, "bridge traffic is invisible on the game's channel 0");
+
+	// A refused send is reported to the helper, not swallowed.
+	set_result(3); // k_EResultNoConnection
+	check(send_frame(s, FR_SEND, PEER, "x", 1) && recv_frame(s, &type, &peer, buf, sizeof(buf), &len) &&
+			type == FR_ERR && peer == PEER && strstr((char *)buf, "EResult 3") != NULL,
+		"a failed send comes back as an ERR frame naming the peer and the EResult");
+	set_result(1);
+
+	closesocket(s);
+	check(wait_log(log, "bridge: helper connection closed", 5000), "shim.log records the helper leaving");
+	stats(&st);
+	check(st.allocated == st.released, "bridge released every message it pulled");
+}
+
 static void print_log(const wchar_t *log) {
 	size_t n;
 	unsigned char *b = read_raw(log, &n);
@@ -580,6 +727,10 @@ int main(int argc, char **argv) {
 	// 11. The SDR transport, through the hooked natives.
 	if (fake_steam != NULL)
 		check_sdr(with_api, fake_steam, fake_api, log, scratch);
+
+	// 12. The helper's bridge onto SDR (channel 100).
+	if (fake_steam != NULL)
+		check_bridge(with_api, fake_api, log, scratch, (avail_fn)resolve(fake_steam, "is_p2p_packet_available"));
 
 	print_log(log);
 	printf("%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);

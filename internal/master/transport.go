@@ -3,10 +3,9 @@ package master
 import (
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 
 	"github.com/UberMorgott/wartales-mp/internal/nat"
+	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
 )
 
 // Transport is how a lobby's game traffic travels. There are exactly two:
@@ -40,43 +39,8 @@ const (
 )
 
 // SDRStatus is the shim's verdict on the SDR transport, read from
-// %LOCALAPPDATA%\wartales-mp\sdr.status: "ok", "pending <why>" while the Steam
-// API is still coming up, "unavailable <why>" when it can never work in this
-// process. Known is false when the file is missing (the shim has not got that
-// far yet, or is not running at all).
-type SDRStatus struct {
-	Known  bool
-	OK     bool
-	Reason string
-}
-
-// ReadSDRStatus parses the status file the shim writes.
-func ReadSDRStatus(path string) SDRStatus {
-	b, err := os.ReadFile(path) //nolint:gosec // the path is ours: %LOCALAPPDATA%\wartales-mp\sdr.status, written by the shim
-	if err != nil {
-		return SDRStatus{}
-	}
-	return ParseSDRStatus(string(b))
-}
-
-// ParseSDRStatus parses the file's one line.
-func ParseSDRStatus(text string) SDRStatus {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return SDRStatus{}
-	}
-	verdict, reason, _ := strings.Cut(text, " ")
-	switch verdict {
-	case "ok":
-		return SDRStatus{Known: true, OK: true}
-	case "unavailable":
-		return SDRStatus{Known: true, OK: false, Reason: reason}
-	case "pending":
-		// Not a verdict yet: the Steam API is still initialising.
-		return SDRStatus{Known: false, Reason: reason}
-	}
-	return SDRStatus{Known: true, OK: false, Reason: "unrecognised status " + strings.ToValidUTF8(text, "?")}
-}
+// %LOCALAPPDATA%\wartales-mp\sdr.status (see sdrbridge.ParseStatus).
+type SDRStatus = sdrbridge.Status
 
 // errNoTransport is the honest failure: nothing we offer can carry this lobby.
 var errNoTransport = errors.New("no usable transport")
@@ -84,10 +48,14 @@ var errNoTransport = errors.New("no usable transport")
 // chooseTransport decides a lobby's transport at creation:
 //
 //   - a verified public endpoint (nat.Endpoint.Reachable) keeps the direct
-//     relay, which needs no third party at all;
-//   - otherwise SDR, unless the shim has already reported that SDR cannot
-//     work in this game process, in which case the lobby is refused with the
-//     reasons rather than quietly created on a path that cannot connect.
+//     relay, which needs no third party at all and stays the faster rung;
+//   - otherwise SDR for everything, lobby phase included (the join code then
+//     carries our SteamID and the proxy-link rides the SDR bridge), unless
+//     the shim has already reported that SDR cannot work in this game
+//     process, in which case the lobby is refused with the reasons rather
+//     than quietly created on a path that cannot connect. "Not known yet" is
+//     not a refusal: the shim may still be waiting for the Steam API, and the
+//     join code request is what fails, with a retry hint, until it is ready.
 //
 // mode forces either transport; forcing SDR against a known-bad SDR is still
 // refused. The returned string is the reason, for the log.

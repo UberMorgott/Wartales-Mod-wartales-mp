@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"math"
@@ -17,6 +20,7 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/master"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
 	"github.com/UberMorgott/wartales-mp/internal/relay"
+	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
 )
 
 func runCmd(args []string) error {
@@ -66,6 +70,13 @@ func runCmd(args []string) error {
 	mapper := nat.NewMapper(*port, logger)
 	defer mapper.Close()
 
+	// The shim's SDR bridge: its verdict and port live in sdr.status next to
+	// our log. The bridge follows that file for as long as we run, because
+	// the game's Steam API comes up after us.
+	bridge := sdrbridge.New(filepath.Join(applog.Dir(), "sdr.status"), logger)
+	var key [4]byte
+	_, _ = rand.Read(key[:]) // crypto/rand.Read never returns an error
+
 	ms := master.New(master.Options{
 		Addr:       *masterAddr,
 		TLS:        tlsCfg,
@@ -76,14 +87,17 @@ func runCmd(args []string) error {
 		PublicAddr: mapper.Addr,
 		Transport:  *transport,
 		Endpoint:   mapper.Endpoint,
-		// The shim's verdict on SDR lives next to our log; it is re-read at
-		// every lobby creation because the Steam API may come up after us.
-		SDRStatus: func() master.SDRStatus {
-			return master.ReadSDRStatus(filepath.Join(applog.Dir(), "sdr.status"))
-		},
+		SDRStatus:  bridge.Status,
+		Bridge:     bridge,
+		LinkKey:    binary.BigEndian.Uint32(key[:]),
 	})
-	logger.Printf("transport mode %s (direct relay when the public endpoint is verified, else SDR)", *transport)
+	bridge.OnPeer = ms.ServeSDRLink
+	logger.Printf("transport mode %s (direct relay when the public endpoint is verified, else SDR for everything)", *transport)
 	defer ms.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.Run(ctx)
 
 	errs := make(chan error, 2)
 	go func() { errs <- rl.ListenAndServe(fmt.Sprintf(":%d", *port), ms.ServeLink) }()
@@ -151,11 +165,15 @@ func codeCmd(args []string) error {
 		}
 		fmt.Println(s)
 	case "decode":
-		ep, err := code.Decode(args[1])
+		c, err := code.DecodeAny(args[1])
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s (flags %d)\n", ep.Addr(), ep.Flags)
+		if c.Steam != nil {
+			fmt.Printf("steam %d key %08x (flags %d)\n", c.Steam.SteamID64(), c.Steam.Key, c.Steam.Flags)
+		} else {
+			fmt.Printf("%s (flags %d)\n", c.Endpoint.Addr(), c.Endpoint.Flags)
+		}
 	default:
 		return fmt.Errorf("usage: wartales-mp code encode IP:PORT | code decode CODE")
 	}

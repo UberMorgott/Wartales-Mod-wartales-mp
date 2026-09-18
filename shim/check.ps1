@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $fakes | Out-Null
 $src = Join-Path $PSScriptRoot 'check'
 
 $exe = Join-Path $work 'shimcheck.exe'
-& $gcc -O2 -o $exe (Join-Path $src 'shimcheck.c') -Wall -Wextra -static-libgcc
+& $gcc -O2 -o $exe (Join-Path $src 'shimcheck.c') -Wall -Wextra -static-libgcc -lws2_32
 if ($LASTEXITCODE -ne 0) { throw 'gcc failed for shimcheck.exe' }
 
 # The stand-ins. steam.hdll is built without optimisation so its six identical

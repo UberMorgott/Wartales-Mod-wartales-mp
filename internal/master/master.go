@@ -18,6 +18,7 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/link"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
+	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
 	"github.com/UberMorgott/wartales-mp/internal/wsx"
 )
 
@@ -55,6 +56,12 @@ type Options struct {
 	// SDRStatus returns the shim's verdict on the SDR transport. nil means
 	// "unknown".
 	SDRStatus func() SDRStatus
+	// Bridge carries the proxy-link over SDR; nil means the lobby phase can
+	// only travel over TCP.
+	Bridge *sdrbridge.Bridge
+	// LinkKey is embedded in steam join codes; a proxy-link over SDR must
+	// present it.
+	LinkKey uint32
 }
 
 // Server is the master.
@@ -136,11 +143,29 @@ func (s *Server) isClosed() bool {
 	return s.closed
 }
 
-// ServeLink handles one guest's proxy-link connection (host role).
+// ServeLink handles one guest's proxy-link connection over TCP (host role,
+// direct transport). The guest proved it can reach us by connecting.
 func (s *Server) ServeLink(c net.Conn) {
+	s.serveLink(c, "proxy-link", nil)
+}
+
+// ServeSDRLink handles one guest's proxy-link stream over the SDR bridge
+// (host role, SDR transport). Anyone who knows our SteamID can open a stream,
+// so the hello must carry the key from our join code.
+func (s *Server) ServeSDRLink(c net.Conn, peer uint64) {
+	s.serveLink(c, "sdr-link", func(u link.User) error {
+		if u.Key != s.opt.LinkKey {
+			s.opt.Log.Printf("sdr-link: stream from %d refused: wrong join code key", peer)
+			return wireErrf("Invalid join code")
+		}
+		return nil
+	})
+}
+
+func (s *Server) serveLink(c net.Conn, kind string, accept link.Accept) {
 	addr := c.RemoteAddr().String()
-	s.opt.Log.Printf("link: accepted proxy-link from %s", addr)
-	link.Serve(c, func(cmd string, args json.RawMessage, peer *link.Peer) (any, error) {
+	s.opt.Log.Printf("link: accepted %s from %s", kind, addr)
+	link.Serve(c, accept, func(cmd string, args json.RawMessage, peer *link.Peer) (any, error) {
 		s.opt.Log.Printf("link: <- %s from %s (%s) %s", cmd, peer.Name(), peer.UserID(), applog.Trunc(args))
 		result, err := s.Handle(cmd, args, peer)
 		if err != nil {
@@ -150,7 +175,7 @@ func (s *Server) ServeLink(c net.Conn) {
 		}
 		return result, err
 	}, func(peer *link.Peer) {
-		s.opt.Log.Printf("link: proxy-link from %s (%s) closed", addr, peer.UserID())
+		s.opt.Log.Printf("link: %s from %s (%s) closed", kind, addr, peer.UserID())
 		s.lobbies.peerGone(peer)
 	})
 }

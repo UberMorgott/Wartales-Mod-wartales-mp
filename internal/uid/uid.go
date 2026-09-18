@@ -13,6 +13,7 @@ package uid
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 )
 
@@ -59,6 +60,33 @@ func IsSteam(id string) bool {
 		}
 	}
 	return true
+}
+
+// steamXor is what mpman.UserID xors into the high dword of the 8 id bytes
+// (UserID.hx:29 on parse, :114 on print): 0x1100001, the constant high dword
+// of every player SteamID64, so a player's id prints with zeros there.
+const steamXor = 0x01100001
+
+// SteamID64 turns a Steam id back into the SteamID64 the game derives from
+// it: the 16 hex digits are the 8 little-endian bytes of the id with the high
+// dword xor'ed. ok is false for anything IsSteam rejects.
+func SteamID64(id string) (uint64, bool) {
+	if !IsSteam(id) {
+		return 0, false
+	}
+	b, err := hex.DecodeString(id[1:])
+	if err != nil {
+		return 0, false
+	}
+	v := binary.LittleEndian.Uint64(b)
+	return v ^ (steamXor << 32), true
+}
+
+// FromSteamID64 is the inverse: the id the game reports for a SteamID64.
+func FromSteamID64(steamID64 uint64) string {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], steamID64^(steamXor<<32))
+	return "S" + hex.EncodeToString(b[:])
 }
 
 // Ensure returns id when it is already a Session id and a minted one otherwise.

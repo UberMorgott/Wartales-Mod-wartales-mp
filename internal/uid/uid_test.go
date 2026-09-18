@@ -18,6 +18,22 @@ func TestIsSteam(t *testing.T) {
 	}
 }
 
+func TestSteamID64(t *testing.T) {
+	// Account 12345678 (0x00bc614e): little-endian bytes 4e 61 bc 00, and the
+	// high dword 0x01100001 xors to zero, which is how the game prints it.
+	const id = "S4e61bc0000000000"
+	got, ok := SteamID64(id)
+	if !ok || got != 0x0110000100BC614E {
+		t.Fatalf("SteamID64(%q) = %x, %v", id, got, ok)
+	}
+	if FromSteamID64(got) != id {
+		t.Fatalf("FromSteamID64(%x) = %q", got, FromSteamID64(got))
+	}
+	if _, ok := SteamID64("X4e61bc0000000000"); ok {
+		t.Fatal("a Session id has no SteamID64")
+	}
+}
+
 func TestMintIsSessionAndStable(t *testing.T) {
 	a, b := Mint("S0011223344556677"), Mint("S0011223344556677")
 	if a != b || !IsSession(a) || IsSteam(a) {

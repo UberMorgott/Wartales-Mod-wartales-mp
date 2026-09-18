@@ -88,9 +88,10 @@ $mhsrc = @(
 )
 $out = Join-Path $OutDir 'winmm.dll'
 & $gcc -shared -O2 -o $out `
-    (Join-Path $PSScriptRoot 'proxy\proxy.c') (Join-Path $PSScriptRoot 'proxy\sdr.c') $stubs $mhsrc $embed $def `
+    (Join-Path $PSScriptRoot 'proxy\proxy.c') (Join-Path $PSScriptRoot 'proxy\sdr.c') (Join-Path $PSScriptRoot 'proxy\bridge.c') `
+    $stubs $mhsrc $embed $def `
     "-I$(Join-Path $minhook 'include')" -DNDEBUG `
-    -Wall -Wextra -static-libgcc -s -lkernel32
+    -Wall -Wextra -static-libgcc -s -lkernel32 -lws2_32
 if ($LASTEXITCODE -ne 0) { throw 'gcc failed for winmm.dll' }
 Write-Host "built $out"
 Write-Host "drop this one file into the game folder: $out"

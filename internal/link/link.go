@@ -8,7 +8,6 @@ package link
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,10 +34,15 @@ type User struct {
 	ID    string `json:"uid"`
 	Name  string `json:"name"`
 	Steam string `json:"steam,omitempty"` // the real Steam id, for a lobby on SDR
+	Key   uint32 `json:"key,omitempty"`   // from the join code; a link over SDR must present it
 }
 
 // Handler answers a command forwarded by a guest.
 type Handler func(cmd string, args json.RawMessage, peer *Peer) (any, error)
+
+// Accept vets a guest's hello before any command is served; a non-nil error
+// closes the link with that text.
+type Accept func(u User) error
 
 type conn struct {
 	c  net.Conn
@@ -93,8 +97,9 @@ func (p *Peer) Push(cmd string, args any) {
 	_ = p.out.send(Envelope{UID: n, Cmd: cmd, Args: raw})
 }
 
-// Serve runs one guest connection on the host side until it closes.
-func Serve(c net.Conn, h Handler, onClose func(*Peer)) {
+// Serve runs one guest connection on the host side until it closes. accept
+// may be nil.
+func Serve(c net.Conn, accept Accept, h Handler, onClose func(*Peer)) {
 	defer func() { _ = c.Close() }() // the guest is gone; a close error is moot
 	br := bufio.NewReader(c)
 	out := &conn{c: c}
@@ -106,6 +111,13 @@ func Serve(c net.Conn, h Handler, onClose func(*Peer)) {
 	var u User
 	if err := json.Unmarshal(first.Args, &u); err != nil {
 		return
+	}
+	if accept != nil {
+		if err := accept(u); err != nil {
+			raw, _ := json.Marshal(err.Error())
+			_ = out.send(Envelope{UID: -first.UID, Cmd: "err", Args: raw})
+			return
+		}
 	}
 	// The guest announces itself, so its ids are not trusted as given: the
 	// Session id must be one, or a Steam shaped id would travel into every
@@ -145,6 +157,10 @@ func Serve(c net.Conn, h Handler, onClose func(*Peer)) {
 
 // --------------------------------------------------------------- guest side
 
+// helloUID is the request id of link/hello, so a refusal comes back as its
+// reply and never looks like a push.
+const helloUID = 1
+
 // Client is the guest's connection to the host's master.
 type Client struct {
 	out *conn
@@ -153,20 +169,27 @@ type Client struct {
 	uid     int
 	pending map[int]chan Envelope
 	closed  bool
+	refused string // the host's answer to our hello, when it said no
 }
 
-// Dial connects to the host's public endpoint and announces the local user.
-// Pushes coming from the host are handed to onPush.
-func Dial(addr string, u User, onPush func(cmd string, args json.RawMessage), onClose func()) (*Client, error) {
-	d := net.Dialer{Timeout: 10 * time.Second}
-	c, err := d.DialContext(context.Background(), "tcp", addr)
-	if err != nil {
-		return nil, err
+// closedErr is the error a call gets on a closed link.
+func (c *Client) closedErr() error {
+	if c.refused != "" {
+		return fmt.Errorf("link: host refused the connection: %s", c.refused)
 	}
-	cl := &Client{out: &conn{c: c}, pending: map[int]chan Envelope{}}
+	return errors.New("link: connection closed")
+}
+
+// DialConn runs the guest side of a link over an already open connection
+// (a TCP connection to the host's port, or a stream over the SDR bridge) and
+// announces the local user. Pushes coming from the host are handed to onPush.
+// The hello is sent with uid 1 so a refusal from the host comes back as a
+// reply to it and reaches the caller instead of a later command.
+func DialConn(c net.Conn, u User, onPush func(cmd string, args json.RawMessage), onClose func()) (*Client, error) {
+	cl := &Client{out: &conn{c: c}, pending: map[int]chan Envelope{}, uid: helloUID}
 
 	hello, _ := json.Marshal(u)
-	if err := cl.out.send(Envelope{Cmd: "link/hello", Args: hello}); err != nil {
+	if err := cl.out.send(Envelope{UID: helloUID, Cmd: "link/hello", Args: hello}); err != nil {
 		_ = c.Close() // the hello already failed; report that error, not this one
 		return nil, err
 	}
@@ -183,6 +206,17 @@ func Dial(addr string, u User, onPush func(cmd string, args json.RawMessage), on
 				return
 			}
 			if e.UID < 0 { // reply
+				if -e.UID == helloUID && e.Cmd == "err" {
+					// The host refused our hello: remember why, then end.
+					var msg string
+					if json.Unmarshal(e.Args, &msg) != nil {
+						msg = string(e.Args)
+					}
+					cl.mu.Lock()
+					cl.refused = msg
+					cl.mu.Unlock()
+					return
+				}
 				cl.mu.Lock()
 				ch := cl.pending[-e.UID]
 				delete(cl.pending, -e.UID)
@@ -207,8 +241,9 @@ func (c *Client) Call(cmd string, args json.RawMessage) (json.RawMessage, error)
 	ch := make(chan Envelope, 1)
 	c.mu.Lock()
 	if c.closed {
+		err := c.closedErr()
 		c.mu.Unlock()
-		return nil, errors.New("link: connection closed")
+		return nil, err
 	}
 	c.uid++
 	n := c.uid
@@ -221,7 +256,10 @@ func (c *Client) Call(cmd string, args json.RawMessage) (json.RawMessage, error)
 	select {
 	case e, ok := <-ch:
 		if !ok {
-			return nil, errors.New("link: connection closed")
+			c.mu.Lock()
+			err := c.closedErr()
+			c.mu.Unlock()
+			return nil, err
 		}
 		if e.Cmd == "err" {
 			var msg string

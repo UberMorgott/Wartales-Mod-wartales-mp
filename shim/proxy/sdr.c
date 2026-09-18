@@ -58,33 +58,7 @@
 // Steamworks types (steamnetworkingtypes.h). Only what is touched here.
 // ---------------------------------------------------------------------------
 
-#define SDR_IDENTITY_STEAMID 16 // k_ESteamNetworkingIdentityType_SteamID
-
-typedef struct sdr_identity {
-	int32_t type;
-	int32_t cb;
-	union {
-		uint64_t steam_id;
-		unsigned char raw[128]; // m_szUnknownRawString: the union's widest member
-	} u;
-} sdr_identity;
-
-typedef struct sdr_msg {
-	void *data;
-	int32_t size;
-	uint32_t conn;
-	sdr_identity peer;
-	int64_t conn_user_data;
-	int64_t usec_received;
-	int64_t message_number;
-	void (*free_data)(struct sdr_msg *);
-	void (*release)(struct sdr_msg *);
-	int32_t channel;
-	int32_t flags;
-	int64_t user_data;
-	uint16_t lane;
-	uint16_t pad;
-} sdr_msg;
+#include "sdr.h" // sdr_identity, sdr_msg: SteamNetworkingIdentity / SteamNetworkingMessage_t
 
 C_ASSERT(sizeof(sdr_identity) == 136);
 C_ASSERT(offsetof(sdr_msg, peer) == 16);
@@ -98,8 +72,6 @@ C_ASSERT(sizeof(sdr_msg) == 216);
 #define SDR_SEND_NO_DELAY 4
 #define SDR_SEND_RELIABLE 8
 #define SDR_SEND_AUTO_RESTART 32
-
-#define SDR_RESULT_OK 1 // k_EResultOK
 
 // Flat API (steam_api_flat.h): C++ references arrive as pointers, bool as a
 // byte in AL.
@@ -268,6 +240,8 @@ static void on_session_failed(void *ev) {
 		(unsigned long long)peer->u.steam_id);
 }
 
+static BOOL ready(void);
+
 // try_init resolves the flat API and the interfaces. Lock held.
 static BOOL try_init(void) {
 	HMODULE mod;
@@ -322,9 +296,49 @@ static BOOL try_init(void) {
 	state = SDR_READY;
 	sdr_last_reason[0] = 0;
 	shim_log("sdr: READY: ISteamNetworkingMessages at %p, utils at %p", sdr_msgs, sdr_utils);
-	write_status("ok\n");
+	{
+		// The helper's way in. Without it the game's own SDR path still works;
+		// the helper then reports the lobby phase as unavailable over SDR.
+		char bridge[160], status[200];
+		if (bridge_start(bridge, sizeof(bridge))) {
+			_snprintf(status, sizeof(status) - 1, "ok %s\n", bridge);
+			status[sizeof(status) - 1] = 0;
+			write_status(status);
+		} else {
+			write_status("ok bridge=none\n");
+		}
+	}
 	return TRUE;
 }
+
+// ---------------------------------------------------------------------------
+// The bridge's access to the transport (bridge.c). These take the lock like
+// the game-facing natives; the interface itself is thread-safe.
+// ---------------------------------------------------------------------------
+
+int sdr_bridge_send(uint64_t peer, const void *data, uint32_t len, int channel) {
+	sdr_identity to;
+	int res;
+	if (!ready())
+		return -1;
+	identity_of(&to, peer);
+	EnterCriticalSection(&sdr_lock);
+	res = api.send(sdr_msgs, &to, data, len, SDR_SEND_RELIABLE | SDR_SEND_NO_NAGLE | SDR_SEND_AUTO_RESTART, channel);
+	LeaveCriticalSection(&sdr_lock);
+	return res;
+}
+
+int sdr_bridge_receive(int channel, sdr_msg **out, int max) {
+	int n;
+	if (!sdr_lock_ready)
+		return 0;
+	EnterCriticalSection(&sdr_lock);
+	n = state == SDR_READY ? api.receive(sdr_msgs, channel, out, max) : 0;
+	LeaveCriticalSection(&sdr_lock);
+	return n > 0 ? n : 0;
+}
+
+void sdr_bridge_release(sdr_msg *m) { api.release(m); }
 
 static BOOL ready(void) {
 	BOOL ok;

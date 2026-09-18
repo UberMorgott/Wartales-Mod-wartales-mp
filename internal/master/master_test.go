@@ -12,13 +12,18 @@ import (
 	"log"
 	"math"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/UberMorgott/wartales-mp/internal/code"
 	"github.com/UberMorgott/wartales-mp/internal/install"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
+	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
+	"github.com/UberMorgott/wartales-mp/internal/sdrbridge/sdrbridgetest"
 	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
@@ -219,6 +224,19 @@ func startMaster(t *testing.T) string {
 
 func startMasterWith(t *testing.T, ep nat.Endpoint, sdr SDRStatus) string {
 	t.Helper()
+	_, addr := startMasterOpts(t, func(o *Options) {
+		o.PublicAddr = func() (string, error) { return ep.Addr, nil }
+		o.Endpoint = func() (nat.Endpoint, error) { return ep, nil }
+		o.SDRStatus = func() SDRStatus { return sdr }
+	})
+	return addr
+}
+
+// startMasterOpts starts a master on a free port with the public endpoint
+// verified reachable and SDR ready; mod adjusts the options.
+func startMasterOpts(t *testing.T, mod func(*Options)) (*Server, string) {
+	t.Helper()
+	ep, sdr := publicEndpoint, SDRStatus{Known: true, OK: true}
 	dir := t.TempDir()
 	if err := install.EnsureCerts(dir); err != nil {
 		t.Fatal(err)
@@ -235,17 +253,197 @@ func startMasterWith(t *testing.T, ep nat.Endpoint, sdr SDRStatus) string {
 	addr := ln.Addr().String()
 	_ = ln.Close() // only used to reserve a free port
 
-	s := New(Options{
+	opt := Options{
 		Addr: addr, TLS: cfg, RelayPort: 14250,
 		HostPW: "hpw", SlavePW: "spw",
 		Log:        log.New(io.Discard, "", 0),
 		PublicAddr: func() (string, error) { return ep.Addr, nil },
 		Endpoint:   func() (nat.Endpoint, error) { return ep, nil },
 		SDRStatus:  func() SDRStatus { return sdr },
-	})
+	}
+	if mod != nil {
+		mod(&opt)
+	}
+	s := New(opt)
 	go func() { _ = s.ListenAndServe() }() // returns when t.Cleanup closes the server
 	t.Cleanup(s.Close)
-	return addr
+	return s, addr
+}
+
+// startBridge runs a bridge against a status file until the test ends and
+// waits for it to connect (or not, when the status says SDR is unusable).
+func startBridge(t *testing.T, statusPath string, wantReady bool) *sdrbridge.Bridge {
+	t.Helper()
+	b := sdrbridge.New(statusPath, log.New(io.Discard, "", 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go b.Run(ctx)
+	if !wantReady {
+		return b
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if ok, _ := b.Ready(); ok {
+			return b
+		}
+		if time.Now().After(deadline) {
+			_, why := b.Ready()
+			t.Fatalf("bridge never became ready: %s", why)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestJoinOverSDR is the whole point of the SDR bridge: a host with NO public
+// endpoint issues a join code that carries its SteamID, and a guest's master
+// reaches the host's master through the (fake) SDR bridge, with no address
+// anywhere. Both helpers sit behind their own fake shim identity on one
+// switch.
+func TestJoinOverSDR(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	const hostID64, guestID64 = uint64(0x0110000100BC614E), uint64(0x0110000100000007)
+	hostSteam, guestSteam := uid.FromSteamID64(hostID64), uid.FromSteamID64(guestID64)
+
+	hostBridge := startBridge(t, sw.Add(t, hostID64), true)
+	hostSrv, hostAddr := startMasterOpts(t, func(o *Options) {
+		o.Endpoint = func() (nat.Endpoint, error) { return lanEndpoint, nil }
+		o.SDRStatus = hostBridge.Status
+		o.Bridge = hostBridge
+		o.LinkKey = 0xdeadbeef
+	})
+	hostBridge.OnPeer = hostSrv.ServeSDRLink
+
+	guestBridge := startBridge(t, sw.Add(t, guestID64), true)
+	_, guestAddr := startMasterOpts(t, func(o *Options) {
+		o.Endpoint = func() (nat.Endpoint, error) { return lanEndpoint, nil }
+		o.SDRStatus = guestBridge.Status
+		o.Bridge = guestBridge
+		o.LinkKey = 0x01020304 // its own key; irrelevant for joining
+	})
+
+	host := dialMaster(t, hostAddr)
+	defer func() { _ = host.c.Close() }()
+	host.call(t, "user/login", map[string]any{"name": "Host", "uid": hostSteam, "version": 2})
+	var id string
+	raw := host.call(t, "lobby/create", map[string]any{"props": map[string]any{"maxPlayers": 4}})
+	if err := json.Unmarshal(raw, &id); err != nil {
+		t.Fatal(err)
+	}
+	var short struct {
+		ShortCode string `json:"shortCode"`
+	}
+	raw = host.call(t, "lobby/makeShortCode", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &short); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := code.DecodeSteam(short.ShortCode)
+	if err != nil || sc.SteamID64() != hostID64 || sc.Key != 0xdeadbeef {
+		t.Fatalf("join code %q = %+v, %v; want SteamID %d key deadbeef", short.ShortCode, sc, err, hostID64)
+	}
+
+	guest := dialMaster(t, guestAddr)
+	defer func() { _ = guest.c.Close() }()
+	guest.call(t, "user/login", map[string]any{"name": "Guest", "uid": guestSteam, "version": 2})
+	var info struct {
+		ID    string `json:"id"`
+		Owner string `json:"owner"`
+		Users []struct {
+			ID string `json:"id"`
+		} `json:"users"`
+	}
+	raw = guest.call(t, "lobby/resolveShortCode", map[string]any{"shortCode": short.ShortCode, "filters": map[string]any{}})
+	if err := json.Unmarshal(raw, &info); err != nil || info.ID != id || info.Owner != hostSteam {
+		t.Fatalf("resolveShortCode over SDR = %s, %v", raw, err)
+	}
+	raw = guest.call(t, "lobby/join", map[string]any{"id": id, "data": `{"ready":false}`})
+	if err := json.Unmarshal(raw, &info); err != nil || len(info.Users) != 2 ||
+		info.Users[0].ID != hostSteam || info.Users[1].ID != guestSteam {
+		t.Fatalf("lobby/join over SDR = %s, %v", raw, err)
+	}
+	// The push reached the host through the bridge as well.
+	join := host.readPush(t, "lobby/join")
+	if !strings.Contains(string(join), guestSteam) {
+		t.Fatalf("lobby/join push = %s", join)
+	}
+	// And the lobby transport (lobby/chat) flows both ways over it.
+	guest.call(t, "lobby/chat", map[string]any{"id": id, "msg": "y1:x"})
+	if chat := host.readPush(t, "lobby/chat"); !strings.Contains(string(chat), guestSteam) {
+		t.Fatalf("lobby/chat push = %s", chat)
+	}
+
+	// A code with the wrong key is refused by the host's master, not served.
+	_, intruderAddr := startMasterOpts(t, func(o *Options) {
+		b := startBridge(t, sw.Add(t, 0x0110000100000099), true)
+		o.SDRStatus, o.Bridge = b.Status, b
+	})
+	intruder := dialMaster(t, intruderAddr)
+	defer func() { _ = intruder.c.Close() }()
+	intruder.call(t, "user/login", map[string]any{"name": "Intruder", "uid": uid.FromSteamID64(0x0110000100000099), "version": 2})
+	tampered := code.EncodeSteam(code.Steam{AccountID: 0x00BC614E, Key: 0xdeadbeef ^ 1})
+	msg := intruder.callErr(t, "lobby/resolveShortCode", map[string]any{"shortCode": tampered, "filters": map[string]any{}})
+	if !strings.Contains(msg, "Invalid join code") {
+		t.Fatalf("tampered code: %q, want the host's refusal", msg)
+	}
+}
+
+// TestSDRJoinBeforeTheBridgeIsReady: a join code request or a join attempt
+// made while the shim is still bringing SDR up is answered with a clear,
+// retryable error, never a code or a link that could not work.
+func TestSDRJoinBeforeTheBridgeIsReady(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	pending := filepath.Join(t.TempDir(), "sdr.status")
+	if err := os.WriteFile(pending, []byte("pending Steam API not initialised yet\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bridge := startBridge(t, pending, false)
+	_, addr := startMasterOpts(t, func(o *Options) {
+		o.Endpoint = func() (nat.Endpoint, error) { return lanEndpoint, nil }
+		o.SDRStatus, o.Bridge = bridge.Status, bridge
+	})
+	w := dialMaster(t, addr)
+	defer func() { _ = w.c.Close() }()
+	w.call(t, "user/login", map[string]any{"name": "Host", "uid": "S4e61bc0000000000", "version": 2})
+	var id string
+	raw := w.call(t, "lobby/create", map[string]any{"props": map[string]any{"maxPlayers": 4}})
+	if err := json.Unmarshal(raw, &id); err != nil {
+		t.Fatalf("lobby/create must succeed with SDR pending: %s, %v", raw, err)
+	}
+	msg := w.callErr(t, "lobby/makeShortCode", map[string]any{"id": id})
+	if !strings.Contains(msg, "Steam relay not ready yet") || !strings.Contains(msg, "not initialised") {
+		t.Fatalf("makeShortCode while pending = %q", msg)
+	}
+	steamCode := code.EncodeSteam(code.Steam{AccountID: 1, Key: 2})
+	msg = w.callErr(t, "lobby/resolveShortCode", map[string]any{"shortCode": steamCode, "filters": map[string]any{}})
+	if !strings.Contains(msg, "Steam relay not ready yet") {
+		t.Fatalf("resolveShortCode while pending = %q", msg)
+	}
+
+	// Once the shim reports the bridge, the same lobby gets its code.
+	ready := sw.Add(t, 0x0110000100BC614E)
+	data, err := os.ReadFile(ready) //nolint:gosec // a test temp file
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if ok, _ := bridge.Ready(); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("bridge did not pick the new status up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var short struct {
+		ShortCode string `json:"shortCode"`
+	}
+	raw = w.call(t, "lobby/makeShortCode", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &short); err != nil || len(short.ShortCode) != code.SteamLength {
+		t.Fatalf("makeShortCode once ready = %s, %v", raw, err)
+	}
 }
 
 func TestLoginAndInstanceGet(t *testing.T) {

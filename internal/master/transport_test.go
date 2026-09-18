@@ -9,29 +9,6 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/nat"
 )
 
-func TestParseSDRStatus(t *testing.T) {
-	cases := []struct {
-		in   string
-		want SDRStatus
-	}{
-		{"", SDRStatus{}},
-		{"ok\n", SDRStatus{Known: true, OK: true}},
-		{"ok relay=100", SDRStatus{Known: true, OK: true}},
-		{"unavailable steam_api64.dll is not loaded in this process\n",
-			SDRStatus{Known: true, OK: false, Reason: "steam_api64.dll is not loaded in this process"}},
-		{"pending Steam API not initialised yet (SteamAPI_GetHSteamUser() == 0)",
-			SDRStatus{Known: false, Reason: "Steam API not initialised yet (SteamAPI_GetHSteamUser() == 0)"}},
-	}
-	for _, c := range cases {
-		if got := ParseSDRStatus(c.in); got != c.want {
-			t.Errorf("ParseSDRStatus(%q) = %+v, want %+v", c.in, got, c.want)
-		}
-	}
-	if got := ParseSDRStatus("garbage here"); !got.Known || got.OK {
-		t.Errorf("unrecognised status must be a known failure, got %+v", got)
-	}
-}
-
 func TestChooseTransport(t *testing.T) {
 	public := nat.Endpoint{Addr: "198.51.100.7:14250", IP: net.IPv4(198, 51, 100, 7), Source: "UPnP", Reachable: true}
 	lan := nat.Endpoint{Addr: "192.168.1.5:14250", IP: net.IPv4(192, 168, 1, 5), Source: "LAN", Reachable: false,

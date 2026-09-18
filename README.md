@@ -12,9 +12,12 @@ server running on `127.0.0.1` instead of Shiro's, and that master tells the game
 how to connect. There are exactly two ways, tried in this order:
 
 1. **Direct** — straight to the host's machine, when the host has a verified
-   public address. Neither Shiro's infrastructure nor any relay is in the path.
+   public address. Neither Shiro's infrastructure nor any relay is in the path,
+   and it is the faster of the two.
 2. **SDR** — Valve's modern relay network (Steam Datagram Relay) through
-   `ISteamNetworkingMessages`, when the host has no reachable address.
+   `ISteamNetworkingMessages`, for everything: the lobby and the game. The host
+   needs no open port and no public address at all — behind any number of
+   NATs, the join code carries the host's Steam id instead of an address.
 
 The game's own legacy Steam P2P path (`ISteamNetworking`, the old relay that
 is the one that fails) has been removed: the mod diverts those calls for good
@@ -62,13 +65,12 @@ one of theirs), and it will not break the game if it does not fit any more.
 
 ## Hosting
 
-- **Host:** needs a public address and one open inbound TCP port (`14250` by
-  default). The mod tries UPnP automatically, and falls back to STUN
-  (`stun.l.google.com:19302`) to learn the external address. If UPnP is off on
-  the router the port has to be forwarded by hand. The direct transport is TCP,
-  so UDP hole punching does not apply.
-- **Guest:** needs nothing. No port, no forwarding, no configuration. Enter the
-  join code the host gives you.
+- **Host:** nothing is required. With a public address and an open inbound
+  TCP port (`14250` by default; the mod tries UPnP and learns the external
+  address via STUN, `stun.l.google.com:19302`) the session runs direct, which
+  is faster. Without one — CGNAT, a locked-down router, "ten routers deep" —
+  it runs over SDR, and only Steam has to be running.
+- **Guest:** needs nothing either. Enter the join code the host gives you.
 
 The transport is chosen per lobby, when it is created, and logged with the
 reason: a verified public address means direct; otherwise SDR, and the lobby's
@@ -76,10 +78,20 @@ player ids are then the players' real Steam ids so that the game takes its
 Steam path — which the mod carries over SDR. `wartales-mp run -transport
 direct|sdr` forces one.
 
-One limit to know about: the join code and the lobby phase still travel to the
-host's port (the guest's game commands are proxied to the host's master over
-it). SDR carries the game phase only. A host with no reachable port cannot be
-joined from the internet even on SDR; on a LAN both transports work.
+The join code tells the two apart by length: 13 symbols carry `ip:port`
+(direct), 16 symbols carry the host's Steam account and a per-run key (SDR),
+for example `G00BRRAEVTPVXVRS`. Old codes keep working.
+
+Timing: the helper starts before the game's Steam client is ready. Until the
+mod reports SDR up, creating a lobby works, but asking for the join code (or
+entering one) answers "Steam relay not ready yet … ask again in a few seconds"
+— the game shows it, you retry, and `wartales-mp.log` records it. If SDR can
+never work in this game process, hosting without a public address is refused
+with both reasons instead.
+
+What SDR still needs: both players' Steam clients must reach Valve's relay
+network. A network that blocks that has no rung left; the mod says so rather
+than falling back to the old relay.
 
 ## Logs
 
@@ -90,9 +102,9 @@ Two files, both under `%LOCALAPPDATA%\wartales-mp\`:
 | `wartales-mp.log` | the helper: connections, every master command with its arguments and reply, relay counters, NAT discovery, errors |
 | `shim.log` | the in-game part: DLL attach, each hook (address or why it failed), each bytecode open with its size and hash, helper startup, the SDR transport (ready, or exactly why not; first packet, sessions, counters) |
 
-A third, one-line file `sdr.status` (`ok`, `pending <why>` or
-`unavailable <why>`) is the shim's verdict on SDR; the helper reads it before
-choosing a lobby's transport.
+A third, one-line file `sdr.status` (`ok bridge=127.0.0.1:<port> token=…`,
+`pending <why>` or `unavailable <why>`) is the shim's verdict on SDR and the
+loopback port of its bridge; the helper follows it for as long as it runs.
 
 The previous run of `wartales-mp.log` is kept as `wartales-mp.log.1`. Nothing is
 sampled and nothing leaves the machine — this is a debugging aid, not telemetry.
@@ -123,7 +135,15 @@ with stand-in `steam.hdll` / `steam_api64.dll` libraries:
   flags per send type, packet boundaries, truncation, per-channel queues, the
   sender's Steam id, automatic session acceptance, close dropping a peer's
   queue,
+- the SDR bridge: the helper's loopback connection into the game process is
+  token-protected, relays on its own channel (100), and never touches the
+  game's channels,
 - with no `steam_api64.dll` at all the shim fails closed and says why.
+
+Verified in Go tests: two helpers behind a fake SDR switch, a host with no
+address issuing a Steam join code, the guest resolving it, joining and chatting
+through the bridge, a tampered key refused, and a join attempted before SDR is
+up answered with the retry error.
 
 Not yet verified:
 
@@ -132,10 +152,11 @@ Not yet verified:
   proxy-link to the host's master, the guest's game connecting to the host's
   relay — is implemented and unit-tested, but it has never carried a real
   second player.
-- **SDR against Valve's real relay.** The shim's transport is proven against a
-  loopback stand-in, not against a running Steam client; whether the real
-  `SteamNetworkingMessages002` accepts sessions and delivers between two
-  accounts has not been observed.
+- **SDR against Valve's real relay.** The shim's transport and bridge are
+  proven against loopback stand-ins, not against a running Steam client;
+  whether the real `SteamNetworkingMessages002` accepts sessions and delivers
+  between two accounts, on channel 0 and on channel 100, has not been
+  observed.
 
 Treat the two-player path as untested. Reports with both log files are useful.
 
@@ -170,7 +191,9 @@ needs no patch for it.
    semantics the game relies on (per-channel queues, reliability per send type,
    packet boundaries and truncation, the sender's Steam id). The old
    implementations are never called. If SDR cannot be set up, the calls fail
-   visibly and `shim.log` says why.
+   visibly and `shim.log` says why. It also opens a token-protected loopback
+   port for the helper, so the helper's master can talk to the other player's
+   master over SDR too (channel 100, apart from the game's own channels).
 
 It then starts the helper, `wartales-mp.exe` (embedded in the DLL, extracted to
 `%LOCALAPPDATA%\wartales-mp\`), hidden. The helper watches the game's process
@@ -183,12 +206,14 @@ and exits with it. It runs three things:
 | proxy-link | the same public port | forwards a guest's master commands to the host's master |
 
 The host's lobby state is authoritative. When the host asks for a join code, the
-helper discovers the public endpoint (UPnP, then STUN) and encodes `ip:port` into
-a short Crockford-base32 code. A guest entering that code decodes it, opens a
-proxy-link to the host's master, and from then on both games see one lobby. The
-guest's game then connects to the host's relay directly (direct transport) or,
-when the host's master decided on SDR, both games take their Steam path and the
-shim carries it over Valve's relay network. The decision travels inside the
+helper encodes either its public endpoint (`ip:port`, discovered via UPnP then
+STUN) or, on SDR, its Steam account plus a key, into a short Crockford-base32
+code. A guest entering that code decodes it, opens a proxy-link to the host's
+master — over TCP to that endpoint, or as a stream over the SDR bridge to that
+Steam id — and from then on both games see one lobby. The guest's game then
+connects to the host's relay directly (direct transport) or, when the host's
+master decided on SDR, both games take their Steam path and the shim carries
+it over Valve's relay network. The decision travels inside the code and the
 player ids the host's master renders, so the guest's helper cannot disagree.
 
 On the direct transport, game traffic goes guest to host machine, and nowhere
@@ -208,9 +233,10 @@ Windows, with `go`, `gcc` and `objcopy` on `PATH`:
 `check.ps1` loads the built DLL into a test process, opens the real
 `hlboot.dat` through it and compares the result against the expected patched
 image, so the bytecode path can be checked without the game running. It then
-exercises the SDR transport twice: with a loopback stand-in `steam_api64.dll`
-(packet semantics end to end) and without one (fail closed). The game folder
-is only ever read.
+exercises the SDR transport and the bridge twice: with a loopback stand-in
+`steam_api64.dll` (packet semantics and the bridge frames end to end) and
+without one (fail closed, no bridge advertised). The game folder is only ever
+read.
 
 ## Licence
 
