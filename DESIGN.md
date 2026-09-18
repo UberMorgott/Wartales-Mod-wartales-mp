@@ -242,6 +242,19 @@ SteamID, `resolveShortCode` → `join` → пуши `lobby/join`/`lobby/chat` ч
 оставлен вторым путём. `InitRelayNetworkAccess` вызывается заранее: отдельный поток ждёт
 `SteamAPI_GetHSteamUser() != 0` и инициализирует транспорт до первого пакета.
 
+Что делает ваниль (hlbc по `hlboot.dat`, `E:\DEV\Wartales\decomp`): `setPlatform@23383` →
+`initSteam@23395` → `steam.Api.init@41004` → натив `steam/init@41087` (`SteamAPI_Init` +
+`CallbackHandler`, hlsteam `native/common.cpp`) и `haxe.MainLoop.add(sync@41007)`;
+`sync` → `steam/run_callbacks@41090` → `SteamAPI_RunCallbacks` — каждый кадр, независимо от
+протокола mpman. Steam-транспорт: `SteamService.init@54889` (из `getGameServer@54892` /
+`connectTo@54893`) → `steam.Networking.startP2P@55468` регистрирует глобальные события 1202
+(`P2PSessionRequest_t` → `accept_p2p_session@59309`) и 1203 (`P2PSessionConnectFail_t`) и
+поток `threadLoop@59303` (`is_p2p_packet_available`/`read_p2p_packet`, канал 0, каждые
+33 мс); отправка `sendP2P@55466` → `send_p2p_packet@59317`, канал 0. Ни одного натива
+`ISteamNetworkingSockets`/`Messages` у игры нет. Шим подменяет ровно эти шесть нативов и
+приём сессии (1251 вместо 1202, которое у нового API не наступает), а на `SteamAPI_RunCallbacks`
+игры полагается как ваниль.
+
 Диагностика (не зависит от колбэков): поток раз в секунду опрашивает
 `GetSessionConnectionInfo` по каждому пиру, которому слали или от которого получали, и пишет
 смены состояния / `m_eEndReason` / `m_szEndDebug`; статус relay-сети по переходам;
