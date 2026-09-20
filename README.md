@@ -2,13 +2,15 @@
 
 A mod for **Wartales co-op through Steam on Windows**.
 
-If a friend cannot join your session or the normal connection gets stuck, this mod provides another way to connect: through a Steam invitation or directly with a short code.
+The mod replaces Wartales' old connection system, which prevented players in different countries from playing together. It removes the dependency on the developers' servers and adds direct connections between players.
 
 [**Download the mod**](https://github.com/UberMorgott/Wartales-Mod-wartales-mp/releases) · [**Описание на русском**](README.ru.md)
 
 ## What it does
 
-- Lets friends join through Steam invitations or a join code.
+- Disables the old Steam networking protocol that caused connection problems in many countries. It uses modern Steam networking (SDR) instead.
+- Removes the dependency on the developers' servers for creating and finding lobbies. Adds a direct connection to the host without intermediary servers when the host's network allows it.
+- Keeps familiar Steam invitations and adds short codes for direct connections. A Steam lobby is created automatically with the in-game room.
 - Fixes identified reconnection errors and a crash caused by waiting in the lobby.
 - Lets you start even if a player has no human character assigned. For example, four players can use a modded starting party of three humans and one animal.
 
