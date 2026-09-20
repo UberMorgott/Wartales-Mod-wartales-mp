@@ -10,7 +10,8 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 
 - Disables the old Steam networking protocol that caused connection problems in many countries. It uses modern Steam networking (SDR) instead.
 - Removes the dependency on the developers' servers for creating and finding lobbies. Adds a direct connection to the host without intermediary servers when the host's network allows it.
-- Keeps familiar Steam invitations and adds short codes for direct connections. A Steam lobby is created automatically with the in-game room.
+- Changes how the game's existing join codes work: friends now connect directly to the host, bypassing the developers' servers.
+- Keeps familiar Steam invitations. A Steam lobby is created automatically with the in-game room.
 - Fixes identified reconnection errors and a crash caused by waiting in the lobby.
 - Lets you start even if a player has no human character assigned. For example, four players can use a modded starting party of three humans and one animal.
 
@@ -22,7 +23,7 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 4. Copy **winmm.dll** into that folder, next to **Wartales.exe**. Replace the old mod DLL when updating.
 5. Launch the game through Steam as usual.
 
-Install the mod on every player's machine. Reading the new short codes requires **v0.1.5 or newer**.
+Install the mod on every player's machine. Use **v0.1.5 or newer** for join-code format compatibility.
 
 ## Play with a friend
 
