@@ -317,7 +317,7 @@ SDR-транспорт и мост: с подставной loopback-`steam_api6
 
 ## Лицензия
 
-MIT — см. [LICENSE](../LICENSE). Copyright (c) 2026 UberMorgott.
+CC BY-NC 4.0 — см. [LICENSE](../LICENSE). Copyright (c) 2026 UberMorgott.
 
 MinHook, вендоренный в `shim/minhook`, распространяется под BSD-2-Clause и имеет
 собственный копирайт; см. заголовки файлов в этом каталоге.

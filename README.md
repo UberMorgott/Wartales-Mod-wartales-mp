@@ -40,6 +40,8 @@ The logs, **wartales-mp.log** and **shim.log**, are in `%LOCALAPPDATA%\wartales-
 
 Antivirus software may flag the DLL. If that happens, include the antivirus name and detection name in your report.
 
-[Technical notes and build instructions](docs/TECHNICAL.md) · [MIT licence](LICENSE)
+[Technical notes and build instructions](docs/TECHNICAL.md) · [CC BY-NC 4.0 licence](LICENSE)
+
+Project code and documentation: Copyright (c) 2026 UberMorgott, CC BY-NC 4.0. Third-party components retain their own licences, including [MinHook](shim/minhook/LICENSE.txt).
 
 This is an unofficial mod, not affiliated with Shiro Games or Valve.

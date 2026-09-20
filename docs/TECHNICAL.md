@@ -331,7 +331,7 @@ read.
 
 ## Licence
 
-MIT — see [LICENSE](../LICENSE). Copyright (c) 2026 UberMorgott.
+CC BY-NC 4.0 — see [LICENSE](../LICENSE). Copyright (c) 2026 UberMorgott.
 
 MinHook, vendored under `shim/minhook`, is BSD-2-Clause and carries its own
 copyright; see the headers in that directory.
