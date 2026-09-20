@@ -23,12 +23,29 @@ const frameHead = 13
 
 // Switch is the fake shim.
 type Switch struct {
-	ln  net.Listener
-	dir string
+	LobbyInvites chan LobbyInvite
+	ln           net.Listener
+	dir          string
 
 	mu      sync.Mutex
 	tokens  map[string]uint64   // token -> identity
 	clients map[uint64]net.Conn // identity -> its helper
+}
+
+// LobbyInvite records a helper's desired native Steam lobby state.
+type LobbyInvite struct {
+	Peer   uint64
+	Invite string
+}
+
+// Disconnect simulates the shim dropping its authenticated helper connection.
+func (s *Switch) Disconnect(peer uint64) {
+	s.mu.Lock()
+	c := s.clients[peer]
+	s.mu.Unlock()
+	if c != nil {
+		_ = c.Close()
+	}
 }
 
 // New starts a switch; it stops when the test ends.
@@ -39,7 +56,7 @@ func New(t *testing.T) *Switch {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Switch{ln: ln, dir: t.TempDir(), tokens: map[string]uint64{}, clients: map[uint64]net.Conn{}}
+	s := &Switch{ln: ln, dir: t.TempDir(), tokens: map[string]uint64{}, clients: map[uint64]net.Conn{}, LobbyInvites: make(chan LobbyInvite, 128)}
 	go s.accept()
 	t.Cleanup(func() { _ = ln.Close() })
 	return s
@@ -134,6 +151,9 @@ func (s *Switch) serve(c net.Conn) {
 			return
 		}
 		if typ != 1 {
+			if typ == 4 && peer == 0 {
+				s.LobbyInvites <- LobbyInvite{Peer: me, Invite: string(payload)}
+			}
 			continue
 		}
 		s.mu.Lock()

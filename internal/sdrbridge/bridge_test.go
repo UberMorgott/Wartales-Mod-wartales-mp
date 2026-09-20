@@ -205,3 +205,32 @@ func TestRedialResetsRemoteStream(t *testing.T) {
 		t.Fatalf("replacement read = %q, %v", line, err)
 	}
 }
+
+func TestLobbyInviteReplaysLatestAfterConnectAndReconnect(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	const host = uint64(76561197960265728 + 455)
+	b := sdrbridge.New(sw.Add(t, host), log.New(io.Discard, "", 0))
+	b.SetLobbyInvite("OLD")
+	b.SetLobbyInvite("LATEST")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+	expect := func(want string) {
+		t.Helper()
+		select {
+		case event := <-sw.LobbyInvites:
+			if event.Peer != host || event.Invite != want {
+				t.Fatalf("published = %+v, want %q", event, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("lobby state was not delivered")
+		}
+	}
+	expect("LATEST")
+	sw.Disconnect(host)
+	expect("LATEST")
+	b.SetLobbyInvite("")
+	expect("")
+	sw.Disconnect(host)
+	expect("")
+}

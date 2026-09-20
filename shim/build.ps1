@@ -123,7 +123,7 @@ $out = Join-Path $OutDir 'winmm.dll'
 # 180 named exports, so stripping removes only debug/symbol data.
 $stripArgs = if ($Release) { @('-s', '-Wl,--strip-all') } else { @() }
 & $gcc -shared -O2 -o $out `
-    (Join-Path $PSScriptRoot 'proxy\proxy.c') (Join-Path $PSScriptRoot 'proxy\sdr.c') (Join-Path $PSScriptRoot 'proxy\bridge.c') `
+    (Join-Path $PSScriptRoot 'proxy\proxy.c') (Join-Path $PSScriptRoot 'proxy\sdr.c') (Join-Path $PSScriptRoot 'proxy\bridge.c') (Join-Path $PSScriptRoot 'proxy\lobby.c') `
     $stubs $mhsrc $embed $def `
     "-I$(Join-Path $minhook 'include')" -DNDEBUG `
     -Wall -Wextra -static-libgcc @stripArgs -lkernel32 -lws2_32

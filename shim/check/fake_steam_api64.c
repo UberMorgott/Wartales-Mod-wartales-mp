@@ -318,3 +318,72 @@ EXPORT int fake_fire_session_failed(uint64_t from, int end_reason, const char *d
 	dispatch(cb_1252, &info);
 	return 1;
 }
+
+// Independently model the Windows Steamworks flat ABI and LobbyCreated_t.
+static fake_lobby_stats_t lobby_st;
+static uint64_t lobby_call;
+static int lobby_complete = 1, lobby_result = 1, lobby_write_ok = 1;
+EXPORT void fake_lobby_mode(int complete, int result, int write_ok) {
+	lobby_complete = complete;
+	lobby_result = result;
+	lobby_write_ok = write_ok;
+}
+EXPORT void fake_lobby_stats(fake_lobby_stats_t *out) { *out = lobby_st; }
+EXPORT void *SteamAPI_SteamMatchmaking_v009(void) { return g_hsteamuser ? &lobby_st : NULL; }
+EXPORT void *SteamAPI_SteamUtils_v010(void) { return g_hsteamuser ? &lobby_call : NULL; }
+EXPORT uint64_t SteamAPI_ISteamMatchmaking_CreateLobby(void *self, int type, int capacity) {
+	if (self != &lobby_st)
+		lobby_st.bad_abi++;
+	lobby_st.creates++;
+	lobby_st.type = type;
+	lobby_st.capacity = capacity;
+	return ++lobby_call;
+}
+EXPORT unsigned char SteamAPI_ISteamUtils_IsAPICallCompleted(void *self, uint64_t call, unsigned char *failed) {
+	if (self != &lobby_call || call != lobby_call)
+		lobby_st.bad_abi++;
+	*failed = 0;
+	return (unsigned char)lobby_complete;
+}
+EXPORT unsigned char SteamAPI_ISteamUtils_GetAPICallResult(void *self, uint64_t call, void *data, int size, int expected,
+														   unsigned char *failed) {
+	struct {
+		int32_t result;
+		uint64_t id;
+	} result = {lobby_result, 1000 + call};
+	if (self != &lobby_call || call != lobby_call || size != sizeof(result) || expected != 513) {
+		lobby_st.bad_abi++;
+		*failed = 1;
+		return 0;
+	}
+	*failed = 0;
+	memcpy(data, &result, sizeof(result));
+	return 1;
+}
+EXPORT unsigned char SteamAPI_ISteamMatchmaking_SetLobbyData(void *self, uint64_t id, const char *key, const char *value) {
+	if (self != &lobby_st || strcmp(key, "invite") || strlen(value) > 32)
+		lobby_st.bad_abi++;
+	lobby_st.writes++;
+	if (lobby_write_ok) {
+		lobby_st.active = id;
+		strcpy(lobby_st.invite, value);
+	}
+	return (unsigned char)lobby_write_ok;
+}
+EXPORT void SteamAPI_ISteamMatchmaking_LeaveLobby(void *self, uint64_t id) {
+	if (self != &lobby_st)
+		lobby_st.bad_abi++;
+	lobby_st.leaves++;
+	lobby_st.last_left = id;
+	if (lobby_st.active == id) {
+		lobby_st.active = 0;
+		lobby_st.invite[0] = 0;
+	}
+}
+EXPORT void SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog(void *self, uint64_t id) {
+	(void)self;
+	(void)id;
+	lobby_st.overlays++;
+}
+
+EXPORT void fake_lobby_ready(int ready) { g_hsteamuser = ready; }

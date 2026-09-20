@@ -443,6 +443,10 @@ func (s *Server) adoptLocal(p Peer) {
 // Close stops the listener, drops every game connection and releases the link
 // to the host, if we hold one. It is safe to call more than once.
 func (s *Server) Close() {
+	s.lobbies.mu.Lock()
+	s.lobbies.inviteLobby = ""
+	s.lobbies.syncInviteLocked()
+	s.lobbies.mu.Unlock()
 	s.mu.Lock()
 	s.closed = true
 	cl := s.client

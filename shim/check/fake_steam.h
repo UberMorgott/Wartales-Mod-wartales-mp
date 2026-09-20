@@ -75,6 +75,13 @@ typedef struct fake_stats_t {
 	int size_1252;
 } fake_stats_t;
 
+typedef struct fake_lobby_stats_t {
+	unsigned creates, writes, leaves, overlays;
+	int type, capacity, bad_abi;
+	uint64_t active, last_left;
+	char invite[33];
+} fake_lobby_stats_t;
+
 // CCallbackBase as steam_api sees it (steam_api_common.h): vtable, flags, id.
 typedef struct CCallbackBase {
 	const void **vtable; // Run(void*), Run(void*, bool, SteamAPICall_t), GetCallbackSizeBytes()

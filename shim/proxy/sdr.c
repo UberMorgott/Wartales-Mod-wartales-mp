@@ -73,6 +73,7 @@
 // Steamworks types (steamnetworkingtypes.h). Only what is touched here.
 // ---------------------------------------------------------------------------
 
+#include "lobby.h"
 #include "sdr.h" // sdr_identity, sdr_msg: SteamNetworkingIdentity / SteamNetworkingMessage_t
 
 C_ASSERT(sizeof(sdr_identity) == 136);
@@ -149,6 +150,7 @@ static void detour_run_callbacks(void) {
 	if (InterlockedIncrement(&run_callbacks_count) == 1)
 		shim_log("sdr: the game called SteamAPI_RunCallbacks for the first time (Steam callbacks are being dispatched)");
 	real_run_callbacks();
+	lobby_pump();
 }
 
 // Resolved by name; a missing export is a hard failure with the name logged.

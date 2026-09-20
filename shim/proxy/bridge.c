@@ -17,6 +17,7 @@
 //   0 AUTH  helper -> shim   payload = the token from sdr.status; must be first
 //   1 SEND  helper -> shim   payload goes to peer, reliable, on BRIDGE_CHANNEL
 //   2 RECV  shim -> helper   payload arrived from peer on BRIDGE_CHANNEL
+//   4 LOBBY helper -> shim  peer=0, printable ASCII invite <=32; empty clears
 //   3 ERR   shim -> helper   payload = text; a SEND that Steam refused, with
 //                            the peer it was for
 //
@@ -40,12 +41,13 @@
 #include <ws2tcpip.h>
 
 #include "sdr.h"
+#include "lobby.h"
 
 #define BRIDGE_CHANNEL 100
 #define BRIDGE_MAX_PAYLOAD (512 * 1024) // k_cbMaxSteamNetworkingSocketsMessageSizeSend
 #define FRAME_HEAD 13
 
-enum { FR_AUTH = 0, FR_SEND = 1, FR_RECV = 2, FR_ERR = 3 };
+enum { FR_AUTH = 0, FR_SEND = 1, FR_RECV = 2, FR_ERR = 3, FR_LOBBY = 4 };
 
 static SOCKET listener = INVALID_SOCKET;
 static SOCKET client = INVALID_SOCKET;
@@ -191,6 +193,11 @@ static void serve_client(SOCKET s) {
 			shim_log("bridge: helper connected and authenticated");
 			continue;
 		}
+		if (type == FR_LOBBY) {
+			if (peer != 0 || !lobby_set_invite(payload, len))
+				shim_log("bridge: invalid lobby publication frame ignored");
+			continue;
+		}
 		if (type == FR_SEND) {
 			int res = sdr_bridge_send(peer, payload, len, BRIDGE_CHANNEL);
 			if (res != SDR_RESULT_OK) {
@@ -204,6 +211,7 @@ static void serve_client(SOCKET s) {
 		}
 		shim_log("bridge: unexpected frame type %u from the helper, ignored", type);
 	}
+	if (authed) lobby_set_invite(NULL, 0);
 	free(payload);
 }
 

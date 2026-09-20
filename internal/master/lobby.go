@@ -58,9 +58,10 @@ func (l *lobby) idOf(p Peer) string {
 type store struct {
 	srv *Server
 
-	mu      sync.Mutex
-	lobbies map[string]*lobby
-	codes   map[string]string // short code -> lobby id
+	mu          sync.Mutex
+	lobbies     map[string]*lobby
+	codes       map[string]string // short code -> lobby id
+	inviteLobby string            // latest locally created lobby; never a remote guest's lobby
 
 	packets     int64 // lobby transport packets seen (lobby/chat fan-out)
 	packetBytes int64
@@ -68,6 +69,34 @@ type store struct {
 
 func newStore(srv *Server) *store {
 	return &store{srv: srv, lobbies: map[string]*lobby{}, codes: map[string]string{}}
+}
+
+// syncInviteLocked publishes only the current local owner's lobby. The setter
+// queues desired state, so holding the store lock never waits for Steam or I/O.
+func (s *store) syncInviteLocked() {
+	if s.srv == nil || s.srv.opt.Bridge == nil {
+		return
+	}
+	invite := ""
+	if l := s.lobbies[s.inviteLobby]; l != nil {
+		for _, u := range l.users {
+			if u.ID != l.owner || u.peer == nil || u.peer.Remote() {
+				continue
+			}
+			id64, ok := uid.SteamID64(u.peer.SteamID())
+			if !ok {
+				break
+			}
+			account, ok := code.AccountID(id64)
+			if !ok {
+				break
+			}
+			invite = code.EncodeSteam(code.Steam{AccountID: account, Key: s.srv.opt.LinkKey})
+			s.codes[invite] = l.id
+			break
+		}
+	}
+	s.srv.opt.Bridge.SetLobbyInvite(invite)
 }
 
 // newLobbyID returns an id whose first character is a valid UserID platform
@@ -183,6 +212,7 @@ func (s *store) peerGone(p Peer) {
 			}
 		}
 	}
+	s.syncInviteLocked()
 	s.mu.Unlock()
 
 	for _, a := range affected {
@@ -323,6 +353,10 @@ func (s *Server) lobbyCreate(a lobbyArgs, p Peer) (any, error) {
 	}
 	s.lobbies.mu.Lock()
 	s.lobbies.lobbies[l.id] = l
+	if !p.Remote() {
+		s.lobbies.inviteLobby = l.id
+		s.lobbies.syncInviteLocked()
+	}
 	s.lobbies.mu.Unlock()
 	s.opt.Log.Printf("master: lobby %s created by %s (%s), owner %s, props %s",
 		l.id, p.Name(), l.owner, l.owner, applog.Trunc(a.Props))
@@ -558,6 +592,7 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	}
 	if known {
 		l.owner = a.UID
+		s.lobbies.syncInviteLocked()
 	}
 	s.lobbies.mu.Unlock()
 	if !known {
@@ -826,6 +861,12 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 			return nil, false
 		}
 		s.opt.Log.Printf("master: route %s WORKS; joining over it", what)
+		// Resolving a remote lobby makes this helper a guest. Do not leave a
+		// previous local lobby advertised while the game's join is in flight.
+		s.lobbies.mu.Lock()
+		s.lobbies.inviteLobby = ""
+		s.lobbies.syncInviteLocked()
+		s.lobbies.mu.Unlock()
 		return raw, true
 	}
 

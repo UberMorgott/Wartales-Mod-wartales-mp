@@ -86,14 +86,18 @@ one of theirs), and it will not break the game if it does not fit any more.
 - **Guest:** needs nothing either. Enter the join code the host gives you, or
   use "Join Game" on the host in your Steam friends list.
 
-**Steam invites.** The game's own "invite friends" button and the friends-list
-"Join Game" work with the mod: the host's game creates a friends-only Steam
-lobby and stores a separate invitation payload in it. That payload retains
-the available direct and SDR routes, so Steam invitations still work when
-the host has no public address. The guest hands it to its helper automatically. Both
-players must run the game through Steam. This path is verified end to end
-(v0.1.3): host pressed "Invite friends", guest joined via the Steam
-friends-list "Join Game", and the session ran to completion over SDR.
+**Steam visibility and invitations.** When the local player creates a game
+lobby, the helper queues its Steam invitation code over the authenticated
+loopback bridge. The shim creates a friends-only Steam lobby and writes the
+code to its `invite` metadata without opening the overlay. Publication waits
+for Steam readiness and is cleared when the host leaves or the helper disconnects.
+The guest's existing Steam join handler resolves this metadata as before.
+Manual "invite friends" still uses the game's original invitation path.
+
+The automatic publication path is covered by local lifecycle tests. Its
+friends-list visibility has not yet been checked with a second live Steam
+account. The earlier manual invitation path was verified end to end in
+v0.1.3: a guest joined from the Steam friends list and played over SDR.
 
 The lobby's own transport is chosen when it is created and logged with the
 reason. Direct is chosen only once the port has been **verified**: a

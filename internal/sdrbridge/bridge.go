@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	frAuth = 0
-	frSend = 1
-	frRecv = 2
-	frErr  = 3
+	frAuth  = 0
+	frSend  = 1
+	frRecv  = 2
+	frErr   = 3
+	frLobby = 4
 
 	opData = 1
 	opFin  = 2
@@ -39,16 +40,67 @@ type Bridge struct {
 	// such streams.
 	OnPeer func(c net.Conn, peer uint64)
 
-	mu     sync.Mutex
-	conn   net.Conn // to the shim, nil while disconnected
-	wmu    sync.Mutex
-	status Status
-	peers  map[uint64]*peerConn
+	mu          sync.Mutex
+	conn        net.Conn // to the shim, nil while disconnected
+	wmu         sync.Mutex
+	status      Status
+	peers       map[uint64]*peerConn
+	lobbyInvite string
+	lobbyKnown  bool
+	lobbyWake   chan struct{}
 }
 
 // New prepares a bridge that will follow statusPath.
 func New(statusPath string, logger *log.Logger) *Bridge {
-	return &Bridge{statusPath: statusPath, log: logger, peers: map[uint64]*peerConn{}}
+	return &Bridge{statusPath: statusPath, log: logger, peers: map[uint64]*peerConn{}, lobbyWake: make(chan struct{}, 1)}
+}
+
+// SetLobbyInvite records the latest desired native Steam lobby without waiting
+// for Steam readiness or network I/O. An empty invite clears the lobby.
+func (b *Bridge) SetLobbyInvite(invite string) {
+	if len(invite) > 32 {
+		return
+	}
+	for _, ch := range invite {
+		if ch < 33 || ch > 126 {
+			return
+		}
+	}
+	b.mu.Lock()
+	if b.lobbyKnown && b.lobbyInvite == invite {
+		b.mu.Unlock()
+		return
+	}
+	b.lobbyInvite, b.lobbyKnown = invite, true
+	b.mu.Unlock()
+	b.wakeLobby()
+}
+
+func (b *Bridge) wakeLobby() {
+	select {
+	case b.lobbyWake <- struct{}{}:
+	default:
+	}
+}
+
+func (b *Bridge) publishLobbies(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-b.lobbyWake:
+			b.wmu.Lock()
+			b.mu.Lock()
+			c, invite, known := b.conn, b.lobbyInvite, b.lobbyKnown
+			b.mu.Unlock()
+			if c != nil && known {
+				if err := writeFrame(c, frLobby, 0, []byte(invite)); err != nil {
+					_ = c.Close() // session reconnect will replay the desired state
+				}
+			}
+			b.wmu.Unlock()
+		}
+	}
 }
 
 // Status is the shim's latest verdict, re-read from disk while disconnected.
@@ -82,6 +134,7 @@ func (b *Bridge) Ready() (bool, string) {
 // Run follows the status file, keeps a connection to the shim while it
 // advertises one, and reconnects after a drop. Returns when ctx ends.
 func (b *Bridge) Run(ctx context.Context) {
+	go b.publishLobbies(ctx)
 	logged := ""
 	for ctx.Err() == nil {
 		st := b.Status()
@@ -127,6 +180,7 @@ func (b *Bridge) session(ctx context.Context, st Status) error {
 	b.conn = c
 	b.status = st
 	b.mu.Unlock()
+	b.wakeLobby()
 	b.log.Printf("sdr-bridge: connected to the shim at %s, relaying on SDR channel %d", st.Bridge, Channel)
 
 	stop := context.AfterFunc(ctx, func() { _ = c.Close() })

@@ -4,8 +4,10 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type resetWire struct {
@@ -61,5 +63,26 @@ func TestDialRetiresOldStreamBeforeReset(t *testing.T) {
 	defer wire.mu.Unlock()
 	if wire.dataFrames != 0 {
 		t.Fatal("stale data followed reset")
+	}
+}
+
+func TestSetLobbyInviteDoesNotWaitForWire(t *testing.T) {
+	b := New("", log.New(io.Discard, "", 0))
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+	done := make(chan struct{})
+	go func() { b.SetLobbyInvite("FIRST"); b.SetLobbyInvite("LATEST"); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("setter blocked on the wire")
+	}
+	b.SetLobbyInvite(strings.Repeat("x", 33))
+	b.SetLobbyInvite("bad\nframe")
+	b.SetLobbyInvite("bad frame")
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.lobbyInvite != "LATEST" {
+		t.Fatal("invalid payload changed desired invite")
 	}
 }

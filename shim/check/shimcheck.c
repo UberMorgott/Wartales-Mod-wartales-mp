@@ -438,7 +438,7 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 // ------------------------------------------------------------- bridge check
 
 // Frames on the bridge socket: [type:u8][peer:u64 LE][len:u32 LE][payload].
-enum { FR_AUTH = 0, FR_SEND = 1, FR_RECV = 2, FR_ERR = 3 };
+enum { FR_AUTH = 0, FR_SEND = 1, FR_RECV = 2, FR_ERR = 3, FR_LOBBY = 4 };
 #define BRIDGE_CHANNEL 100
 
 static int send_frame(SOCKET s, unsigned char type, uint64_t peer, const void *payload, uint32_t len) {
@@ -495,6 +495,140 @@ static SOCKET bridge_connect(unsigned short port) {
 
 typedef void (*set_result_fn)(int);
 
+// A SEND echo fences the bridge reader before we run the game-thread pump.
+static void publish_frame(SOCKET s, const char *invite) {
+	unsigned char type, buf[32];
+	uint64_t peer;
+	uint32_t len;
+	check(send_frame(s, FR_LOBBY, 0, invite, (uint32_t)strlen(invite)), "publish desired invite");
+	check(send_frame(s, FR_SEND, 0x0102030405060708ULL, "fence", 5) && recv_frame(s, &type, &peer, buf, sizeof(buf), &len) &&
+			  type == FR_RECV,
+		  "publication processed before callback pump");
+}
+
+static void check_lobby_publish(SOCKET s, HMODULE api) {
+	void (*run)(void) = (void (*)(void))(void *)GetProcAddress(api, "SteamAPI_RunCallbacks");
+	void (*mode)(int, int, int) = (void (*)(int, int, int))(void *)GetProcAddress(api, "fake_lobby_mode");
+	void (*stats)(fake_lobby_stats_t *) = (void (*)(fake_lobby_stats_t *))(void *)GetProcAddress(api, "fake_lobby_stats");
+	fake_lobby_stats_t st;
+	void (*ready)(int) = (void (*)(int))(void *)GetProcAddress(api, "fake_lobby_ready");
+	check(run && mode && stats && ready, "fake exposes lobby lifecycle controls");
+	if (!run || !mode || !stats || !ready)
+		return;
+	ready(0);
+	publish_frame(s, "S-AUTO");
+	run();
+	stats(&st);
+	check(st.creates == 0, "desired publication waits for Steam interfaces");
+	ready(1);
+	run();
+	run();
+	stats(&st);
+	check(st.creates == 1 && st.writes == 1 && st.type == 1 && st.capacity == 256 && !strcmp(st.invite, "S-AUTO"),
+		  "host publishes friends-only Steam lobby without a manual invitation");
+	check(send_frame(s, FR_LOBBY, 1, "BAD", 3) && send_frame(s, FR_LOBBY, 0, "BAD\0X", 5) &&
+			  send_frame(s, FR_LOBBY, 0, "123456789012345678901234567890123", 33),
+		  "malformed publication frames sent");
+	publish_frame(s, "S-AUTO");
+	run();
+	stats(&st);
+	check(st.creates == 1 && st.writes == 1, "replayed desired state does not duplicate the Steam lobby");
+	publish_frame(s, "");
+	run();
+	stats(&st);
+	check(st.leaves == 1 && !st.active, "clearing leaves published lobby");
+	mode(0, 1, 1);
+	publish_frame(s, "S-STALE");
+	run();
+	publish_frame(s, "");
+	run();
+	mode(1, 1, 1);
+	run();
+	stats(&st);
+	check(st.creates == 2 && st.writes == 1 && st.leaves == 2, "late completion after clear is left without publishing");
+	mode(0, 1, 1);
+	publish_frame(s, "S-OLD");
+	run();
+	publish_frame(s, "S-NEW");
+	run();
+	mode(1, 1, 1);
+	run();
+	run();
+	stats(&st);
+	check(st.creates == 4 && st.writes == 2 && st.leaves == 3 && !strcmp(st.invite, "S-NEW"),
+		  "replacement discards stale creation and publishes only latest desired "
+		  "state");
+	publish_frame(s, "");
+	run();
+	mode(1, 2, 1);
+	publish_frame(s, "S-FAIL");
+	run();
+	run();
+	run();
+	stats(&st);
+	check(st.creates == 5 && st.writes == 2 && !st.active, "failed creation does not publish or retry every frame");
+	publish_frame(s, "");
+	run();
+	mode(1, 1, 0);
+	publish_frame(s, "S-DATAFAIL");
+	run();
+	run();
+	stats(&st);
+	check(st.creates == 6 && st.writes == 3 && st.leaves == 5 && !st.active, "metadata failure leaves the unusable lobby");
+	publish_frame(s, "");
+	run();
+	mode(1, 1, 1);
+	{
+		unsigned before;
+		mode(1, 2, 1);
+		publish_frame(s, "S-RETRY");
+		run();
+		run();
+		stats(&st);
+		before = st.creates;
+		run();
+		stats(&st);
+		check(st.creates == before, "failed publication backs off instead of retrying every frame");
+		mode(1, 1, 0);
+		Sleep(2050);
+		run();
+		run();
+		stats(&st);
+		check(st.creates == before + 1 && !st.active, "second attempt runs after 2s and cleans up metadata failure");
+		mode(1, 1, 1);
+		Sleep(5050);
+		run();
+		run();
+		stats(&st);
+		check(st.creates == before + 2 && !strcmp(st.invite, "S-RETRY"), "third attempt recovers same desired generation after 5s");
+		publish_frame(s, "");
+		run();
+		mode(1, 2, 1);
+		publish_frame(s, "S-EXHAUST");
+		run();
+		run();
+		stats(&st);
+		before = st.creates;
+		Sleep(2050);
+		run();
+		run();
+		Sleep(5050);
+		run();
+		run();
+		run();
+		stats(&st);
+		check(st.creates == before + 2 && !st.active, "publication stops after three failed attempts");
+		publish_frame(s, "");
+		run();
+		mode(1, 1, 1);
+	}
+	publish_frame(s, "S-DISCONNECT");
+	run();
+	run();
+	stats(&st);
+	check(st.active && st.overlays == 0 && !st.bad_abi, "publication uses correct Steam ABI and never opens overlay");
+}
+
 static void check_bridge(int with_api, HMODULE api, const wchar_t *log, const wchar_t *scratch, avail_fn avail) {
 	wchar_t status_path[MAX_PATH * 2];
 	size_t n;
@@ -544,6 +678,11 @@ static void check_bridge(int with_api, HMODULE api, const wchar_t *log, const wc
 	closesocket(s);
 	check(wait_log(log, "bridge: connection without a valid token refused", 5000), "shim.log records the refused token");
 
+// Publication is not accepted in place of authentication.
+s = bridge_connect((unsigned short)port);
+check(send_frame(s, FR_LOBBY, 0, "UNAUTH", 6) && recv_frame(s, &type, &peer, buf, sizeof(buf), &len) == 0,
+	  "unauthenticated publication is refused");
+closesocket(s);
 	// The real helper handshake.
 	s = bridge_connect((unsigned short)port);
 	check(s != INVALID_SOCKET && send_frame(s, FR_AUTH, 0, token, 32), "bridge connection with the token");
@@ -574,8 +713,41 @@ static void check_bridge(int with_api, HMODULE api, const wchar_t *log, const wc
 		"a failed send comes back as an ERR frame naming the peer and the EResult");
 	set_result(1);
 
+	check_lobby_publish(s, api);
 	closesocket(s);
 	check(wait_log(log, "bridge: helper connection closed", 5000), "shim.log records the helper leaving");
+{
+	void (*run)(void) = (void (*)(void))(void *)GetProcAddress(api, "SteamAPI_RunCallbacks");
+	void (*lstats)(fake_lobby_stats_t *) = (void (*)(fake_lobby_stats_t *))(void *)GetProcAddress(api, "fake_lobby_stats");
+	fake_lobby_stats_t ls;
+	unsigned i;
+	for (i = 0; i < 100; i++) {
+		run();
+		lstats(&ls);
+		if (!ls.active)
+			break;
+		Sleep(10);
+	}
+	check(!ls.active && ls.leaves >= 6, "authenticated helper disconnect withdraws automatic publication");
+		{
+			void (*mode)(int, int, int) = (void (*)(int, int, int))(void *)GetProcAddress(api, "fake_lobby_mode");
+			unsigned created = ls.creates, left = ls.leaves;
+			s = bridge_connect((unsigned short)port);
+			check(send_frame(s, FR_AUTH, 0, token, 32), "authenticate pending publication test");
+			mode(0, 1, 1); publish_frame(s, "S-LATE-DISCONNECT"); run();
+			closesocket(s);
+			// The serial bridge reader accepts this connection only after clearing
+			// the previous authenticated session's desired state.
+			s = bridge_connect((unsigned short)port);
+			check(send_frame(s, FR_AUTH, 0, token, 32) && send_frame(s, FR_SEND, PEER, "fence", 5) &&
+				recv_frame(s, &type, &peer, buf, sizeof(buf), &len), "reconnect fences authenticated disconnect");
+			mode(1, 1, 1); run(); lstats(&ls);
+			check(!ls.active && ls.creates == created + 1 && ls.leaves == left + 1,
+				"late creation after helper disconnect is discarded and left");
+			closesocket(s);
+		}
+
+}
 	stats(&st);
 	check(st.allocated == st.released, "bridge released every message it pulled");
 }

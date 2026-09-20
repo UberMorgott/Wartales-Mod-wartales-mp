@@ -24,7 +24,7 @@ Install the mod on every player's machine. Reading the new short codes requires 
 
 ## Play with a friend
 
-**Through Steam:** the host creates a co-op game and invites a friend. The friend accepts the invitation or selects **Join Game** in the Steam friends list. Try this first; it usually needs no router configuration.
+**Through Steam:** the host creates a co-op game. Once Steam is ready, friends can select **Join Game** in the Steam friends list without waiting for an invitation. Normal invitations still work. Try this first; it usually needs no router configuration.
 
 **By code:** the host creates a game and sends its code to the friend, who enters it in the game. Codes normally have **8 symbols**, or 11 with custom settings. This method needs a reachable direct connection to the host. If it fails, join through Steam instead.
 
