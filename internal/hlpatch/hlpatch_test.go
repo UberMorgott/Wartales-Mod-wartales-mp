@@ -123,3 +123,30 @@ func patched(p Patch) []byte {
 	out[p.Index] = p.To
 	return out
 }
+
+// The captured loop head is from allPlayersAssigned@24643, ops 10..17.
+// Its +48 branch lands at op 62 with r3 still null, returning true. Entering
+// the loop instead rejects a fourth player in a three-human, one-animal party.
+func TestAllPlayersAssignedAllowsPlayerWithoutHuman(t *testing.T) {
+	head := []byte{0x42, 0x47, 0x04, 0x26, 0x09, 0x04, 0x00, 0x31, 0x07, 0x09, 0x30, 0x00, 0x08, 0x07, 0x16, 0x07, 0x26, 0x09, 0x04, 0x00, 0x34, 0x08, 0x09, 0x02}
+	buf := append([]byte(nil), head...)
+	for _, p := range Patches {
+		if !bytes.Contains(p.Needle, head) {
+			buf = append(buf, p.Needle...)
+		}
+	}
+	if err := Apply(buf); err != nil {
+		t.Fatal(err)
+	}
+	// Evaluate the actual JSGte operands for the loop index and player count.
+	for players := 1; players <= 4; players++ {
+		var regs [10]int
+		regs[7], regs[9] = 0, players
+		if buf[7] != 0x31 || buf[10] != 48 {
+			t.Fatal("player loop no longer branches to the success epilogue")
+		}
+		if regs[buf[8]] < regs[buf[9]] {
+			t.Fatalf("%d players: still enters the mandatory-human assignment loop", players)
+		}
+	}
+}

@@ -148,3 +148,60 @@ func TestNotReady(t *testing.T) {
 		t.Fatalf("Ready = %v, %q", ok, why)
 	}
 }
+
+// TestRedialResetsRemoteStream covers reconnecting without a delivered close,
+// including a helper restart while the host still holds its old stream.
+func TestRedialResetsRemoteStream(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	const host, guest = uint64(76561197960265728 + 311), uint64(76561197960265728 + 322)
+	hb, cancelH := start(t, sw.Add(t, host))
+	defer cancelH()
+	incoming := make(chan net.Conn, 2)
+	hb.OnPeer = func(c net.Conn, _ uint64) { incoming <- c }
+	gb, cancelG := start(t, sw.Add(t, guest))
+	defer cancelG()
+	first, err := gb.Dial(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Write([]byte("first\n")); err != nil {
+		t.Fatal(err)
+	}
+	var old net.Conn
+	select {
+	case old = <-incoming:
+	case <-time.After(time.Second):
+		t.Fatal("first stream missing")
+	}
+	if line, err := bufio.NewReader(old).ReadString('\n'); err != nil || line != "first\n" {
+		t.Fatalf("first read = %q, %v", line, err)
+	}
+	second, err := gb.Dial(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if _, err := second.Write([]byte("second\n")); err != nil {
+		t.Fatal(err)
+	}
+	var fresh net.Conn
+	select {
+	case fresh = <-incoming:
+	case <-time.After(time.Second):
+		t.Fatal("redial reused the stale remote stream")
+	}
+	if line, err := bufio.NewReader(fresh).ReadString('\n'); err != nil || line != "second\n" {
+		t.Fatalf("second read = %q, %v", line, err)
+	}
+	if _, err := old.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("old stream read = %v, want EOF", err)
+	}
+	// Closing the stale handler must not close the replacement stream.
+	_ = old.Close()
+	if _, err := fresh.Write([]byte("reply\n")); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(second).ReadString('\n'); err != nil || line != "reply\n" {
+		t.Fatalf("replacement read = %q, %v", line, err)
+	}
+}

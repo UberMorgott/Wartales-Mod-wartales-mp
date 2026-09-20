@@ -215,6 +215,13 @@ func (b *Bridge) Dial(peer uint64) (net.Conn, error) {
 	if ok, why := b.Ready(); !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNotReady, why)
 	}
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+	// The remote helper may still hold our previous stream, even when this
+	// helper has restarted and has no local record of it. End that stream
+	// before sending the new hello; otherwise it becomes an ordinary command
+	// on the old link and the host rejects it as "Unknown command link/hello".
+	// FIN and the subsequent data use the same reliable, ordered channel.
 	b.mu.Lock()
 	if old := b.peers[peer]; old != nil {
 		delete(b.peers, peer)
@@ -222,6 +229,11 @@ func (b *Bridge) Dial(peer uint64) (net.Conn, error) {
 		old.remoteClosed(errors.New("replaced by a new stream"))
 		b.mu.Lock()
 	}
+	b.mu.Unlock()
+	if err := b.send(peer, []byte{opFin}); err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
 	p := b.newPeer(peer)
 	b.mu.Unlock()
 	return p, nil
@@ -242,7 +254,8 @@ func (b *Bridge) forget(peer uint64, p *peerConn) {
 	b.mu.Unlock()
 }
 
-// send writes one SEND frame to the shim.
+// send writes one SEND frame to the shim. The caller holds wmu, which
+// serializes stream replacement, writes and local closes in wire order.
 func (b *Bridge) send(peer uint64, payload []byte) error {
 	b.mu.Lock()
 	c := b.conn
@@ -250,8 +263,6 @@ func (b *Bridge) send(peer uint64, payload []byte) error {
 	if c == nil {
 		return ErrNotReady
 	}
-	b.wmu.Lock()
-	defer b.wmu.Unlock()
 	return writeFrame(c, frSend, peer, payload)
 }
 
@@ -331,6 +342,8 @@ func (p *peerConn) Read(buf []byte) (int, error) {
 }
 
 func (p *peerConn) Write(data []byte) (int, error) {
+	p.b.wmu.Lock()
+	defer p.b.wmu.Unlock()
 	select {
 	case <-p.done:
 		return 0, fmt.Errorf("sdr stream to %d closed: %w", p.peer, p.err)
@@ -350,6 +363,8 @@ func (p *peerConn) Write(data []byte) (int, error) {
 
 // Close ends the stream from our side and tells the peer.
 func (p *peerConn) Close() error {
+	p.b.wmu.Lock()
+	defer p.b.wmu.Unlock()
 	p.b.forget(p.peer, p)
 	var err error
 	p.once.Do(func() {

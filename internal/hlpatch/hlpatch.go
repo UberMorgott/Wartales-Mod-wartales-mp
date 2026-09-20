@@ -62,6 +62,14 @@
 // and the function returns []. The Join reply itself never depended on it:
 // the hxbit Join handler @26417 (Lobby.hx:523-534) runs userCanJoin@24635
 // (status, slots, maxPlayers) and sync(), no DLC check.
+//
+// Patch 8 -- allPlayersAssigned@24643 (Lobby.hx:392) requires each player
+// to own a non-animal unit. Modded starting parties can have three humans and
+// one animal for four players. Skip its player loop by comparing the player
+// count with itself: op 13 jumps to op 62, where r3 is still null and the
+// function returns true. Both canStart@24646 and CustomizeScreen.update@26311
+// call this predicate, so the start gate and its UI agree. allUnitsAssigned,
+// allPlayersIn, lobby status and loaded-save owner checks remain intact.
 package hlpatch
 
 import (
@@ -197,6 +205,13 @@ var Patches = []Patch{
 		Index:  8,
 		From:   0x06, // r6 = loop index
 		To:     0x08, // r8 = wtdc.length, i.e. r8 >= r8 -> exit at once, return []
+	},
+	{
+		Name:   "LobbyState.allPlayersAssigned allows unassigned players (Lobby.hx:392)",
+		Needle: []byte{0x42, 0x47, 0x04, 0x26, 0x09, 0x04, 0x00, 0x31, 0x07, 0x09, 0x30, 0x00, 0x08, 0x07, 0x16, 0x07, 0x26, 0x09, 0x04, 0x00, 0x34, 0x08, 0x09, 0x02},
+		Index:  8,
+		From:   0x07, // r7 = player loop index
+		To:     0x09, // r9 = players.length: always exit the loop
 	},
 }
 

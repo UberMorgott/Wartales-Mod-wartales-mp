@@ -169,7 +169,7 @@ func (s *store) peerGone(p Peer) {
 	for _, l := range s.lobbies {
 		id := l.idOf(p)
 		for i, u := range l.users {
-			if u.ID == id {
+			if u.ID == id && u.peer == p {
 				l.users = append(l.users[:i], l.users[i+1:]...)
 				if len(l.users) == 0 {
 					delete(s.lobbies, l.id)
@@ -350,10 +350,6 @@ func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 		return nil, wireErrf("Unknown lobby %s", a.ID)
 	}
 	s.lobbies.mu.Lock()
-	if l.maxPlayers != nil && len(l.users) >= *l.maxPlayers {
-		s.lobbies.mu.Unlock()
-		return nil, wireErrf("Lobby is full")
-	}
 	id := l.idOf(p)
 	found := false
 	for _, u := range l.users {
@@ -363,6 +359,10 @@ func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 		}
 	}
 	if !found {
+		if l.maxPlayers != nil && len(l.users) >= *l.maxPlayers {
+			s.lobbies.mu.Unlock()
+			return nil, wireErrf("Lobby is full")
+		}
 		l.users = append(l.users, &member{ID: id, Name: p.Name(), Data: a.Data, peer: p})
 	}
 	info := l.info()
@@ -872,6 +872,8 @@ func (s *Server) dialDirect(addr string) (net.Conn, error) {
 // attachLink runs the guest side of a link over conn and makes it the
 // master's uplink. probe bounds each command over it.
 func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Duration) (*link.Client, error) {
+	attached := make(chan struct{})
+	var cl *link.Client
 	cl, err := link.DialConn(c, u,
 		func(cmd string, args json.RawMessage) {
 			sess := s.localSession()
@@ -882,8 +884,11 @@ func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Dur
 			sess.Push(cmd, args)
 		},
 		func() {
+			<-attached
 			s.mu.Lock()
-			s.client = nil
+			if s.client == cl {
+				s.client = nil
+			}
 			s.mu.Unlock()
 			s.opt.Log.Printf("master: %s closed", what)
 		})
@@ -894,6 +899,7 @@ func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Dur
 	s.mu.Lock()
 	s.client = cl
 	s.mu.Unlock()
+	close(attached)
 	// Over SDR this only means the hello left for the shim; the first reply
 	// (or the probe's timeout) is what proves the host was reached.
 	s.opt.Log.Printf("master: %s: link open, hello sent; waiting for the host's first reply", what)

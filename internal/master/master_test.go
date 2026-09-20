@@ -21,6 +21,7 @@ import (
 
 	"github.com/UberMorgott/wartales-mp/internal/code"
 	"github.com/UberMorgott/wartales-mp/internal/install"
+	"github.com/UberMorgott/wartales-mp/internal/link"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
 	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
 	"github.com/UberMorgott/wartales-mp/internal/sdrbridge/sdrbridgetest"
@@ -1521,5 +1522,67 @@ func TestSteamJoinGameOverSDR(t *testing.T) {
 	}
 	if c, err := code.DecodeAny(again); err != nil || c.Steam == nil || c.Steam.SteamID64() != hostID64 {
 		t.Fatalf("guest's invite %q = %+v, %v; want the host's SDR route", again, c, err)
+	}
+}
+func TestRejoinKeepsReplacementPeer(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		t.Run("full="+strconv.FormatBool(full), func(t *testing.T) {
+			s, _ := startMasterOpts(t, nil)
+			old := &session{uid: "S12345678", name: "Guest"}
+			fresh := &session{uid: old.uid, name: old.name}
+			l := &lobby{id: "Lrejoin", owner: old.uid, users: []*member{{ID: old.uid, peer: old}}}
+			if full {
+				limit := 1
+				l.maxPlayers = &limit
+			}
+			s.lobbies.mu.Lock()
+			s.lobbies.lobbies[l.id] = l
+			s.lobbies.mu.Unlock()
+			if _, err := s.lobbyJoin(lobbyArgs{ID: l.id}, fresh); err != nil {
+				t.Fatal(err)
+			}
+			s.lobbies.peerGone(old)
+			s.lobbies.mu.Lock()
+			defer s.lobbies.mu.Unlock()
+			if s.lobbies.lobbies[l.id] != l || len(l.users) != 1 || l.users[0].peer != fresh {
+				t.Fatal("old disconnect removed the replacement member")
+			}
+		})
+	}
+}
+
+type closeNoticeLog struct{ closed chan struct{} }
+
+func (w *closeNoticeLog) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "master: old closed") {
+		close(w.closed)
+	}
+	return len(p), nil
+}
+func TestOldLinkClosePreservesReplacement(t *testing.T) {
+	notice := &closeNoticeLog{closed: make(chan struct{})}
+	s, _ := startMasterOpts(t, func(o *Options) { o.Log = log.New(notice, "", 0) })
+	attach := func(name string) (*link.Client, net.Conn) {
+		local, remote := net.Pipe()
+		go func() { _, _ = io.Copy(io.Discard, remote) }()
+		cl, err := s.attachLink(local, link.User{ID: "S12345678"}, name, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cl.Close(); _ = remote.Close() })
+		return cl, remote
+	}
+	_, oldRemote := attach("old")
+	replacement, _ := attach("new")
+	_ = oldRemote.Close()
+	select {
+	case <-notice.closed:
+	case <-time.After(time.Second):
+		t.Fatal("old close callback did not run")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.client != replacement {
+		t.Fatal("old close callback cleared replacement link")
 	}
 }

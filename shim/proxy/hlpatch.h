@@ -59,6 +59,13 @@ static const unsigned char hl_needle_6[] = {
 	0x0b,0x16,0x06,
 };
 
+/* LobbyState.allPlayersAssigned allows unassigned players (Lobby.hx:392) */
+static const unsigned char hl_needle_7[] = {
+	0x42,0x47,0x04,0x26,0x09,0x04,0x00,0x31,0x07,0x09,0x30,
+	0x00,0x08,0x07,0x16,0x07,0x26,0x09,0x04,0x00,0x34,0x08,
+	0x09,0x02,
+};
+
 static const struct hl_patch hl_patches[] = {
 	{ hl_needle_0, 22, 15, 0x09, 0x0b },
 	{ hl_needle_1, 22, 15, 0x09, 0x0b },
@@ -67,8 +74,9 @@ static const struct hl_patch hl_patches[] = {
 	{ hl_needle_4, 18, 4, 0x1e, 0x13 },
 	{ hl_needle_5, 24, 7, 0x1e, 0x13 },
 	{ hl_needle_6, 36, 8, 0x06, 0x08 },
+	{ hl_needle_7, 24, 8, 0x07, 0x09 },
 };
 
-#define HL_PATCH_COUNT 7
+#define HL_PATCH_COUNT 8
 
 #endif /* WARTALES_MP_HLPATCH_H */
