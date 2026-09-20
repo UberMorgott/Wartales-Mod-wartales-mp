@@ -73,7 +73,7 @@ run flags:
   -transport M   auto (default), direct or sdr: how lobbies we host carry
                  the game; auto = direct relay once the public endpoint has
                  been verified by inbound traffic, otherwise Steam Datagram
-                 Relay; the join code always offers every route available
+                 Relay; manual codes use direct, Steam invitations retain SDR
 
 The winmm.dll proxy in the game folder does the rest: it starts this helper and
 hooks the game's name resolution and CA setup from inside the process.

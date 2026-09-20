@@ -101,7 +101,7 @@ func runCmd(args []string) error {
 		}
 	}
 	logger.Printf("transport mode %s (direct relay once the public endpoint is verified by inbound traffic, else SDR for everything; "+
-		"the join code offers both routes)", *transport)
+		"manual codes use direct; Steam invitations retain SDR)", *transport)
 	defer ms.Close()
 
 	// The direct route also needs an inbound firewall rule for this exe. The
@@ -213,7 +213,7 @@ func codeCmd(args []string) error {
 		if port < 0 || port > math.MaxUint16 {
 			return fmt.Errorf("port %d is out of range", port)
 		}
-		s, err := code.Encode(code.Endpoint{IP: ip, Port: uint16(port)})
+		s, err := code.EncodeDirect(code.Endpoint{IP: ip, Port: uint16(port)})
 		if err != nil {
 			return err
 		}

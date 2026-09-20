@@ -567,18 +567,25 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	return nil
 }
 
-// lobbyMakeShortCode issues the join code with every route we can offer at
-// this moment, so the guest can cascade: the endpoint (direct, tried first)
-// whenever we have one, verified or not, and the SDR route (our Steam
-// account + the link key) whenever the bridge is up. The endpoint is
-// re-resolved for each code (nat.Mapper.MaxAge): the WAN address can change
-// between lobbies. The host's master resolves the code to the lobby either
-// way.
-func (s *Server) lobbyMakeShortCode(a lobbyArgs, p Peer) (any, error) {
-	short, err := s.issueCode(a.ID, p)
+// lobbyMakeShortCode issues a direct-only manual code. Steam invitations carry
+// their own routes independently. Resolve the endpoint for every request because
+// the WAN address can change between lobbies.
+func (s *Server) lobbyMakeShortCode(a lobbyArgs, _ Peer) (any, error) {
+	if s.lobbies.get(a.ID) == nil {
+		return nil, wireErrf("Unknown lobby %s", a.ID)
+	}
+	ep, err := s.endpointRoute()
+	if err != nil {
+		return nil, wireErrf("Cannot create direct join code: %v; use a Steam invitation", err)
+	}
+	short, err := code.EncodeDirect(*ep)
 	if err != nil {
 		return nil, err
 	}
+	s.lobbies.mu.Lock()
+	s.lobbies.codes[short] = a.ID
+	s.lobbies.mu.Unlock()
+	s.opt.Log.Printf("master: manual join code for %s is %s (direct %s)", a.ID, short, ep.Addr())
 	return map[string]any{"shortCode": short}, nil
 }
 
@@ -588,7 +595,7 @@ func (s *Server) lobbyMakeShortCode(a lobbyArgs, p Peer) (any, error) {
 // "Join Game" hands the same string to their own helper as lobby/infoInvite,
 // so it must reach our lobby on its own: it is the join code.
 func (s *Server) lobbyInitInvite(a lobbyArgs, p Peer) (any, error) {
-	short, err := s.issueCode(a.ID, p)
+	short, err := s.issueInvite(a.ID, p)
 	if err != nil {
 		return nil, err
 	}
@@ -596,10 +603,10 @@ func (s *Server) lobbyInitInvite(a lobbyArgs, p Peer) (any, error) {
 	return short, nil
 }
 
-// issueCode issues the join code for a lobby and remembers it. The SDR route
+// issueInvite issues the Steam invitation payload and remembers it. The SDR route
 // is always the owner's: a guest asking for the code (inviting its own Steam
 // friends) must still send them to the host.
-func (s *Server) issueCode(id string, p Peer) (string, error) {
+func (s *Server) issueInvite(id string, p Peer) (string, error) {
 	l := s.lobbies.get(id)
 	if l == nil {
 		return "", wireErrf("Unknown lobby %s", id)

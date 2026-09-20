@@ -9,7 +9,7 @@ and the session is unusable. The game itself is fine — the meeting place is no
 
 wartales-mp replaces the rendezvous with a local one. The game talks to a master
 server running on `127.0.0.1` instead of Shiro's, and that master tells the game
-how to connect. There are exactly two ways, tried in this order:
+how to connect. There are two transports:
 
 1. **Direct** — straight to the host's machine, when the host's public port
    has actually been reached from the internet. Neither Shiro's infrastructure
@@ -17,11 +17,13 @@ how to connect. There are exactly two ways, tried in this order:
 2. **SDR** — Valve's modern relay network (Steam Datagram Relay) through
    `ISteamNetworkingMessages`, for everything: the lobby and the game. The host
    needs no open port and no public address at all — behind any number of
-   NATs, the join code carries the host's Steam id as well as its address.
+   NATs, Steam invitations carry the host's connection details automatically.
 
-One join code carries both routes. The guest tries the direct one first (a
-few seconds at most) and falls through to SDR on its own; you only notice a
-short pause.
+There are two ways to join. A manually entered code contains only the host's
+IPv4 address and port: 8 symbols with the default port, 11 with a custom port.
+It connects to the host's master directly. If that address is unreachable, use
+Steam's "Join Game" or a friend invitation; manual codes do not retry over SDR.
+The lobby's game transport is still chosen separately, as described below.
 
 The game's own legacy Steam P2P path (`ISteamNetworking`, the old relay that
 is the one that fails) has been removed: the mod diverts those calls for good
@@ -86,8 +88,9 @@ one of theirs), and it will not break the game if it does not fit any more.
 
 **Steam invites.** The game's own "invite friends" button and the friends-list
 "Join Game" work with the mod: the host's game creates a friends-only Steam
-lobby and stores the join code in it, the guest's game reads that code back and
-hands it to its helper, which resolves it exactly like a typed one. Both
+lobby and stores a separate invitation payload in it. That payload retains
+the available direct and SDR routes, so Steam invitations still work when
+the host has no public address. The guest hands it to its helper automatically. Both
 players must run the game through Steam. This path is verified end to end
 (v0.1.3): host pressed "Invite friends", guest joined via the Steam
 friends-list "Join Game", and the session ran to completion over SDR.
@@ -98,14 +101,15 @@ connection from the internet actually arrived on it during this run. A UPnP
 mapping plus a public address from STUN is treated as a hint, not proof — on a
 real machine it claimed reachability while the port was refused from outside.
 Until verified, the lobby runs over SDR, but the join code still offers the
-hinted address as its first route; the first guest who gets through over TCP
+hinted address; the first guest who gets through over TCP
 verifies it, and the next lobby is direct. `wartales-mp run -transport
 direct|sdr` forces one.
 
-The join code tells the layouts apart by length: 13 symbols carry `ip:port`
-only (direct), 16 symbols carry the host's Steam account and a per-run key
-(SDR), 25 symbols carry both, for example `R0PSMP226YN01F319VFAVFQFF` =
-`45.154.88.66:14250` then Steam account `12345678`. Old codes keep working.
+New manual codes use 8 symbols for IPv4 with port `14250`, or 11 symbols
+for IPv4 with a custom port. Both include a typo check. Paste the code as
+shown by the host. Old 13/16/25-symbol codes remain readable. Steam invitation
+payloads keep their existing format. Guests need the updated mod to read the
+new short manual codes; older mods can still use Steam invitations.
 
 **Windows Firewall.** The direct route also needs an inbound rule for the
 helper, and the helper never asks for elevation: it runs hidden, started from
@@ -121,12 +125,11 @@ wartales-mp firewall check    # reports whether it exists
 
 SDR needs no rule; without one, sessions still work, over Valve's relay.
 
-Timing: the helper starts before the game's Steam client is ready. Until the
-mod reports SDR up, creating a lobby works, but asking for the join code (or
-entering one) answers "Steam relay not ready yet … ask again in a few seconds"
-— the game shows it, you retry, and `wartales-mp.log` records it. If SDR can
-never work in this game process, hosting without a public address is refused
-with both reasons instead.
+Timing: the helper starts before the game's Steam client is ready. Manual
+codes need an IPv4 endpoint and do not wait for SDR. If no endpoint is available,
+the game asks you to use a Steam invitation instead. Steam invitations that
+need SDR may report "Steam relay not ready yet" during startup; retry once
+Steam is ready.
 
 What SDR still needs: both players' Steam clients must reach Valve's relay
 network. A network that blocks that has no rung left; the mod says so rather
@@ -238,7 +241,7 @@ needs no patch for it.
    that is never true, so the crash cannot fire. Four more relax the
    title screen's "join by code" field, which is built around 5-symbol codes
    (input cap, truncation, validation, submit check), to accept at least 5
-   and up to 32 symbols, so the mod's 13/16/25-symbol codes are accepted and
+   and up to 32 symbols, so the mod's 8/11/13/16/25-symbol codes are accepted and
    vanilla codes still work. The remaining two bypass the missing-DLC gate
    and the requirement that every player own a human unit. This allows four
    players to start with a modded party of three humans and one animal.

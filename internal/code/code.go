@@ -1,9 +1,11 @@
 // Package code implements the short join code: Crockford base32 over a small
-// payload whose first byte says what it carries, plus one check symbol.
+// payload with a length-specific layout, plus one check symbol.
 //
-// Three layouts exist, told apart by length (and, as a belt, by bits 7 and 6
-// of the flags byte):
+// Compact direct layouts omit flags and infer the default port from length.
+// Legacy layouts retain their flags byte and remain readable:
 //
+//	direct    [ipv4:4]                                                   4 bytes -> 7 + 1 = 8 symbols
+//	direct    [ipv4:4][port:2]                                            6 bytes -> 10 + 1 = 11 symbols
 //	endpoint  [flags:1 bit7=0][ipv4:4][port:2]                              7 bytes -> 12 + 1 = 13 symbols
 //	steam     [flags:1 bit7=1][account:4 BE][key:4 BE]                       9 bytes -> 15 + 1 = 16 symbols
 //	combined  [flags:1 bit7=1 bit6=1][ipv4:4][port:2][account:4 BE][key:4 BE] 15 bytes -> 24 + 1 = 25 symbols
@@ -29,6 +31,13 @@ import (
 const Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 const (
+	// DefaultPort is omitted from compact direct codes.
+	DefaultPort = 14250
+	// DirectLength is an IPv4 address plus one check symbol.
+	DirectLength = 8
+	// DirectPortLength also carries a custom port.
+	DirectPortLength = 11
+
 	payloadLen = 7  // flags(1) + ipv4(4) + port(2)
 	bodyLen    = 12 // ceil(7*8/5)
 	// Length is the total number of symbols of an endpoint join code.
@@ -108,6 +117,26 @@ func EncodeCombined(e Endpoint, s Steam) (string, error) {
 }
 
 var errBadCode = errors.New("invalid join code")
+
+// EncodeDirect makes a direct-only code. The standard port is implicit in
+// the 8-symbol form; custom ports use 11 symbols. Nonzero legacy flags retain
+// their original encoding so callers do not silently lose flag bits.
+func EncodeDirect(e Endpoint) (string, error) {
+	if e.Flags != 0 {
+		return Encode(e)
+	}
+	ip := e.IP.To4()
+	if ip == nil {
+		return "", fmt.Errorf("join code needs an IPv4 address, got %v", e.IP)
+	}
+	if e.Port == DefaultPort {
+		return encode(ip, 7), nil
+	}
+	payload := make([]byte, 6)
+	copy(payload, ip)
+	binary.BigEndian.PutUint16(payload[4:], e.Port)
+	return encode(payload, 10), nil
+}
 
 // Encode turns an endpoint into a 13 symbol join code.
 func Encode(e Endpoint) (string, error) {
@@ -216,6 +245,20 @@ func DecodeSteam(s string) (Steam, error) {
 func DecodeAny(s string) (Code, error) {
 	norm := normalize(s)
 	switch len(norm) {
+	case DirectLength, DirectPortLength:
+		n := 4
+		if len(norm) == DirectPortLength {
+			n = 6
+		}
+		p, err := decode(norm, len(norm)-1, n)
+		if err != nil {
+			return Code{}, err
+		}
+		port := uint16(DefaultPort)
+		if n == 6 {
+			port = binary.BigEndian.Uint16(p[4:])
+		}
+		return Code{Endpoint: &Endpoint{IP: net.IPv4(p[0], p[1], p[2], p[3]), Port: port}}, nil
 	case Length:
 		p, err := decode(norm, bodyLen, payloadLen)
 		if err != nil {

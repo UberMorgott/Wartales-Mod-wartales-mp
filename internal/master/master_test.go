@@ -347,8 +347,8 @@ func TestJoinOverSDR(t *testing.T) {
 	var short struct {
 		ShortCode string `json:"shortCode"`
 	}
-	raw = host.call(t, "lobby/makeShortCode", map[string]any{"id": id})
-	if err := json.Unmarshal(raw, &short); err != nil {
+	raw = host.call(t, "lobby/initInvite", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &short.ShortCode); err != nil {
 		t.Fatal(err)
 	}
 	// The host's endpoint is LAN-only, unverified: the code still offers it
@@ -531,7 +531,14 @@ func TestLobbyTransportOverLink(t *testing.T) {
 	sw := sdrbridgetest.New(t)
 	hostSrv, linkAddr := cascadeHost(t, sw, cascadeHostID, true)
 	host, id := createLobby(t, hostSrv, cascadeHostID)
-	short := combinedCode(t, linkAddr, cascadeHostID, 0xdeadbeef)
+	endpoint, err := net.ResolveTCPAddr("tcp", linkAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	short, err := code.EncodeDirect(code.Endpoint{IP: endpoint.IP, Port: uint16(endpoint.Port)}) //nolint:gosec // a listener port
+	if err != nil {
+		t.Fatal(err)
+	}
 	hostSrv.lobbies.mu.Lock()
 	hostSrv.lobbies.codes[short] = id
 	hostSrv.lobbies.mu.Unlock()
@@ -841,10 +848,10 @@ func TestCascadeBothFail(t *testing.T) {
 	}
 }
 
-// TestIssuedCodeCarriesBothRoutes: a host with an unverified endpoint and a
-// ready bridge issues a combined code; the endpoint is offered but the lobby
+// TestManualCodeAndSteamInviteRoutes: a host with an unverified endpoint and a
+// ready bridge issues a direct manual code and a combined Steam invite; the lobby
 // itself is on SDR, and a verified endpoint makes the lobby direct.
-func TestIssuedCodeCarriesBothRoutes(t *testing.T) {
+func TestManualCodeAndSteamInviteRoutes(t *testing.T) {
 	sw := sdrbridgetest.New(t)
 	hinted := nat.Endpoint{Addr: "45.154.88.66:14250", IP: net.IPv4(45, 154, 88, 66), Source: "UPnP+STUN", Reachable: true}
 	bridge := startBridge(t, sw.Add(t, cascadeHostID), true)
@@ -865,6 +872,19 @@ func TestIssuedCodeCarriesBothRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, err := code.DecodeAny(short.ShortCode)
+	if err != nil || c.Endpoint == nil || c.Steam != nil || len(short.ShortCode) != 8 {
+		t.Fatalf("manual code %q = %+v, %v; want eight characters and direct only", short.ShortCode, c, err)
+	}
+	if c.Endpoint.Addr() != hinted.Addr {
+		t.Fatalf("manual endpoint = %s, want %s", c.Endpoint.Addr(), hinted.Addr)
+	}
+	resolveOK(t, host, short.ShortCode, id)
+	var invite string
+	raw = host.call(t, "lobby/initInvite", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &invite); err != nil {
+		t.Fatal(err)
+	}
+	c, err = code.DecodeAny(invite)
 	if err != nil || c.Endpoint == nil || c.Steam == nil {
 		t.Fatalf("code %q = %+v, %v; want both routes", short.ShortCode, c, err)
 	}
@@ -873,7 +893,63 @@ func TestIssuedCodeCarriesBothRoutes(t *testing.T) {
 	}
 }
 
-// TestSDRJoinBeforeTheBridgeIsReady: a join code request or a join attempt
+// Manual codes must fail directly rather than silently using the host's Steam
+// route; the separate invitation must still connect after that failed attempt.
+func TestManualCodeDoesNotFallBackToSteam(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	hostSrv, _ := cascadeHost(t, sw, cascadeHostID, false)
+	host, id := createLobby(t, hostSrv, cascadeHostID)
+	var short struct {
+		ShortCode string `json:"shortCode"`
+	}
+	raw := host.call(t, "lobby/makeShortCode", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &short); err != nil {
+		t.Fatal(err)
+	}
+	guest := guestFor(t, sw, 0x0110000100000012, true, func(o *Options) {
+		o.DialDirect = func(context.Context, string) (net.Conn, error) {
+			return nil, net.ErrClosed
+		}
+	})
+	msg := guest.callErr(t, "lobby/resolveShortCode", map[string]any{"shortCode": short.ShortCode})
+	if !strings.Contains(msg, "Cannot reach the host: direct ") || strings.Contains(msg, "SDR") {
+		t.Fatalf("manual direct failure = %q", msg)
+	}
+	var invite string
+	raw = host.call(t, "lobby/initInvite", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &invite); err != nil {
+		t.Fatal(err)
+	}
+	resolveOK(t, guest, invite, id)
+}
+
+func TestSteamInviteWithoutEndpoint(t *testing.T) {
+	sw := sdrbridgetest.New(t)
+	bridge := startBridge(t, sw.Add(t, cascadeHostID), true)
+	srv, _ := startMasterOpts(t, func(o *Options) {
+		o.PublicAddr = func() (string, error) { return "", net.ErrClosed }
+		o.Endpoint = func() (nat.Endpoint, error) { return nat.Endpoint{}, net.ErrClosed }
+		o.SDRStatus, o.Bridge, o.LinkKey = bridge.Status, bridge, 0xdeadbeef
+	})
+	bridge.OnPeer = srv.ServeSDRLink
+	host, id := createLobby(t, srv, cascadeHostID)
+	msg := host.callErr(t, "lobby/makeShortCode", map[string]any{"id": id})
+	if !strings.Contains(msg, "use a Steam invitation") {
+		t.Fatalf("manual code without endpoint = %q", msg)
+	}
+	var invite string
+	raw := host.call(t, "lobby/initInvite", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &invite); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := code.DecodeAny(invite); err != nil || c.Endpoint != nil || c.Steam == nil {
+		t.Fatalf("Steam-only invite %q = %+v, %v", invite, c, err)
+	}
+	guest := guestFor(t, sw, 0x0110000100000013, true, nil)
+	resolveOK(t, guest, invite, id)
+}
+
+// TestSDRJoinBeforeTheBridgeIsReady: a Steam invitation request or a join attempt
 // made while the shim is still bringing SDR up is answered with a clear,
 // retryable error, never a code or a link that could not work.
 func TestSDRJoinBeforeTheBridgeIsReady(t *testing.T) {
@@ -895,9 +971,20 @@ func TestSDRJoinBeforeTheBridgeIsReady(t *testing.T) {
 	if err := json.Unmarshal(raw, &id); err != nil {
 		t.Fatalf("lobby/create must succeed with SDR pending: %s, %v", raw, err)
 	}
-	msg := w.callErr(t, "lobby/makeShortCode", map[string]any{"id": id})
+	// Manual codes depend only on the endpoint, even while Steam starts.
+	var manual struct {
+		ShortCode string `json:"shortCode"`
+	}
+	raw = w.call(t, "lobby/makeShortCode", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &manual); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := code.DecodeAny(manual.ShortCode); err != nil || c.Endpoint == nil || c.Steam != nil {
+		t.Fatalf("manual code while Steam pending = %s: %+v, %v", raw, c, err)
+	}
+	msg := w.callErr(t, "lobby/initInvite", map[string]any{"id": id})
 	if !strings.Contains(msg, "Steam relay not ready yet") || !strings.Contains(msg, "not initialised") {
-		t.Fatalf("makeShortCode while pending = %q", msg)
+		t.Fatalf("initInvite while pending = %q", msg)
 	}
 	steamCode := code.EncodeSteam(code.Steam{AccountID: 1, Key: 2})
 	msg = w.callErr(t, "lobby/resolveShortCode", map[string]any{"shortCode": steamCode, "filters": map[string]any{}})
@@ -927,12 +1014,12 @@ func TestSDRJoinBeforeTheBridgeIsReady(t *testing.T) {
 	var short struct {
 		ShortCode string `json:"shortCode"`
 	}
-	raw = w.call(t, "lobby/makeShortCode", map[string]any{"id": id})
-	if err := json.Unmarshal(raw, &short); err != nil {
+	raw = w.call(t, "lobby/initInvite", map[string]any{"id": id})
+	if err := json.Unmarshal(raw, &short.ShortCode); err != nil {
 		t.Fatal(err)
 	}
 	if c, err := code.DecodeAny(short.ShortCode); err != nil || c.Steam == nil {
-		t.Fatalf("makeShortCode once ready = %s: %+v, %v; want an SDR route", raw, c, err)
+		t.Fatalf("initInvite once ready = %s: %+v, %v; want an SDR route", raw, c, err)
 	}
 }
 
@@ -1411,7 +1498,7 @@ func TestLobbyLifecycle(t *testing.T) {
 	if err := json.Unmarshal(raw, &short); err != nil {
 		t.Fatal(err)
 	}
-	if len(short.ShortCode) != 13 {
+	if len(short.ShortCode) != 8 {
 		t.Fatalf("shortCode = %q", short.ShortCode)
 	}
 
