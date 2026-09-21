@@ -259,7 +259,13 @@ needs no patch for it.
    `cargo build --release --target x86_64-pc-windows-gnu`). Unlike the eight
    byte patches it is structural: it inserts opcodes and appends a function and
    a type, so the copy grows, and the result gives the items in the new-game
-   starting-troop preview hover tooltips. It locates everything by name; if it
+   starting-troop preview hover tooltips. It also adds enemy friendly fire: in
+   the area loop of `Skill.gatherTargets`, for a skill whose `allowedTargets` is
+   Enemies cast by a non-player-side unit, `SkillEval.addTarget` gets
+   `checkValid = false` for every unit other than the caster that passes
+   `canBeTarget`, so the area also hits the caster's allies; primary-target and
+   AI checks (`Unit.isValidTarget`) are unchanged. Host and client load the same
+   `winmm.dll`, so both sides compute the same targets. It locates everything by name; if it
    cannot (another game build), it reports why in `shim.log`
    (`tips: not applied: …`) and the copy stays the byte-patched image, so the
    multiplayer part is never affected by it.

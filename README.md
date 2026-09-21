@@ -15,6 +15,7 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 - Fixes identified reconnection errors and a crash caused by waiting in the lobby.
 - Lets you start even if a player has no human character assigned. For example, four players can use a modded starting party of three humans and one animal.
 - Adds hover tooltips to the items shown in the new-game starting-troop preview (bundled `wartales-tips` patch). If the game build differs, this part silently stays off and everything else keeps working.
+- Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do. Always on; part of the same bundled patch, so it stays off together with the tooltips on another game build.
 
 ## Install
 
