@@ -17,6 +17,7 @@ pub const PATCH_NAME: &str = "wartales-tips start-choice item tooltips";
 pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     let mut code = Bytecode::deserialize(&mut Cursor::new(image)).context("read bytecode")?;
     patch_start_choice_item_tips(&mut code)?;
+    patch_start_choice_unit_tips(&mut code)?;
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
@@ -153,6 +154,22 @@ fn debug_file(code: &Bytecode, name: &str) -> Result<usize> {
         .with_context(|| format!("debug file {name} not found"))
 }
 
+/// The next free function index: findexes are dense over functions + natives.
+fn next_findex(code: &Bytecode) -> Result<RefFun> {
+    let n = code.functions.len() + code.natives.len();
+    let max = code
+        .functions
+        .iter()
+        .map(|f| f.findex.0)
+        .chain(code.natives.iter().map(|f| f.findex.0))
+        .max()
+        .unwrap_or(0);
+    if max + 1 != n {
+        bail!("findex space is not dense; refusing to append a function");
+    }
+    Ok(RefFun(n))
+}
+
 // ---------- bytecode editing ----------
 
 /// Insert `new_ops` before original op index `at`, keeping every jump target,
@@ -229,10 +246,7 @@ fn add_icon_tip_function(code: &mut Bytecode, dbg_file: usize) -> Result<RefFun>
     if ctor_args.len() != 5 || ctor_args[1] != item_t {
         bail!("unexpected ItemTip constructor signature");
     }
-    if code.findex_max() != code.functions.len() + code.natives.len() {
-        bail!("findex space is not dense; refusing to append a function");
-    }
-    let findex = RefFun(code.findex_max());
+    let findex = next_findex(code)?;
     code.types.push(Type::Fun(TypeFun {
         args: vec![icon_t],
         ret: ret_t,
@@ -320,10 +334,6 @@ fn patch_start_choice_item_tips(code: &mut Bytecode) -> Result<()> {
 
     let tip_fn = add_icon_tip_function(code, dbg_file)?;
     let f = &mut code.functions[fi];
-    let new_at = (0..oi)
-        .rev()
-        .find(|&i| matches!(f.ops[i], Opcode::New { dst } if dst == icon_reg))
-        .context("New ItemIcon not found before its constructor call")?;
     let void_reg = Reg(f
         .regs
         .iter()
@@ -354,9 +364,10 @@ fn patch_start_choice_item_tips(code: &mut Bytecode) -> Result<()> {
     if let Opcode::Call4 { arg3, .. } = &mut f.ops[oi] {
         *arg3 = elem_reg;
     }
+    // Right before the ItemIcon constructor call, where the parent register is final.
     insert_ops(
         f,
-        new_at,
+        oi,
         vec![
             Opcode::New { dst: elem_reg },
             Opcode::Call2 {
@@ -369,7 +380,329 @@ fn patch_start_choice_item_tips(code: &mut Bytecode) -> Result<()> {
     );
     eprintln!(
         "patched StartChoice preview fn@{}: Element wrapper at op {}, ItemIcon ctor at op {} (icon reg {}, parent reg {}), tip fn@{}",
-        f.findex.0, new_at, oi + 2, icon_reg.0, parent_reg.0, tip_fn.0
+        f.findex.0, oi, oi + 2, icon_reg.0, parent_reg.0, tip_fn.0
+    );
+    Ok(())
+}
+
+/// Index of `value` in the i32 constant pool, appended when missing.
+fn int_const(code: &mut Bytecode, value: i32) -> hlbc::types::RefInt {
+    if let Some(i) = code.ints.iter().position(|&v| v == value) {
+        return hlbc::types::RefInt(i);
+    }
+    code.ints.push(value);
+    hlbc::types::RefInt(code.ints.len() - 1)
+}
+
+/// The virtual type whose field names are exactly `names` (sorted, as HL stores them).
+fn virtual_type(code: &Bytecode, names: &[&str]) -> Result<RefType> {
+    code.types
+        .iter()
+        .position(|t| match t {
+            Type::Virtual { fields } => {
+                fields.len() == names.len()
+                    && fields.iter().zip(names).all(|(f, n)| s(code, f.name) == *n)
+            }
+            _ => false,
+        })
+        .map(RefType)
+        .with_context(|| format!("virtual type {names:?} not found"))
+}
+
+/// Resolves jump offsets in a hand-written op list: `(target_index, op)` where the
+/// op's offset is a placeholder replaced with `target - i - 1`.
+fn resolve_jumps(ops: &mut [Opcode], targets: &[(usize, usize)]) {
+    for &(i, target) in targets {
+        let off = target as i32 - i as i32 - 1;
+        match &mut ops[i] {
+            Opcode::JNull { offset, .. }
+            | Opcode::JSGte { offset, .. }
+            | Opcode::JAlways { offset } => *offset = off,
+            _ => unreachable!("not a jump"),
+        }
+    }
+}
+
+/// New function `(unitClass row) -> h2d.Object`:
+/// a vertical h2d.Flow holding one `ui.comp.SkillTip(null, null, skill, 1, null, flow)` per
+/// `baseSkills` entry, i.e. the class's own skill tooltips stacked into one card.
+fn add_class_tip_function(code: &mut Bytecode, cls_t: RefType, dbg_file: usize) -> Result<RefFun> {
+    let flow_t = obj_type(code, "h2d.Flow")?;
+    let flow_ctor = method(code, flow_t, "__constructor__")?;
+    let (flow_ctor_findex, flow_parent_t) = (flow_ctor.findex, fun_args(code, flow_ctor)[1]);
+    let set_vertical = method(code, flow_t, "set_isVertical")?.findex;
+    let bool_t = RefType(7);
+    let arr_t = obj_type(code, "hl.types.ArrayObj")?;
+    let (arr_f, arr_inner_t) = field(code, arr_t, "array")?;
+    let (len_f, i32_t) = field(code, arr_t, "length")?;
+    let (base_skills_f, base_skills_t) = field_of_virtual(code, cls_t, "baseSkills")?;
+    if base_skills_t != arr_t {
+        bail!("unitClass.baseSkills is not an ArrayObj");
+    }
+    let entry_t = virtual_type(code, &["learnLevel", "minLevel", "requires", "skill"])?;
+    let get_skill = method(code, entry_t, "get_skill")?;
+    let (get_skill_findex, skill_t) = (get_skill.findex, get_skill.t.as_fun(code).unwrap().ret);
+    let tip_t = obj_type(code, "ui.comp.SkillTip")?;
+    let tip_ctor = method(code, tip_t, "__constructor__")?;
+    let tip_args = fun_args(code, tip_ctor);
+    let tip_ctor_findex = tip_ctor.findex;
+    if tip_args.len() != 7 || tip_args[3] != skill_t || tip_args[4] != i32_t {
+        bail!("unexpected SkillTip constructor signature");
+    }
+    let elem_t = obj_type(code, "ui.comp.Element")?;
+    let ret_t = field(code, elem_t, "getTipContent")?
+        .1
+        .as_fun(code)
+        .unwrap()
+        .ret;
+    let zero = int_const(code, 0);
+    let one = int_const(code, 1);
+    let findex = next_findex(code)?;
+    code.types.push(Type::Fun(TypeFun {
+        args: vec![cls_t],
+        ret: ret_t,
+    }));
+    let fun_t = RefType(code.types.len() - 1);
+
+    // r0 cls, r1 flow, r2 void, r3 baseSkills, r4 i, r5 len, r6 raw array, r7 dyn,
+    // r8 entry, r9 skill, r10 tip, r11 unit, r12 stats, r13 level, r14 vars, r15 parent, r16/r17 bool
+    let regs = vec![
+        cls_t,
+        flow_t,
+        RefType(0),
+        arr_t,
+        i32_t,
+        i32_t,
+        arr_inner_t,
+        RefType(9),
+        entry_t,
+        skill_t,
+        tip_t,
+        tip_args[1],
+        tip_args[2],
+        i32_t,
+        tip_args[5],
+        flow_parent_t,
+        bool_t,
+        bool_t,
+    ];
+    let r = Reg;
+    let mut ops = vec![
+        Opcode::New { dst: r(1) },
+        Opcode::Null { dst: r(15) },
+        Opcode::Call2 {
+            dst: r(2),
+            fun: flow_ctor_findex,
+            arg0: r(1),
+            arg1: r(15),
+        },
+        Opcode::Bool {
+            dst: r(16),
+            value: hlbc::types::ValBool(true),
+        },
+        Opcode::Call2 {
+            dst: r(17),
+            fun: set_vertical,
+            arg0: r(1),
+            arg1: r(16),
+        },
+        Opcode::Field {
+            dst: r(3),
+            obj: r(0),
+            field: base_skills_f,
+        },
+        Opcode::JNull {
+            reg: r(3),
+            offset: 0,
+        }, // 6 -> END
+        Opcode::Int {
+            dst: r(4),
+            ptr: zero,
+        },
+        Opcode::Label, // 8 LOOP
+        Opcode::Field {
+            dst: r(5),
+            obj: r(3),
+            field: len_f,
+        },
+        Opcode::JSGte {
+            a: r(4),
+            b: r(5),
+            offset: 0,
+        }, // 10 -> END
+        Opcode::Field {
+            dst: r(6),
+            obj: r(3),
+            field: arr_f,
+        },
+        Opcode::GetArray {
+            dst: r(7),
+            array: r(6),
+            index: r(4),
+        },
+        Opcode::ToVirtual {
+            dst: r(8),
+            src: r(7),
+        },
+        Opcode::Incr { dst: r(4) },
+        Opcode::Call1 {
+            dst: r(9),
+            fun: get_skill_findex,
+            arg0: r(8),
+        },
+        Opcode::JNull {
+            reg: r(9),
+            offset: 0,
+        }, // 16 -> LOOP
+        Opcode::New { dst: r(10) },
+        Opcode::Null { dst: r(11) },
+        Opcode::Null { dst: r(12) },
+        Opcode::Int {
+            dst: r(13),
+            ptr: one,
+        },
+        Opcode::Null { dst: r(14) },
+        Opcode::CallN {
+            dst: r(2),
+            fun: tip_ctor_findex,
+            args: vec![r(10), r(11), r(12), r(9), r(13), r(14), r(1)],
+        },
+        Opcode::JAlways { offset: 0 }, // 23 -> LOOP
+        Opcode::Ret { ret: r(1) },     // 24 END
+    ];
+    resolve_jumps(&mut ops, &[(6, 24), (10, 24), (16, 8), (23, 8)]);
+    let nops = ops.len();
+    code.functions.push(Function {
+        name: hlbc::types::RefString(0),
+        t: fun_t,
+        findex,
+        regs,
+        ops,
+        debug_info: Some(vec![(dbg_file, 2); nops]),
+        assigns: Some(vec![]),
+        parent: None,
+    });
+    Ok(findex)
+}
+
+fn field_of_virtual(code: &Bytecode, t: RefType, name: &str) -> Result<(RefField, RefType)> {
+    match &code.types[t.0] {
+        Type::Virtual { fields } => fields
+            .iter()
+            .position(|f| s(code, f.name) == name)
+            .map(|i| (RefField(i), fields[i].t))
+            .with_context(|| format!("virtual field {name} not found")),
+        _ => bail!("type {} is not virtual", t.0),
+    }
+}
+
+/// The preview lists one `TextFixed` per unit of the troop pattern ("class + trait").
+/// TextFixed is a plain h2d.Text, so as with the item icons it gets an
+/// `ui.comp.Element` wrapper: `new TextFixed(troopList)` becomes
+/// `var e = new Element(troopList); new TextFixed(e)` and after
+/// `cls = get_unitClass(entry)` we bind `e.getTipContent = <class tip fn bound to cls>`.
+fn patch_start_choice_unit_tips(code: &mut Bytecode) -> Result<()> {
+    let start_t = obj_type(code, "ui.win.StartChoice")?;
+    let text_t = obj_type(code, "ui.comp.TextFixed")?;
+    let text_ctor = method(code, text_t, "__constructor__")?.findex;
+    let elem_t = obj_type(code, "ui.comp.Element")?;
+    let elem_ctor = method(code, elem_t, "__constructor__")?.findex;
+    let (tip_field, tip_field_t) = field(code, elem_t, "getTipContent")?;
+    let dbg_file = debug_file(code, "src/ui/win/StartChoice.hx")?;
+
+    let mut sites = vec![];
+    for (fi, f) in code.functions.iter().enumerate() {
+        if f.regs.first() != Some(&start_t) {
+            continue;
+        }
+        for (oi, op) in f.ops.iter().enumerate() {
+            if let Opcode::Call1 { dst, fun, .. } = op {
+                let callee = code.functions.iter().find(|g| g.findex == *fun);
+                if callee.is_some_and(|g| s(code, g.name) == "get_unitClass") {
+                    sites.push((fi, oi, *dst));
+                }
+            }
+        }
+    }
+    let [(fi, oi, cls_reg)] = sites[..] else {
+        bail!(
+            "expected exactly one get_unitClass call in StartChoice, found {}",
+            sites.len()
+        );
+    };
+    let cls_t = code.functions[fi].regs[cls_reg.0 as usize];
+    let (new_at, txt_reg) = (0..oi)
+        .rev()
+        .find_map(|i| match code.functions[fi].ops[i] {
+            Opcode::New { dst } if code.functions[fi].regs[dst.0 as usize] == text_t => {
+                Some((i, dst))
+            }
+            _ => None,
+        })
+        .context("New TextFixed not found before get_unitClass")?;
+    let ctor_at = (new_at..oi)
+        .find(|&i| {
+            matches!(code.functions[fi].ops[i],
+                Opcode::Call2 { fun, arg0, .. } if fun == text_ctor && arg0 == txt_reg)
+        })
+        .context("TextFixed constructor call not found")?;
+
+    let tip_fn = add_class_tip_function(code, cls_t, dbg_file)?;
+    let f = &mut code.functions[fi];
+    let void_reg = Reg(f
+        .regs
+        .iter()
+        .position(|t| t.is_void())
+        .context("no void register")? as u32);
+    let Opcode::Call2 {
+        arg1: parent_reg, ..
+    } = f.ops[ctor_at]
+    else {
+        unreachable!()
+    };
+    f.regs.push(elem_t);
+    let elem_reg = Reg((f.regs.len() - 1) as u32);
+    f.regs.push(tip_field_t);
+    let closure_reg = Reg((f.regs.len() - 1) as u32);
+
+    // Later edits first so earlier indices stay valid.
+    insert_ops(
+        f,
+        oi + 1,
+        vec![
+            Opcode::InstanceClosure {
+                dst: closure_reg,
+                fun: tip_fn,
+                obj: cls_reg,
+            },
+            Opcode::SetField {
+                obj: elem_reg,
+                field: tip_field,
+                src: closure_reg,
+            },
+        ],
+    );
+    if let Opcode::Call2 { arg1, .. } = &mut f.ops[ctor_at] {
+        *arg1 = elem_reg;
+    }
+    // Right before the TextFixed constructor call: the parent register is loaded
+    // between `New TextFixed` and the call, so any earlier point would see a stale value.
+    insert_ops(
+        f,
+        ctor_at,
+        vec![
+            Opcode::New { dst: elem_reg },
+            Opcode::Call2 {
+                dst: void_reg,
+                fun: elem_ctor,
+                arg0: elem_reg,
+                arg1: parent_reg,
+            },
+        ],
+    );
+    eprintln!(
+        "patched StartChoice preview fn@{}: unit line Element wrapper at op {}, class tip after op {} (class reg {}, text reg {}, parent reg {}), tip fn@{}",
+        f.findex.0, ctor_at, oi + 2, cls_reg.0, txt_reg.0, parent_reg.0, tip_fn.0
     );
     Ok(())
 }
