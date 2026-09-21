@@ -1,4 +1,8 @@
-# wartales-tips
+# wartales-tips (patcher/)
+
+The Rust bytecode patcher of wartales-mp. It lives in `patcher/` of this
+repository (crate and library name stay `wartales-tips` / `wartales_tips`);
+`shim\build.ps1` builds it and links it into `winmm.dll`.
 
 Tooltips on the Wartales new-game **start choice** screen. Hover an item in the
 starting-troop preview to see the game's own item tooltip; hover a unit line
@@ -22,20 +26,23 @@ primary-target choice and AI target selection still use the original
 
 Two ways, pick one:
 
-1. **Bundled in [wartales-mp](https://github.com/UberMorgott/Wartales-Mod-wartales-mp)**
-   (recommended): the co-op mod's `winmm.dll` links this patcher and applies it
+1. **Bundled in wartales-mp** (recommended, see the [top-level README](../README.md)):
+   the co-op mod's `winmm.dll` links this patcher and applies it
    to the copy of the bytecode it already hands the game. Nothing in the game
    folder is modified. If the game build differs, the tooltips are silently
    skipped and everything else keeps working (`shim.log`: `tips: not applied`).
-2. **Standalone** (`dist\`): run `install.cmd`. It finds the Steam install, keeps
-   `hlboot.dat.orig` / `sdlboot.dat.orig` backups and writes the patched files.
+2. **Standalone** (`patcher\dist\`, next to a built `wartales-tips.exe`): run
+   `install.cmd`. It finds the Steam install, keeps `hlboot.dat.orig` / `sdlboot.dat.orig` backups and writes the patched files.
    `uninstall.cmd` restores the backups. Re-run `install.cmd` after a game update.
 
 ## Build
 
+From `patcher\` (`..\shim\build.ps1` runs the gnu-target build itself;
+override the location with `-PatcherDir`):
+
 ```powershell
 cargo build --release                                   # wartales-tips.exe (CLI)
-cargo build --release --target x86_64-pc-windows-gnu    # libwartales_tips.a for the mp DLL
+cargo build --release --target x86_64-pc-windows-gnu    # libwartales_tips.a for winmm.dll
 .\target\release\wartales-tips.exe patch <in.dat> <out.dat>
 .\target\release\wartales-tips.exe inspect <in.dat> ui.comp.Element
 ```

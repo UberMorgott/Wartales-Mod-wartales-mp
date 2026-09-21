@@ -47,6 +47,6 @@
 
 [Техническое описание и сборка](docs/TECHNICAL.ru.md) · [Лицензия CC BY-NC 4.0](LICENSE)
 
-Код и документация проекта: Copyright (c) 2026 UberMorgott, CC BY-NC 4.0. Сторонние компоненты сохраняют свои лицензии, в том числе [MinHook](shim/minhook/LICENSE.txt).
+Код и документация проекта: Copyright (c) 2026 UberMorgott, CC BY-NC 4.0. Сторонние компоненты сохраняют свои лицензии, в том числе [MinHook](shim/minhook/LICENSE.txt) и [hlbc](patcher/vendor/NOTICE.md).
 
 Неофициальный мод, не связанный с Shiro Games или Valve.

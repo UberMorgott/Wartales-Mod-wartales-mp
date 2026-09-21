@@ -12,15 +12,16 @@
 #
 # The expected bytecode image is computed inside shimcheck: the needle patches
 # from hlpatch.h, then the same wartales-tips library the DLL was linked with
-# (-TipsLib, default: the build output under -TipsRepo).
+# (-TipsLib, default: the build output under -PatcherDir, i.e. patcher\).
 #
-#   .\shim\check.ps1 [-OutDir <path>] [-Hlboot <path to hlboot.dat>] [-TipsRepo <path>] [-TipsLib <path to libwartales_tips.a>]
+#   .\shim\check.ps1 [-OutDir <path>] [-Hlboot <path to hlboot.dat>] [-PatcherDir <path>] [-TipsLib <path to libwartales_tips.a>]
 
 [CmdletBinding()]
 param(
     [string]$OutDir = (Join-Path $PSScriptRoot '..\dist'),
     [string]$Hlboot = 'D:\Steam\steamapps\common\Wartales\hlboot.dat',
-    [string]$TipsRepo = (Join-Path $PSScriptRoot '..\..\tips'),
+    [Alias('TipsRepo')]
+    [string]$PatcherDir = (Join-Path $PSScriptRoot '..\patcher'),
     [string]$TipsLib = ''
 )
 
@@ -31,7 +32,7 @@ $OutDir = (Resolve-Path $OutDir).Path
 $dll = Join-Path $OutDir 'winmm.dll'
 if (-not (Test-Path -LiteralPath $dll)) { throw "missing $dll (run shim\build.ps1 first)" }
 if (-not (Test-Path -LiteralPath $Hlboot)) { throw "missing $Hlboot" }
-if (-not $TipsLib) { $TipsLib = Join-Path $TipsRepo 'target\x86_64-pc-windows-gnu\release\libwartales_tips.a' }
+if (-not $TipsLib) { $TipsLib = Join-Path $PatcherDir 'target\x86_64-pc-windows-gnu\release\libwartales_tips.a' }
 if (-not (Test-Path -LiteralPath $TipsLib)) { throw "missing $TipsLib (run shim\build.ps1 first, or pass -TipsLib)" }
 $TipsLib = (Resolve-Path $TipsLib).Path
 $tipsLinkLibs = @('-lntdll', '-luserenv', '-ldbghelp')

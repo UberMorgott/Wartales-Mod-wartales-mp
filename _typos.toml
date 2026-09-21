@@ -6,3 +6,7 @@
 Pn = "Pn"
 # "Crockford look-alikes": the plural of "look-alike", split after the hyphen.
 alikes = "alikes"
+
+[files]
+# Vendored hlbc (third-party, MIT): re-vendoring would undo any fix.
+extend-exclude = ["patcher/vendor/"]

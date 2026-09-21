@@ -254,8 +254,8 @@ needs no patch for it.
    `%LOCALAPPDATA%`, never to the file in the game folder.
 
    The same copy is then run through **wartales-tips**, a Rust bytecode patcher
-   linked statically into `winmm.dll` (source: the sibling `tips` repository,
-   `E:\DEV\Wartales\tips`, built by `shim\build.ps1` via
+   linked statically into `winmm.dll` (source: `patcher/` in this repository,
+   built by `shim\build.ps1` via
    `cargo build --release --target x86_64-pc-windows-gnu`). Unlike the eight
    byte patches it is structural: it inserts opcodes and appends a function and
    a type, so the copy grows, and the result gives the items in the new-game
@@ -310,7 +310,18 @@ The full design is in [DESIGN.md](../DESIGN.md) (Russian).
 
 ## Building
 
-Windows, with `go`, `gcc` and `objcopy` on `PATH`:
+Project layout:
+
+- `cmd/`, `internal/`, `tools/` -- the Go launcher/helper (`wartales-mp.exe`)
+  and the build-time generators (`gendef`, `hlpatchgen`).
+- `shim/` -- the C proxy DLL (`winmm.dll`) with vendored MinHook, and the
+  `check.ps1` test harness.
+- `patcher/` -- the Rust bytecode patcher (crate `wartales-tips`, vendored
+  `hlbc`), linked into the DLL as `libwartales_tips.a`; see
+  [patcher/README.md](../patcher/README.md).
+
+Windows, with `go`, `gcc`, `objcopy` and `cargo` (target
+`x86_64-pc-windows-gnu`) on `PATH`:
 
 ```powershell
 .\shim\build.ps1            # unstripped, unpacked -- for development/debugging
@@ -355,7 +366,9 @@ read.
 CC BY-NC 4.0 — see [LICENSE](../LICENSE). Copyright (c) 2026 UberMorgott.
 
 MinHook, vendored under `shim/minhook`, is BSD-2-Clause and carries its own
-copyright; see the headers in that directory.
+copyright; see the headers in that directory. hlbc, vendored under
+`patcher/vendor`, is MIT, Copyright (c) Guillaume Anthouard; see
+`patcher/vendor/NOTICE.md`.
 
 Wartales is a trademark of Shiro Games. This project is unaffiliated with and
 unendorsed by Shiro Games or Valve.

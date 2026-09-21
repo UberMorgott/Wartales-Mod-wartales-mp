@@ -1,4 +1,4 @@
-// tips.h: the C ABI of wartales-tips (E:\DEV\Wartales\tips, Rust), linked
+// tips.h: the C ABI of wartales-tips (patcher/ in this repo, Rust), linked
 // statically into winmm.dll. It rewrites the HashLink bytecode structurally
 // (inserts opcodes, appends a function and a type) so the items in the
 // new-game starting-troop preview get hover tooltips. The output image is a

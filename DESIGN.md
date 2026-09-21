@@ -307,7 +307,7 @@ Windows ищет неизвестную (не-KnownDLL) библиотеку в 
 | запуск ядра | извлекает вшитый `wartales-mp.exe` в `%LOCALAPPDATA%\wartales-mp\` (только если файла нет или сборка отличается по хэшу) и стартует его скрыто; тот сам следит за PID игры и выходит вместе с ней |
 
 Поверх байтовых патчей та же копия прогоняется через `wartales-tips` — Rust-патчер байткода
-(`E:\DEV\Wartales\tips`, C ABI `wartales_tips_patch`/`wartales_tips_free` в `shim/proxy/tips.h`),
+(`patcher/` в этом репозитории, C ABI `wartales_tips_patch`/`wartales_tips_free` в `shim/proxy/tips.h`),
 статически влинкованный в `winmm.dll` (`libwartales_tips.a`, `cargo build --release --target
 x86_64-pc-windows-gnu` из `shim\build.ps1`). Патч структурный — вставляет опкоды, добавляет функцию
 и тип, размер копии меняется, — и даёт предметам в превью стартового отряда всплывающие
@@ -361,7 +361,7 @@ false, available false, read null, причина в `shim.log` и `sdr.status` 
 | `hlpatchgen` читает `internal/hlpatch` | `shim/proxy/hlpatch.h` (таблица байт-патчей) |
 | `go build` | `wartales-mp.exe` — финальное ядро |
 | `objcopy -I binary -O pe-x86-64` оборачивает exe | `embed.o` — линкуемый блоб |
-| `cargo build --release --target x86_64-pc-windows-gnu` в `..\tips` (`-TipsRepo`) | `libwartales_tips.a` |
+| `cargo build --release --target x86_64-pc-windows-gnu` в `patcher\` (`-PatcherDir`) | `libwartales_tips.a` |
 | `gcc -shared` линкует `proxy.c` + `sdr.c` + `bridge.c` + thunk'и + MinHook + `embed.o` + `libwartales_tips.a` + `.def` (`-lws2_32 -lntdll -luserenv -ldbghelp`) | `winmm.dll` |
 
 Единственный файл для папки игры — `dist\winmm.dll`. Обновление игры в Steam его не тронет

@@ -241,8 +241,8 @@ round-trip и отвергает любой испорченный символ.
    применяются к копии в `%LOCALAPPDATA%`, файл в папке игры не трогается.
 
    Затем та же копия прогоняется через **wartales-tips** — патчер байткода на
-   Rust, статически влинкованный в `winmm.dll` (исходники: соседний репозиторий
-   `tips`, `E:\DEV\Wartales\tips`; собирается из `shim\build.ps1` командой
+   Rust, статически влинкованный в `winmm.dll` (исходники: `patcher/` в этом
+   репозитории; собирается из `shim\build.ps1` командой
    `cargo build --release --target x86_64-pc-windows-gnu`). В отличие от восьми
    байтовых патчей он структурный: вставляет опкоды и добавляет функцию и тип,
    поэтому копия растёт, а предметы в превью стартового отряда при создании
@@ -297,7 +297,18 @@ round-trip и отвергает любой испорченный символ.
 
 ## Сборка
 
-Windows, в `PATH` нужны `go`, `gcc` и `objcopy`:
+Структура проекта:
+
+- `cmd/`, `internal/`, `tools/` -- лаунчер/помощник на Go (`wartales-mp.exe`)
+  и генераторы времени сборки (`gendef`, `hlpatchgen`).
+- `shim/` -- прокси-DLL на C (`winmm.dll`) с вендоренным MinHook и тестовый
+  стенд `check.ps1`.
+- `patcher/` -- патчер байткода на Rust (крейт `wartales-tips`, вендоренный
+  `hlbc`), влинкован в DLL как `libwartales_tips.a`; см.
+  [patcher/README.md](../patcher/README.md).
+
+Windows, в `PATH` нужны `go`, `gcc`, `objcopy` и `cargo` (таргет
+`x86_64-pc-windows-gnu`):
 
 ```powershell
 .\shim\build.ps1            # нестрипнутый, без упаковки -- для разработки/отладки
@@ -339,7 +350,9 @@ SDR-транспорт и мост: с подставной loopback-`steam_api6
 CC BY-NC 4.0 — см. [LICENSE](../LICENSE). Copyright (c) 2026 UberMorgott.
 
 MinHook, вендоренный в `shim/minhook`, распространяется под BSD-2-Clause и имеет
-собственный копирайт; см. заголовки файлов в этом каталоге.
+собственный копирайт; см. заголовки файлов в этом каталоге. hlbc, вендоренный
+в `patcher/vendor`, распространяется под MIT, Copyright (c) Guillaume Anthouard;
+см. `patcher/vendor/NOTICE.md`.
 
 Wartales — торговая марка Shiro Games. Проект не связан с Shiro Games или Valve
 и ими не одобрен.

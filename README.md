@@ -47,6 +47,6 @@ Antivirus software may flag the DLL. If that happens, include the antivirus name
 
 [Technical notes and build instructions](docs/TECHNICAL.md) · [CC BY-NC 4.0 licence](LICENSE)
 
-Project code and documentation: Copyright (c) 2026 UberMorgott, CC BY-NC 4.0. Third-party components retain their own licences, including [MinHook](shim/minhook/LICENSE.txt).
+Project code and documentation: Copyright (c) 2026 UberMorgott, CC BY-NC 4.0. Third-party components retain their own licences, including [MinHook](shim/minhook/LICENSE.txt) and [hlbc](patcher/vendor/NOTICE.md).
 
 This is an unofficial mod, not affiliated with Shiro Games or Valve.

@@ -10,12 +10,12 @@
 #      hlpatchgen (internal/hlpatch)    -> proxy\hlpatch.h
 #   2. go build                          -> wartales-mp.exe   (the final helper)
 #   3. objcopy wraps that exe            -> embed.o           (a linkable blob)
-#   3b. cargo builds wartales-tips (Rust) -> libwartales_tips.a (structural
+#   3b. cargo builds patcher\ (Rust crate wartales-tips) -> libwartales_tips.a (structural
 #       bytecode patch: hover tooltips in the starting-troop preview)
 #   4. gcc links proxy.c + stubs + MinHook + embed.o + libwartales_tips.a + .def -> winmm.dll
 # The single file to drop into the game folder is <OutDir>\winmm.dll.
 #
-#   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-TipsRepo <path>] [-Release]
+#   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-PatcherDir <path>] [-Release]
 #
 # -Release produces the artifact uploaded to GitHub: symbols are stripped
 # (-ldflags "-s -w" for the exe, -s -Wl,--strip-all for the DLL) and BOTH stages
@@ -28,7 +28,8 @@
 param(
     [string]$OutDir    = (Join-Path $PSScriptRoot '..\dist'),
     [string]$SystemDll = (Join-Path $env:WINDIR 'System32\winmm.dll'),
-    [string]$TipsRepo  = (Join-Path $PSScriptRoot '..\..\tips'),
+    [Alias('TipsRepo')]
+    [string]$PatcherDir = (Join-Path $PSScriptRoot '..\patcher'),
     [switch]$Release
 )
 
@@ -114,17 +115,17 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'objcopy failed' }
 } finally { Pop-Location }
 
-# 3b. Build the wartales-tips static library (Rust, windows-gnu target so it
+# 3b. Build the wartales-tips static library from patcher\ (Rust, windows-gnu target so it
 #     links with MinGW gcc). Its C ABI is declared in proxy\tips.h; the extra
 #     system libs are what the Rust std runtime pulls in.
-if (-not (Test-Path -LiteralPath (Join-Path $TipsRepo 'Cargo.toml'))) { throw "missing wartales-tips repo at $TipsRepo (Cargo.toml not found; pass -TipsRepo)" }
-$TipsRepo = (Resolve-Path $TipsRepo).Path
-Push-Location $TipsRepo
+if (-not (Test-Path -LiteralPath (Join-Path $PatcherDir 'Cargo.toml'))) { throw "missing wartales-tips crate at $PatcherDir (Cargo.toml not found; pass -PatcherDir)" }
+$PatcherDir = (Resolve-Path $PatcherDir).Path
+Push-Location $PatcherDir
 try {
     & cargo build --release --target x86_64-pc-windows-gnu
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed for wartales-tips' }
 } finally { Pop-Location }
-$tipsLib = Join-Path $TipsRepo 'target\x86_64-pc-windows-gnu\release\libwartales_tips.a'
+$tipsLib = Join-Path $PatcherDir 'target\x86_64-pc-windows-gnu\release\libwartales_tips.a'
 if (-not (Test-Path -LiteralPath $tipsLib)) { throw "cargo build produced no $tipsLib" }
 $tipsLinkLibs = @('-lntdll', '-luserenv', '-ldbghelp')
 Write-Host "wartales-tips: $tipsLib"
