@@ -2,7 +2,10 @@
 //
 // wartales-tips: patches Wartales' HashLink bytecode (hlboot.dat) so the item
 // icons shown on the new-game "start choice" preview carry the game's own
-// ItemTip tooltip on hover.
+// ItemTip tooltip on hover, and so enemy area attacks also hit the caster's
+// allies (see friendly_fire.rs).
+
+mod friendly_fire;
 
 use anyhow::{bail, Context, Result};
 use hlbc::opcodes::Opcode;
@@ -18,6 +21,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     let mut code = Bytecode::deserialize(&mut Cursor::new(image)).context("read bytecode")?;
     patch_start_choice_item_tips(&mut code)?;
     patch_start_choice_unit_tips(&mut code)?;
+    friendly_fire::patch_enemy_area_friendly_fire(&mut code).context("friendly fire")?;
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
@@ -228,6 +232,34 @@ fn insert_ops(f: &mut Function, at: usize, new_ops: Vec<Opcode>) {
     }
 }
 
+/// Absolute op indices that op `i` of `f` can jump to (empty for non-jumps).
+fn jump_targets(f: &Function, i: usize) -> Vec<usize> {
+    let offsets: Vec<i32> = match &f.ops[i] {
+        Opcode::JTrue { offset, .. }
+        | Opcode::JFalse { offset, .. }
+        | Opcode::JNull { offset, .. }
+        | Opcode::JNotNull { offset, .. }
+        | Opcode::JSLt { offset, .. }
+        | Opcode::JSGte { offset, .. }
+        | Opcode::JSGt { offset, .. }
+        | Opcode::JSLte { offset, .. }
+        | Opcode::JULt { offset, .. }
+        | Opcode::JUGte { offset, .. }
+        | Opcode::JNotLt { offset, .. }
+        | Opcode::JNotGte { offset, .. }
+        | Opcode::JEq { offset, .. }
+        | Opcode::JNotEq { offset, .. }
+        | Opcode::JAlways { offset }
+        | Opcode::Trap { offset, .. } => vec![*offset],
+        Opcode::Switch { offsets, end, .. } => offsets.iter().chain([end]).copied().collect(),
+        _ => vec![],
+    };
+    offsets
+        .into_iter()
+        .map(|o| (i as i64 + 1 + o as i64) as usize)
+        .collect()
+}
+
 /// New function `(ui.comp.ItemIcon) -> h2d.Object { return new ItemTip(this.item, null, null, null); }`.
 /// Bound with InstanceClosure it becomes the `() -> h2d.Object` that `Element.getTipContent` expects.
 fn add_icon_tip_function(code: &mut Bytecode, dbg_file: usize) -> Result<RefFun> {
@@ -417,6 +449,9 @@ fn resolve_jumps(ops: &mut [Opcode], targets: &[(usize, usize)]) {
         match &mut ops[i] {
             Opcode::JNull { offset, .. }
             | Opcode::JSGte { offset, .. }
+            | Opcode::JEq { offset, .. }
+            | Opcode::JNotEq { offset, .. }
+            | Opcode::JFalse { offset, .. }
             | Opcode::JAlways { offset } => *offset = off,
             _ => unreachable!("not a jump"),
         }

@@ -9,6 +9,15 @@ tooltip system onto the preview's `ItemIcon` and `TextFixed` children and adds t
 small functions (`ItemTip(icon.item)`, a vertical `Flow` of `SkillTip` per
 `unitClass.baseSkills` entry) to the game's HashLink bytecode (`hlboot.dat`).
 
+It also carries one gameplay patch, **enemy friendly fire**: an area attack
+cast by a non-player unit also hits that unit's own allies (never the caster),
+the way player area attacks already work. Only the area loop of
+`Skill.gatherTargets` changes (`src/friendly_fire.rs`): for a skill whose
+`allowedTargets` is Enemies it passes `checkValid = false` to
+`SkillEval.addTarget` for every targetable unit other than the caster, so
+primary-target choice and AI target selection still use the original
+`Unit.isValidTarget`. Always on, no toggle.
+
 ## Install
 
 Two ways, pick one:
