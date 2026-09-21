@@ -5,8 +5,10 @@
 // would (DllMain runs, hooks go in), then opens the retail hlboot.dat the way
 // hashlink's load_code does (_wfopen + fread through ucrtbase) and the way a
 // direct kernel32 import would (CreateFileW + chunked ReadFile), and asserts
-// that what comes back differs from the on-disk original in exactly the bytes
-// hlpatch.h names and nowhere else. It also checks the fallback (a file whose
+// that what comes back equals byte-for-byte the expected image: the on-disk
+// original with exactly the bytes hlpatch.h names changed, then transformed by
+// wartales_tips_patch (the same static library the DLL links, so the
+// structural tooltip patch is asserted too). It also checks the fallback (a file whose
 // signature is broken comes back untouched), that write opens are left alone,
 // and that the game folder is not modified.
 //
@@ -40,6 +42,7 @@
 #include <ws2tcpip.h>
 
 #include "../proxy/hlpatch.h"
+#include "../proxy/tips.h"
 #include "fake_steam.h"
 
 static int failures;
@@ -766,8 +769,10 @@ int main(int argc, char **argv) {
 	wchar_t dll[MAX_PATH * 2], game[MAX_PATH * 2], scratch[MAX_PATH * 2];
 	wchar_t game_dir[MAX_PATH * 2], copy[MAX_PATH * 2], log[MAX_PATH * 2];
 	wchar_t fake_dir[MAX_PATH * 2], fake[MAX_PATH * 2];
-	unsigned char *orig, *exp, *got, *fake_img;
-	size_t n, m;
+	unsigned char *orig, *needled, *got, *fake_img;
+	uint8_t *exp = NULL;
+	uint8_t tips_err[256];
+	size_t n, m, en = 0;
 	long at[HL_PATCH_COUNT];
 	unsigned i;
 	unsigned long long snap_before, snap_after;
@@ -804,16 +809,28 @@ int main(int argc, char **argv) {
 	if (orig == NULL)
 		return 1;
 	printf("      original: %lu bytes\n", (unsigned long)n);
-	exp = (unsigned char *)malloc(n);
-	memcpy(exp, orig, n);
+	needled = (unsigned char *)malloc(n);
+	memcpy(needled, orig, n);
 	for (i = 0; i < HL_PATCH_COUNT; i++) {
 		long p = find_once(orig, n, hl_patches[i].needle, hl_patches[i].len);
 		at[i] = p < 0 ? -1 : p + (long)hl_patches[i].index;
 		if (at[i] >= 0)
-			exp[at[i]] = hl_patches[i].to;
+			needled[at[i]] = hl_patches[i].to;
 		printf("      patch %u expected at offset %ld\n", i, at[i]);
 		check(at[i] >= 0 && orig[at[i]] == hl_patches[i].from, "signature found exactly once in the original");
 	}
+	check(diff_is_exactly(orig, needled, n, at, "needle stage"), "needle stage differs from the original in exactly the patched bytes");
+	// The expected image is what the DLL must serve: the needle-patched image
+	// run through the very same wartales-tips library it links.
+	tips_err[0] = 0;
+	if (wartales_tips_patch(needled, n, &exp, &en, tips_err, sizeof(tips_err)) != 0 || exp == NULL) {
+		tips_err[sizeof(tips_err) - 1] = 0;
+		printf("      wartales_tips_patch: %s\n", (const char *)tips_err);
+		check(0, "wartales_tips_patch accepts the needle-patched original");
+		return 1;
+	}
+	printf("      expected: %lu bytes (needle stage %lu -> tips %lu)\n", (unsigned long)en, (unsigned long)n, (unsigned long)en);
+	check(en != n && memcmp(exp, needled, n < en ? n : en) != 0, "tips stage is a structural change (size and content differ)");
 	snap_before = dir_snapshot(game_dir, &count_before);
 
 	// 2. Isolate: scratch LOCALAPPDATA, no helper launch.
@@ -855,12 +872,14 @@ int main(int argc, char **argv) {
 
 	// 4. The hashlink way: _wfopen + fread via ucrtbase.
 	got = read_crt(game, &m);
-	check(got != NULL && m == n, "_wfopen/fread returns a full-size image");
-	check(got != NULL && m == n && diff_is_exactly(orig, got, n, at, "fread"), "fread image differs in exactly the patched bytes");
-	check(got != NULL && m == n && memcmp(got, exp, n) == 0, "fread image equals the expected patched image");
+	printf("      fread: %lu bytes\n", (unsigned long)m);
+	check(got != NULL && m == en, "_wfopen/fread returns the expected image size");
+	check(got != NULL && m == en && memcmp(got, exp, en) == 0, "fread image equals the expected patched image (needles + tips) byte-for-byte");
 	free(got);
 	check(log_contains(log, "bytecode: copy missing, regenerating") && log_contains(log, "bytecode: copy written"),
 		"shim.log records the copy being generated");
+	check(log_contains(log, "tips: patched image "), "shim.log records the tips stage");
+	check(!log_contains(log, "tips: not applied"), "the tips stage did not fall back");
 
 	// 5. The kernel32 way: CreateFileW + 64 KB ReadFile chunks, handle identity.
 	h = CreateFileW(game, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
@@ -870,19 +889,19 @@ int main(int argc, char **argv) {
 	if (h != INVALID_HANDLE_VALUE)
 		CloseHandle(h);
 	got = read_raw(game, &m);
-	check(got != NULL && m == n && memcmp(got, exp, n) == 0, "chunked ReadFile image equals the expected patched image");
+	check(got != NULL && m == en && memcmp(got, exp, en) == 0, "chunked ReadFile image equals the expected patched image");
 	free(got);
 	check(log_contains(log, "bytecode: existing copy verified byte-for-byte, reused"), "shim.log records the copy being reused");
 
 	// 6. Relative name with the game folder as cwd (how Steam launches it).
 	check(SetCurrentDirectoryW(game_dir), "chdir to the game folder");
 	got = read_crt(L"hlboot.dat", &m);
-	check(got != NULL && m == n && memcmp(got, exp, n) == 0, "relative \"hlboot.dat\" is redirected too");
+	check(got != NULL && m == en && memcmp(got, exp, en) == 0, "relative \"hlboot.dat\" is redirected too");
 	free(got);
 
 	// 7. Our own copy, opened by its full path, is passed through (no recursion).
 	got = read_raw(copy, &m);
-	check(got != NULL && m == n && memcmp(got, exp, n) == 0, "the copy on disk is the expected patched image");
+	check(got != NULL && m == en && memcmp(got, exp, en) == 0, "the copy on disk is the expected patched image");
 	free(got);
 
 	// 8. Fallback: a bytecode whose signature is gone is served untouched.
@@ -912,7 +931,7 @@ int main(int argc, char **argv) {
 	check(log_contains(log, "signature missing or ambiguous, image left untouched") &&
 			log_contains(log, "handing out the untouched original"), "shim.log records the fallback");
 	got = read_raw(copy, &m);
-	check(got != NULL && m == n && memcmp(got, exp, n) == 0, "the good copy was not clobbered by the fallback");
+	check(got != NULL && m == en && memcmp(got, exp, en) == 0, "the good copy was not clobbered by the fallback");
 	free(got);
 
 	// 9. A write open is never redirected.
@@ -937,7 +956,8 @@ int main(int argc, char **argv) {
 	print_log(log);
 	printf("%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
 	free(orig);
-	free(exp);
+	free(needled);
+	wartales_tips_free(exp, en);
 	free(fake_img);
 	return failures == 0 ? 0 : 1;
 }

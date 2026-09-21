@@ -14,6 +14,7 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 - Keeps familiar Steam invitations. A Steam lobby is created automatically with the in-game room.
 - Fixes identified reconnection errors and a crash caused by waiting in the lobby.
 - Lets you start even if a player has no human character assigned. For example, four players can use a modded starting party of three humans and one animal.
+- Adds hover tooltips to the items shown in the new-game starting-troop preview (bundled `wartales-tips` patch). If the game build differs, this part silently stays off and everything else keeps working.
 
 ## Install
 

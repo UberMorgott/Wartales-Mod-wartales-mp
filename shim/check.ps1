@@ -10,12 +10,18 @@
 # shim must fail closed and say why). The game folder is only read;
 # LOCALAPPDATA is redirected to <OutDir>\check-localappdata for the duration.
 #
-#   .\shim\check.ps1 [-OutDir <path>] [-Hlboot <path to hlboot.dat>]
+# The expected bytecode image is computed inside shimcheck: the needle patches
+# from hlpatch.h, then the same wartales-tips library the DLL was linked with
+# (-TipsLib, default: the build output under -TipsRepo).
+#
+#   .\shim\check.ps1 [-OutDir <path>] [-Hlboot <path to hlboot.dat>] [-TipsRepo <path>] [-TipsLib <path to libwartales_tips.a>]
 
 [CmdletBinding()]
 param(
     [string]$OutDir = (Join-Path $PSScriptRoot '..\dist'),
-    [string]$Hlboot = 'D:\Steam\steamapps\common\Wartales\hlboot.dat'
+    [string]$Hlboot = 'D:\Steam\steamapps\common\Wartales\hlboot.dat',
+    [string]$TipsRepo = (Join-Path $PSScriptRoot '..\..\tips'),
+    [string]$TipsLib = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +31,10 @@ $OutDir = (Resolve-Path $OutDir).Path
 $dll = Join-Path $OutDir 'winmm.dll'
 if (-not (Test-Path -LiteralPath $dll)) { throw "missing $dll (run shim\build.ps1 first)" }
 if (-not (Test-Path -LiteralPath $Hlboot)) { throw "missing $Hlboot" }
+if (-not $TipsLib) { $TipsLib = Join-Path $TipsRepo 'target\x86_64-pc-windows-gnu\release\libwartales_tips.a' }
+if (-not (Test-Path -LiteralPath $TipsLib)) { throw "missing $TipsLib (run shim\build.ps1 first, or pass -TipsLib)" }
+$TipsLib = (Resolve-Path $TipsLib).Path
+$tipsLinkLibs = @('-lntdll', '-luserenv', '-ldbghelp')
 
 $work = Join-Path $OutDir 'obj'
 New-Item -ItemType Directory -Force $work | Out-Null
@@ -33,7 +43,7 @@ New-Item -ItemType Directory -Force $fakes | Out-Null
 $src = Join-Path $PSScriptRoot 'check'
 
 $exe = Join-Path $work 'shimcheck.exe'
-& $gcc -O2 -o $exe (Join-Path $src 'shimcheck.c') -Wall -Wextra -static-libgcc -lws2_32
+& $gcc -O2 -o $exe (Join-Path $src 'shimcheck.c') $TipsLib @tipsLinkLibs -Wall -Wextra -static-libgcc -lws2_32
 if ($LASTEXITCODE -ne 0) { throw 'gcc failed for shimcheck.exe' }
 
 # The stand-ins. steam.hdll is built without optimisation so its six identical

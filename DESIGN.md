@@ -306,6 +306,16 @@ Windows ищет неизвестную (не-KnownDLL) библиотеку в 
 | лог | `%LOCALAPPDATA%\wartales-mp\shim.log`: attach, каждый хук (адрес или причина отказа), каждое открытие байткода (путь, размер, fnv1a, смещения патчей, копия reused/written/fallback), запуск ядра, состояние SDR (READY / причина отказа, первый пакет, сессии, счётчики при close). Каждая строка — свой open/append/close |
 | запуск ядра | извлекает вшитый `wartales-mp.exe` в `%LOCALAPPDATA%\wartales-mp\` (только если файла нет или сборка отличается по хэшу) и стартует его скрыто; тот сам следит за PID игры и выходит вместе с ней |
 
+Поверх байтовых патчей та же копия прогоняется через `wartales-tips` — Rust-патчер байткода
+(`E:\DEV\Wartales\tips`, C ABI `wartales_tips_patch`/`wartales_tips_free` в `shim/proxy/tips.h`),
+статически влинкованный в `winmm.dll` (`libwartales_tips.a`, `cargo build --release --target
+x86_64-pc-windows-gnu` из `shim\build.ps1`). Патч структурный — вставляет опкоды, добавляет функцию
+и тип, размер копии меняется, — и даёт предметам в превью стартового отряда всплывающие
+подсказки. Побайтная сверка копии идёт уже с `tips(patch(оригинал))`; если `wartales-tips`
+отказал (другая сборка), в `shim.log` пишется `tips: not applied: <причина>`, а копия остаётся
+байт-патченной — редирект никогда не проваливается из-за подсказок. `shim\check.ps1` линкует
+`shimcheck.exe` с той же `.a` и требует побайтного равенства выданного образа с ожидаемым.
+
 Байткод резолвит нативы через указатели `hlp_<name>` при загрузке модуля, а не через IAT,
 поэтому патч IAT эти две функции не поймал бы — нужен инлайн-хук по телу функции. Хуки ставит
 MinHook (BSD-2, вендорится в `shim/minhook`): `MH_CreateHook` даёт трамплин для вызова оригинала.
@@ -347,7 +357,8 @@ false, available false, read null, причина в `shim.log` и `sdr.status` 
 | `hlpatchgen` читает `internal/hlpatch` | `shim/proxy/hlpatch.h` (таблица байт-патчей) |
 | `go build` | `wartales-mp.exe` — финальное ядро |
 | `objcopy -I binary -O pe-x86-64` оборачивает exe | `embed.o` — линкуемый блоб |
-| `gcc -shared` линкует `proxy.c` + `sdr.c` + `bridge.c` + thunk'и + MinHook + `embed.o` + `.def` (`-lws2_32`) | `winmm.dll` |
+| `cargo build --release --target x86_64-pc-windows-gnu` в `..\tips` (`-TipsRepo`) | `libwartales_tips.a` |
+| `gcc -shared` линкует `proxy.c` + `sdr.c` + `bridge.c` + thunk'и + MinHook + `embed.o` + `libwartales_tips.a` + `.def` (`-lws2_32 -lntdll -luserenv -ldbghelp`) | `winmm.dll` |
 
 Единственный файл для папки игры — `dist\winmm.dll`. Обновление игры в Steam его не тронет
 (это новый файл, а не подмена); чтобы выключить мод, файл просто удаляют — игра возвращается

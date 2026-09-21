@@ -252,6 +252,17 @@ needs no patch for it.
    Units still need owners, and players must finish joining before starting.
    The patches are applied to a copy under
    `%LOCALAPPDATA%`, never to the file in the game folder.
+
+   The same copy is then run through **wartales-tips**, a Rust bytecode patcher
+   linked statically into `winmm.dll` (source: the sibling `tips` repository,
+   `E:\DEV\Wartales\tips`, built by `shim\build.ps1` via
+   `cargo build --release --target x86_64-pc-windows-gnu`). Unlike the eight
+   byte patches it is structural: it inserts opcodes and appends a function and
+   a type, so the copy grows, and the result gives the items in the new-game
+   starting-troop preview hover tooltips. It locates everything by name; if it
+   cannot (another game build), it reports why in `shim.log`
+   (`tips: not applied: …`) and the copy stays the byte-patched image, so the
+   multiplayer part is never affected by it.
 5. **Moves the game's Steam transport onto SDR.** The game's Steam path is
    built on the deprecated `ISteamNetworking` P2P calls in `steam.hdll`. The
    mod hooks those six calls and re-implements them on

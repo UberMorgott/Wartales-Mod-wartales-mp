@@ -10,10 +10,12 @@
 #      hlpatchgen (internal/hlpatch)    -> proxy\hlpatch.h
 #   2. go build                          -> wartales-mp.exe   (the final helper)
 #   3. objcopy wraps that exe            -> embed.o           (a linkable blob)
-#   4. gcc links proxy.c + stubs + MinHook + embed.o + .def -> winmm.dll
+#   3b. cargo builds wartales-tips (Rust) -> libwartales_tips.a (structural
+#       bytecode patch: hover tooltips in the starting-troop preview)
+#   4. gcc links proxy.c + stubs + MinHook + embed.o + libwartales_tips.a + .def -> winmm.dll
 # The single file to drop into the game folder is <OutDir>\winmm.dll.
 #
-#   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-Release]
+#   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-TipsRepo <path>] [-Release]
 #
 # -Release produces the artifact uploaded to GitHub: symbols are stripped
 # (-ldflags "-s -w" for the exe, -s -Wl,--strip-all for the DLL) and BOTH stages
@@ -26,6 +28,7 @@
 param(
     [string]$OutDir    = (Join-Path $PSScriptRoot '..\dist'),
     [string]$SystemDll = (Join-Path $env:WINDIR 'System32\winmm.dll'),
+    [string]$TipsRepo  = (Join-Path $PSScriptRoot '..\..\tips'),
     [switch]$Release
 )
 
@@ -42,6 +45,7 @@ function Assert-Tool([string]$name) {
 $gcc = Assert-Tool gcc
 $objcopy = Assert-Tool objcopy
 $null = Assert-Tool go
+$null = Assert-Tool cargo
 $upx = $null
 if ($Release) { $upx = Assert-Tool upx }
 
@@ -110,7 +114,23 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'objcopy failed' }
 } finally { Pop-Location }
 
-# 4. Link the proxy DLL: our code + generated thunks + MinHook + embedded exe.
+# 3b. Build the wartales-tips static library (Rust, windows-gnu target so it
+#     links with MinGW gcc). Its C ABI is declared in proxy\tips.h; the extra
+#     system libs are what the Rust std runtime pulls in.
+if (-not (Test-Path -LiteralPath (Join-Path $TipsRepo 'Cargo.toml'))) { throw "missing wartales-tips repo at $TipsRepo (Cargo.toml not found; pass -TipsRepo)" }
+$TipsRepo = (Resolve-Path $TipsRepo).Path
+Push-Location $TipsRepo
+try {
+    & cargo build --release --target x86_64-pc-windows-gnu
+    if ($LASTEXITCODE -ne 0) { throw 'cargo build failed for wartales-tips' }
+} finally { Pop-Location }
+$tipsLib = Join-Path $TipsRepo 'target\x86_64-pc-windows-gnu\release\libwartales_tips.a'
+if (-not (Test-Path -LiteralPath $tipsLib)) { throw "cargo build produced no $tipsLib" }
+$tipsLinkLibs = @('-lntdll', '-luserenv', '-ldbghelp')
+Write-Host "wartales-tips: $tipsLib"
+
+# 4. Link the proxy DLL: our code + generated thunks + MinHook + embedded exe
+#    + the wartales-tips static library.
 $mhsrc = @(
     (Join-Path $minhook 'src\hook.c')
     (Join-Path $minhook 'src\buffer.c')
@@ -125,6 +145,7 @@ $stripArgs = if ($Release) { @('-s', '-Wl,--strip-all') } else { @() }
 & $gcc -shared -O2 -o $out `
     (Join-Path $PSScriptRoot 'proxy\proxy.c') (Join-Path $PSScriptRoot 'proxy\sdr.c') (Join-Path $PSScriptRoot 'proxy\bridge.c') (Join-Path $PSScriptRoot 'proxy\lobby.c') `
     $stubs $mhsrc $embed $def `
+    $tipsLib @tipsLinkLibs `
     "-I$(Join-Path $minhook 'include')" -DNDEBUG `
     -Wall -Wextra -static-libgcc @stripArgs -lkernel32 -lws2_32
 if ($LASTEXITCODE -ne 0) { throw 'gcc failed for winmm.dll' }

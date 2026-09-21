@@ -66,6 +66,7 @@
 #include "MinHook.h"
 #include "hlpatch.h"
 #include "shim.h"
+#include "tips.h"
 
 // ---------------------------------------------------------------------------
 // Diagnostics: %LOCALAPPDATA%\wartales-mp\shim.log.
@@ -501,11 +502,15 @@ static unsigned long long fnv1a(const unsigned char *p, size_t n) {
 	return h;
 }
 
-// materialise_copy makes sure copy holds exactly patch(source) and reports
-// whether it may be handed out. FALSE means: use the original.
+// materialise_copy makes sure copy holds exactly tips(patch(source)) and
+// reports whether it may be handed out. FALSE means: use the original. The
+// tips stage (wartales-tips, structural) is best effort: if it refuses the
+// image, the copy is the needle-patched image alone.
 static BOOL materialise_copy(const wchar_t *source, const wchar_t *copy) {
 	unsigned char *img, *cur;
-	size_t n, m;
+	uint8_t *tips = NULL;
+	size_t n, m, tips_n = 0;
+	uint8_t reason[256];
 	BOOL ok = FALSE;
 
 	img = read_all(source, &n);
@@ -522,6 +527,18 @@ static BOOL materialise_copy(const wchar_t *source, const wchar_t *copy) {
 	shim_log("bytecode: patched image fnv1a %08lx%08lx", (unsigned long)(fnv1a(img, n) >> 32),
 		(unsigned long)fnv1a(img, n));
 
+	reason[0] = 0;
+	if (wartales_tips_patch(img, n, &tips, &tips_n, reason, sizeof(reason)) == 0 && tips != NULL) {
+		shim_log("tips: patched image %lu -> %lu bytes", (unsigned long)n, (unsigned long)tips_n);
+		free(img);
+		img = tips;
+		n = tips_n;
+	} else {
+		reason[sizeof(reason) - 1] = 0;
+		shim_log("tips: not applied: %s", (const char *)reason);
+		tips = NULL;
+	}
+
 	cur = read_all(copy, &m);
 	if (cur != NULL && m == n && memcmp(cur, img, n) == 0) {
 		shim_log("bytecode: existing copy verified byte-for-byte, reused");
@@ -536,7 +553,10 @@ static BOOL materialise_copy(const wchar_t *source, const wchar_t *copy) {
 		}
 	}
 	free(cur);
-	free(img);
+	if (tips != NULL)
+		wartales_tips_free(tips, tips_n);
+	else
+		free(img);
 	return ok;
 }
 
