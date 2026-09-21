@@ -1,7 +1,6 @@
 package master
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -64,10 +63,8 @@ func TestAutoInviteBeforeBridgeReadyWithoutEndpoint(t *testing.T) {
 		o.Bridge, o.SDRStatus, o.LinkKey = b, b.Status, 0xdeadbeef
 	})
 	host, id := createLobby(t, s, cascadeHostID)
-	defer host.c.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go b.Run(ctx)
+	defer func() { _ = host.c.Close() }()
+	go b.Run(t.Context())
 	invite := lobbyInvite(t, sw)
 	s.lobbies.mu.Lock()
 	mapped := s.lobbies.codes[invite]

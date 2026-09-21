@@ -180,7 +180,7 @@ func TestRedialResetsRemoteStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 	if _, err := second.Write([]byte("second\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -212,9 +212,7 @@ func TestLobbyInviteReplaysLatestAfterConnectAndReconnect(t *testing.T) {
 	b := sdrbridge.New(sw.Add(t, host), log.New(io.Discard, "", 0))
 	b.SetLobbyInvite("OLD")
 	b.SetLobbyInvite("LATEST")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go b.Run(ctx)
+	go b.Run(t.Context())
 	expect := func(want string) {
 		t.Helper()
 		select {
