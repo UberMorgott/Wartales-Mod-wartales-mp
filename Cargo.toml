@@ -1,0 +1,13 @@
+[package]
+name = "wartales-tips"
+version = "0.1.0"
+edition = "2021"
+license = "CC-BY-NC-4.0"
+description = "Patches Wartales hlboot.dat: item/unit tooltips on the start-choice screen"
+
+[dependencies]
+hlbc = { path = "vendor/hlbc", default-features = false }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
