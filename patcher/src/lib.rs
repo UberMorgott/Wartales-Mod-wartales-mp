@@ -154,6 +154,16 @@ fn method<'a>(code: &'a Bytecode, this_t: RefType, name: &str) -> Result<&'a Fun
     Ok(f)
 }
 
+/// The function bound to method `name` in the prototype of class `t` itself.
+fn proto(code: &Bytecode, t: RefType, name: &str) -> Result<RefFun> {
+    obj(code, t)?
+        .protos
+        .iter()
+        .find(|p| s(code, p.name) == name)
+        .map(|p| p.findex)
+        .with_context(|| format!("proto {name} not found on type {}", t.0))
+}
+
 fn fun_args(code: &Bytecode, f: &Function) -> Vec<RefType> {
     f.t.as_fun(code).map(|t| t.args.clone()).unwrap_or_default()
 }
@@ -267,8 +277,20 @@ fn jump_targets(f: &Function, i: usize) -> Vec<usize> {
         .collect()
 }
 
-/// New function `(ui.comp.ItemIcon) -> h2d.Object { return new ItemTip(this.item, null, null, null); }`.
-/// Bound with InstanceClosure it becomes the `() -> h2d.Object` that `Element.getTipContent` expects.
+/// The first type in the pool matching `pred` (primitive types such as Dyn or Bool).
+fn prim_type(code: &Bytecode, what: &str, pred: impl Fn(&Type) -> bool) -> Result<RefType> {
+    code.types
+        .iter()
+        .position(pred)
+        .map(RefType)
+        .with_context(|| format!("{what} type not found"))
+}
+
+/// New function `(ui.comp.ItemIcon) -> h2d.Object`:
+/// `try { return new ItemTip(this.item, null, null, null); } catch (_) { return new h2d.Flow(null); }`.
+/// A tooltip that throws while building is replaced by an empty one instead of
+/// reaching the game's uncaught-exception screen. Bound with InstanceClosure it
+/// becomes the `() -> h2d.Object` that `Element.getTipContent` expects.
 fn add_icon_tip_function(code: &mut Bytecode, dbg_file: usize) -> Result<RefFun> {
     let icon_t = obj_type(code, "ui.comp.ItemIcon")?;
     let tip_t = obj_type(code, "ui.comp.ItemTip")?;
@@ -285,29 +307,50 @@ fn add_icon_tip_function(code: &mut Bytecode, dbg_file: usize) -> Result<RefFun>
     if ctor_args.len() != 5 || ctor_args[1] != item_t {
         bail!("unexpected ItemTip constructor signature");
     }
+    let flow_t = obj_type(code, "h2d.Flow")?;
+    let flow_ctor = method(code, flow_t, "__constructor__")?;
+    let (flow_ctor_findex, flow_parent_t) = (flow_ctor.findex, fun_args(code, flow_ctor)[1]);
+    let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
     let findex = next_findex(code)?;
     code.types.push(Type::Fun(TypeFun {
         args: vec![icon_t],
         ret: ret_t,
     }));
     let fun_t = RefType(code.types.len() - 1);
-    let ops = vec![
+    let r = Reg;
+    // r0 icon, r1 item, r2 tip, r3..r5 null args, r6 void, r7 exc, r8 fallback flow, r9 null parent
+    let mut ops = vec![
         Opcode::Field {
-            dst: Reg(1),
-            obj: Reg(0),
+            dst: r(1),
+            obj: r(0),
             field: item_f,
         },
-        Opcode::New { dst: Reg(2) },
-        Opcode::Null { dst: Reg(3) },
-        Opcode::Null { dst: Reg(4) },
-        Opcode::Null { dst: Reg(5) },
+        Opcode::Trap {
+            exc: r(7),
+            offset: 0,
+        }, // 1 -> CATCH
+        Opcode::New { dst: r(2) },
+        Opcode::Null { dst: r(3) },
+        Opcode::Null { dst: r(4) },
+        Opcode::Null { dst: r(5) },
         Opcode::CallN {
-            dst: Reg(6),
+            dst: r(6),
             fun: ctor_findex,
-            args: vec![Reg(2), Reg(1), Reg(3), Reg(4), Reg(5)],
+            args: vec![r(2), r(1), r(3), r(4), r(5)],
         },
-        Opcode::Ret { ret: Reg(2) },
+        Opcode::EndTrap { exc: r(7) },
+        Opcode::Ret { ret: r(2) },
+        Opcode::New { dst: r(8) }, // 9 CATCH
+        Opcode::Null { dst: r(9) },
+        Opcode::Call2 {
+            dst: r(6),
+            fun: flow_ctor_findex,
+            arg0: r(8),
+            arg1: r(9),
+        },
+        Opcode::Ret { ret: r(8) },
     ];
+    resolve_jumps(&mut ops, &[(1, 9)]);
     let nops = ops.len();
     code.functions.push(Function {
         name: hlbc::types::RefString(0),
@@ -321,6 +364,9 @@ fn add_icon_tip_function(code: &mut Bytecode, dbg_file: usize) -> Result<RefFun>
             ctor_args[3],
             ctor_args[4],
             RefType(0),
+            dyn_t,
+            flow_t,
+            flow_parent_t,
         ],
         ops,
         debug_info: Some(vec![(dbg_file, 1); nops]),
@@ -456,24 +502,49 @@ fn resolve_jumps(ops: &mut [Opcode], targets: &[(usize, usize)]) {
         match &mut ops[i] {
             Opcode::JNull { offset, .. }
             | Opcode::JSGte { offset, .. }
+            | Opcode::JSGt { offset, .. }
             | Opcode::JEq { offset, .. }
             | Opcode::JNotEq { offset, .. }
             | Opcode::JFalse { offset, .. }
-            | Opcode::JAlways { offset } => *offset = off,
+            | Opcode::JAlways { offset }
+            | Opcode::Trap { offset, .. } => *offset = off,
             _ => unreachable!("not a jump"),
         }
     }
 }
 
-/// New function `(unitClass row) -> h2d.Object`:
-/// a vertical h2d.Flow holding one `ui.comp.SkillTip(null, null, skill, 1, null, flow)` per
-/// `baseSkills` entry, i.e. the class's own skill tooltips stacked into one card.
+/// New function `(unitClass row) -> h2d.Object`: a vertical h2d.Flow holding the
+/// class's starting skills as stacked `ui.comp.SkillTip` cards.
+///
+/// ```text
+/// var flow = new h2d.Flow(null); flow.isVertical = true;
+/// for (e in cls.baseSkills) {
+///     if (e == null) continue;
+///     if (e.minLevel != null && e.minLevel != 0) continue;   // tree skill, not a starting one
+///     if (e.learnLevel != null && e.learnLevel > 1) continue; // learnt later (animals, pit recruits)
+///     var skill = e.skill; if (skill == null) continue;
+///     try { var tip = new SkillTip(null, null, skill, 1, null, null); flow.addChild(tip); }
+///     catch (_) {}
+/// }
+/// return flow;
+/// ```
+///
+/// `minLevel == null` marks the class's innate skills and `minLevel == 0` its
+/// starting utility pool (Unit.setClassLevel draws one of those at random); every
+/// other entry is unlocked on the skill tree. The tip is built without a parent and
+/// attached only once its constructor returned, so a skill whose tooltip code
+/// dereferences the (absent) unit — Purge/Inhalation read its equipped weapon —
+/// is dropped whole instead of throwing to the game's uncaught-exception screen.
 fn add_class_tip_function(code: &mut Bytecode, cls_t: RefType, dbg_file: usize) -> Result<RefFun> {
+    let obj_t = obj_type(code, "h2d.Object")?;
+    let add_child = proto(code, obj_t, "addChild")?;
     let flow_t = obj_type(code, "h2d.Flow")?;
     let flow_ctor = method(code, flow_t, "__constructor__")?;
     let (flow_ctor_findex, flow_parent_t) = (flow_ctor.findex, fun_args(code, flow_ctor)[1]);
     let set_vertical = method(code, flow_t, "set_isVertical")?.findex;
-    let bool_t = RefType(7);
+    let void_t = prim_type(code, "void", |t| matches!(t, Type::Void))?;
+    let bool_t = prim_type(code, "bool", |t| matches!(t, Type::Bool))?;
+    let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
     let arr_t = obj_type(code, "hl.types.ArrayObj")?;
     let (arr_f, arr_inner_t) = field(code, arr_t, "array")?;
     let (len_f, i32_t) = field(code, arr_t, "length")?;
@@ -482,6 +553,11 @@ fn add_class_tip_function(code: &mut Bytecode, cls_t: RefType, dbg_file: usize) 
         bail!("unitClass.baseSkills is not an ArrayObj");
     }
     let entry_t = virtual_type(code, &["learnLevel", "minLevel", "requires", "skill"])?;
+    let (min_level_f, level_t) = field_of_virtual(code, entry_t, "minLevel")?;
+    let (learn_level_f, learn_level_t) = field_of_virtual(code, entry_t, "learnLevel")?;
+    if learn_level_t != level_t || !matches!(&code.types[level_t.0], Type::Null(t) if *t == i32_t) {
+        bail!("baseSkills minLevel/learnLevel are not null<i32>");
+    }
     let get_skill = method(code, entry_t, "get_skill")?;
     let (get_skill_findex, skill_t) = (get_skill.findex, get_skill.t.as_fun(code).unwrap().ret);
     let tip_t = obj_type(code, "ui.comp.SkillTip")?;
@@ -507,16 +583,17 @@ fn add_class_tip_function(code: &mut Bytecode, cls_t: RefType, dbg_file: usize) 
     let fun_t = RefType(code.types.len() - 1);
 
     // r0 cls, r1 flow, r2 void, r3 baseSkills, r4 i, r5 len, r6 raw array, r7 dyn,
-    // r8 entry, r9 skill, r10 tip, r11 unit, r12 stats, r13 level, r14 vars, r15 parent, r16/r17 bool
+    // r8 entry, r9 skill, r10 tip, r11 unit, r12 stats, r13 level, r14 vars, r15 parent,
+    // r16/r17 bool, r18 null<i32> level field, r19 its value, r20 bound, r21 exc
     let regs = vec![
         cls_t,
         flow_t,
-        RefType(0),
+        void_t,
         arr_t,
         i32_t,
         i32_t,
         arr_inner_t,
-        RefType(9),
+        dyn_t,
         entry_t,
         skill_t,
         tip_t,
@@ -527,6 +604,10 @@ fn add_class_tip_function(code: &mut Bytecode, cls_t: RefType, dbg_file: usize) 
         flow_parent_t,
         bool_t,
         bool_t,
+        level_t,
+        i32_t,
+        i32_t,
+        dyn_t,
     ];
     let r = Reg;
     let mut ops = vec![
@@ -587,15 +668,67 @@ fn add_class_tip_function(code: &mut Bytecode, cls_t: RefType, dbg_file: usize) 
             src: r(7),
         },
         Opcode::Incr { dst: r(4) },
+        Opcode::JNull {
+            reg: r(8),
+            offset: 0,
+        }, // 15 -> LOOP
+        Opcode::Field {
+            dst: r(18),
+            obj: r(8),
+            field: min_level_f,
+        },
+        Opcode::JNull {
+            reg: r(18),
+            offset: 0,
+        }, // 17 -> LEARN
+        Opcode::SafeCast {
+            dst: r(19),
+            src: r(18),
+        },
+        Opcode::Int {
+            dst: r(20),
+            ptr: zero,
+        },
+        Opcode::JNotEq {
+            a: r(19),
+            b: r(20),
+            offset: 0,
+        }, // 20 -> LOOP
+        Opcode::Field {
+            dst: r(18),
+            obj: r(8),
+            field: learn_level_f,
+        }, // 21 LEARN
+        Opcode::JNull {
+            reg: r(18),
+            offset: 0,
+        }, // 22 -> SKILL
+        Opcode::SafeCast {
+            dst: r(19),
+            src: r(18),
+        },
+        Opcode::Int {
+            dst: r(20),
+            ptr: one,
+        },
+        Opcode::JSGt {
+            a: r(19),
+            b: r(20),
+            offset: 0,
+        }, // 25 -> LOOP
         Opcode::Call1 {
             dst: r(9),
             fun: get_skill_findex,
             arg0: r(8),
-        },
+        }, // 26 SKILL
         Opcode::JNull {
             reg: r(9),
             offset: 0,
-        }, // 16 -> LOOP
+        }, // 27 -> LOOP
+        Opcode::Trap {
+            exc: r(21),
+            offset: 0,
+        }, // 28 -> CATCH
         Opcode::New { dst: r(10) },
         Opcode::Null { dst: r(11) },
         Opcode::Null { dst: r(12) },
@@ -604,15 +737,39 @@ fn add_class_tip_function(code: &mut Bytecode, cls_t: RefType, dbg_file: usize) 
             ptr: one,
         },
         Opcode::Null { dst: r(14) },
+        Opcode::Null { dst: r(15) },
         Opcode::CallN {
             dst: r(2),
             fun: tip_ctor_findex,
-            args: vec![r(10), r(11), r(12), r(9), r(13), r(14), r(1)],
+            args: vec![r(10), r(11), r(12), r(9), r(13), r(14), r(15)],
         },
-        Opcode::JAlways { offset: 0 }, // 23 -> LOOP
-        Opcode::Ret { ret: r(1) },     // 24 END
+        Opcode::Call2 {
+            dst: r(2),
+            fun: add_child,
+            arg0: r(1),
+            arg1: r(10),
+        },
+        Opcode::EndTrap { exc: r(21) },
+        Opcode::JAlways { offset: 0 }, // 38 -> LOOP
+        Opcode::JAlways { offset: 0 }, // 39 CATCH -> LOOP
+        Opcode::Ret { ret: r(1) },     // 40 END
     ];
-    resolve_jumps(&mut ops, &[(6, 24), (10, 24), (16, 8), (23, 8)]);
+    resolve_jumps(
+        &mut ops,
+        &[
+            (6, 40),
+            (10, 40),
+            (15, 8),
+            (17, 21),
+            (20, 8),
+            (22, 26),
+            (25, 8),
+            (27, 8),
+            (28, 39),
+            (38, 8),
+            (39, 8),
+        ],
+    );
     let nops = ops.len();
     code.functions.push(Function {
         name: hlbc::types::RefString(0),
@@ -776,4 +933,140 @@ fn inspect(code: &Bytecode, name: &str) -> Result<()> {
         cur = o.super_;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
+
+    fn read(image: &[u8]) -> Bytecode {
+        Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
+    }
+
+    fn same(a: &Function, b: &Function) -> bool {
+        format!("{:?}", a.ops) == format!("{:?}", b.ops)
+            && a.regs == b.regs
+            && a.debug_info == b.debug_info
+    }
+
+    /// Every jump stays in range, and each Trap is closed by an EndTrap on the same
+    /// dynamic register with no jump leaving the protected block, the handler right
+    /// after it and unreachable by fallthrough.
+    fn check_structure(code: &Bytecode, f: &Function) -> usize {
+        let n = f.ops.len();
+        for i in 0..n {
+            for t in jump_targets(f, i) {
+                assert!(t < n, "fn@{} op {i} jumps out of range", f.findex.0);
+            }
+        }
+        let mut traps = 0;
+        for (i, op) in f.ops.iter().enumerate() {
+            let Opcode::Trap { exc, .. } = *op else {
+                continue;
+            };
+            traps += 1;
+            assert!(matches!(code.types[f.regs[exc.0 as usize].0], Type::Dyn));
+            let [handler] = jump_targets(f, i)[..] else {
+                unreachable!()
+            };
+            let end = (i + 1..n)
+                .find(|&j| matches!(f.ops[j], Opcode::EndTrap { exc: e } if e == exc))
+                .expect("EndTrap");
+            assert!(handler > end, "handler inside the protected block");
+            assert!(matches!(
+                f.ops[handler - 1],
+                Opcode::JAlways { .. } | Opcode::Ret { .. }
+            ));
+            for j in i + 1..end {
+                assert!(!matches!(
+                    f.ops[j],
+                    Opcode::Trap { .. } | Opcode::Ret { .. }
+                ));
+                for t in jump_targets(f, j) {
+                    assert!(t > i && t <= end, "op {j} leaves the trap block");
+                }
+            }
+        }
+        traps
+    }
+
+    /// Patches a copy of the installed game's bytecode (skipped when absent): the
+    /// image round-trips, only the StartChoice preview changes, the two tooltip
+    /// functions are appended, and every tooltip constructor runs under a trap.
+    #[test]
+    fn start_choice_tips_on_installed_game() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let mut out = Vec::new();
+        orig.serialize(&mut out).expect("write");
+        assert!(out == image, "unpatched round-trip is not byte-identical");
+
+        let mut code = read(&image);
+        patch_start_choice_item_tips(&mut code).expect("item tips");
+        patch_start_choice_unit_tips(&mut code).expect("unit tips");
+        let mut patched = Vec::new();
+        code.serialize(&mut patched).expect("write patched");
+        let back = read(&patched);
+
+        assert_eq!(back.functions.len(), orig.functions.len() + 2);
+        assert_eq!(back.types.len(), orig.types.len() + 2);
+        assert_eq!(back.types[..orig.types.len()], orig.types[..]);
+        assert_eq!(back.strings, orig.strings);
+        assert_eq!(back.ints[..orig.ints.len()], orig.ints[..]);
+        let start_t = obj_type(&orig, "ui.win.StartChoice").unwrap();
+        let changed: Vec<usize> = (0..orig.functions.len())
+            .filter(|&i| !same(&orig.functions[i], &back.functions[i]))
+            .collect();
+        let [pi] = changed[..] else {
+            panic!("expected one changed function, got {changed:?}")
+        };
+        assert_eq!(orig.functions[pi].regs[0], start_t);
+        let p = &back.functions[pi];
+        assert_eq!(p.ops.len(), orig.functions[pi].ops.len() + 8);
+        assert_eq!(check_structure(&back, p), 0);
+
+        let icon_fn = &back.functions[orig.functions.len()];
+        let class_fn = &back.functions[orig.functions.len() + 1];
+        assert_eq!(check_structure(&back, icon_fn), 1);
+        assert_eq!(check_structure(&back, class_fn), 1);
+
+        // The SkillTip is built parentless inside the trap and attached right after.
+        let tip_t = obj_type(&back, "ui.comp.SkillTip").unwrap();
+        let tip_ctor = method(&back, tip_t, "__constructor__").unwrap().findex;
+        let add_child = proto(&back, obj_type(&back, "h2d.Object").unwrap(), "addChild").unwrap();
+        let at = class_fn
+            .ops
+            .iter()
+            .position(|o| matches!(o, Opcode::CallN { fun, .. } if *fun == tip_ctor))
+            .expect("SkillTip ctor call");
+        let Opcode::CallN { args, .. } = &class_fn.ops[at] else {
+            unreachable!()
+        };
+        assert!(class_fn.ops[..at]
+            .iter()
+            .rev()
+            .take(6)
+            .any(|o| matches!(o, Opcode::Null { dst } if *dst == args[6])));
+        assert!(matches!(class_fn.ops[at + 1],
+            Opcode::Call2 { fun, arg1, .. } if fun == add_child && arg1 == args[0]));
+        assert!(matches!(class_fn.ops[at + 2], Opcode::EndTrap { .. }));
+        assert!(matches!(class_fn.ops[at - 7], Opcode::Trap { .. }));
+
+        // The starting-skill filter reads minLevel and learnLevel before get_skill.
+        let entry_t =
+            virtual_type(&back, &["learnLevel", "minLevel", "requires", "skill"]).unwrap();
+        let (min_f, _) = field_of_virtual(&back, entry_t, "minLevel").unwrap();
+        let (learn_f, _) = field_of_virtual(&back, entry_t, "learnLevel").unwrap();
+        let reads = |fld: RefField| {
+            class_fn.ops[..at]
+                .iter()
+                .any(|o| matches!(o, Opcode::Field { field, obj, .. } if *field == fld && class_fn.regs[obj.0 as usize] == entry_t))
+        };
+        assert!(reads(min_f) && reads(learn_f));
+    }
 }
