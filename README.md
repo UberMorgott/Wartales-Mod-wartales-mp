@@ -17,6 +17,7 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 - Adds hover tooltips to the items shown in the new-game starting-troop preview (bundled `wartales-tips` patch). If the game build differs, this part silently stays off and everything else keeps working.
 - Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do. Always on; part of the same bundled patch, so it stays off together with the tooltips on another game build.
 - Co-op fix for the Career Plan extra attribute point: a client could see "+2" on level-up and get only "+1". The host now grants the extra point on top of its own current offer, and ignores a grant when the unit has no aptitude point left. Needs every player on the same wartales-mp build.
+- Starting troops larger than the new-game customize screen (it has five spots): instead of crashing ("Missing prefab Camera06"), the extra animals are left off the screen and belong to the host; humans always get a spot. Troops of five or fewer look exactly as before.
 
 ## Install
 

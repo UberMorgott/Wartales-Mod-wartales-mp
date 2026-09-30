@@ -317,7 +317,13 @@ x86_64-pc-windows-gnu` из `shim\build.ps1`). Патч структурный �
 `canBeTarget`; `Unit.isValidTarget` для основной цели и ИИ не тронут).
 Плюс фикс «Плана карьеры» в коопе (`src/career_plan.rs`): клиент шлёт `count = -1 - n`, хост
 требует `aptitudePoints > 0` и пересчитывает count от своего `getAttributeUpCounts` до
-`usedAptitudePoints++`; `count >= 0` — старое поведение; нужна одна сборка у всех. Хост и клиент грузят один
+`usedAptitudePoints++`; `count >= 0` — старое поведение; нужна одна сборка у всех.
+И отряды больше экрана настройки (`src/customize_slots.rs`): в сцене пять мест
+(`Model0N`/`Camera0N`, число берётся из `characterIndex` конструктора `CustomizeScreen`);
+`CustomizeScreen.initS3d` не создаёт Character для лишних животных (первые по порядку отряда,
+люди место получают всегда), а `LobbyState.initAssignments` на хосте сразу пишет им
+`p = getUser().id`, чтобы `allUnitsAssigned`/`makeGroups` видели владельца. Правило и
+порядок у хоста и клиентов одни и те же; при ≤ 5 юнитах ничего не меняется. Хост и клиент грузят один
 `winmm.dll` — цели детерминированы. Побайтная сверка копии идёт уже с `tips(patch(оригинал))`; если `wartales-tips`
 отказал (другая сборка), в `shim.log` пишется `tips: not applied: <причина>`, а копия остаётся
 байт-патченной — редирект никогда не проваливается из-за подсказок. `shim\check.ps1` линкует

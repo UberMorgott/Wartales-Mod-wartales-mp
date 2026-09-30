@@ -34,6 +34,20 @@ offer. `count >= 0` keeps the old behaviour. All players must run the same
 build: an unpatched host would apply the negative count. If the ops do not
 match, the fix is skipped (logged) and the other patches still apply.
 
+**Customize slots** (`src/customize_slots.rs`): the new-game customize scene has
+five unit spots (`Model01..05`, `Camera01..05`; the count is taken from the
+`characterIndex` allocation in the `CustomizeScreen` constructor), and
+`CustomizeScreen.initS3d` threw "Missing prefab Camera06" for a sixth unit.
+With `excess = units.length - slots`, a unit is hidden when every spot is taken
+or it is an animal and fewer than `excess` animals are hidden so far (humans
+keep the spots; the troop's own animal goes before the auto-added Pony).
+`initS3d` builds no Character for a hidden unit and numbers the shown ones
+1..slots; `LobbyState.initAssignments` (host, new game only) creates a hidden
+unit's lobby entry with `p = getUser().id`, so `allUnitsAssigned` and
+`makeGroups` give it to the host. Same rule, same createTroop order on host
+and clients; troops of `slots` units or fewer are unchanged. If the ops do not
+match, the fix is skipped (logged) and the other patches still apply.
+
 ## Install
 
 Two ways, pick one:

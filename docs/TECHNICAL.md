@@ -271,7 +271,19 @@ needs no patch for it.
    confirm closure `call`) requires `aptitudePoints > 0`, then rebuilds a
    negative count from its own `getAttributeUpCounts(unit).get(attr)` read
    before `usedAptitudePoints++`. `count >= 0` keeps the old behaviour; every
-   player must run the same build. On an op mismatch only this fix is skipped. Host and client load the same
+   player must run the same build. On an op mismatch only this fix is skipped.
+   It also lets a starting troop be larger than the new-game customize scene
+   (`src/customize_slots.rs`), which has five spots (`Model0N`/`Camera0N`; the
+   count is read from the `characterIndex` allocation in the `CustomizeScreen`
+   constructor) and threw "Missing prefab Camera06" for a sixth unit. With
+   `excess = units.length - 5`, a unit is hidden when all spots are taken or it
+   is an animal and fewer than `excess` animals are hidden yet, so humans keep
+   the spots. `CustomizeScreen.initS3d` creates no Character for a hidden unit
+   and numbers the shown ones 1..5; `LobbyState.initAssignments` (host, new
+   game) creates a hidden unit's lobby entry with `p = getUser().id`, so
+   `allUnitsAssigned` and `makeGroups` see the host as owner. Both walk the
+   same createTroop order, so host and clients hide the same units; troops of
+   five or fewer are unchanged. On an op mismatch only this fix is skipped. Host and client load the same
    `winmm.dll`, so both sides compute the same targets. It locates everything by name; if it
    cannot (another game build), it reports why in `shim.log`
    (`tips: not applied: …`) and the copy stays the byte-patched image, so the

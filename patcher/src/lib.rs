@@ -4,9 +4,12 @@
 // icons shown on the new-game "start choice" preview carry the game's own
 // ItemTip tooltip on hover, and so enemy area attacks also hit the caster's
 // allies (see friendly_fire.rs), and so a co-op client's Career Plan extra
-// attribute point is granted from the host's own offer (see career_plan.rs).
+// attribute point is granted from the host's own offer (see career_plan.rs),
+// and so a starting troop larger than the customize scene's five slots leaves
+// its extra animals off screen, owned by the host (see customize_slots.rs).
 
 mod career_plan;
+mod customize_slots;
 mod friendly_fire;
 
 use anyhow::{bail, Context, Result};
@@ -25,6 +28,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     patch_start_choice_unit_tips(&mut code)?;
     friendly_fire::patch_enemy_area_friendly_fire(&mut code).context("friendly fire")?;
     career_plan::patch_career_plan(&mut code);
+    customize_slots::patch_customize_slots(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
