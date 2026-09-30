@@ -70,6 +70,12 @@ world-map gathering. Decisions stay on the host; the input (push/pad) and
 window-lock changes run on every machine, so all players need the same build.
 Each gate is skipped (logged) on mismatch.
 
+**Hold speed** (`src/hold_speed.rs`): `BaseUI.holdAction`, the one function
+behind every press-and-hold ring, divides its duration by 3 at entry
+(NPC/entity trigger 0.45 s -> 0.15 s, gamepad place exit and skill-bar arrow
+1.95 s -> 0.65 s). The gamepad long-press binding duration is cdb data
+(`Const` `Pad_LongPress_Duration`) and is not changed here.
+
 ## Install
 
 Two ways, pick one:
