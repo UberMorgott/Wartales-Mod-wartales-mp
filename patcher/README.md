@@ -76,6 +76,21 @@ behind every press-and-hold ring, divides its duration by 3 at entry
 1.95 s -> 0.65 s). The gamepad long-press binding duration is cdb data
 (`Const` `Pad_LongPress_Duration`) and is not changed here.
 
+**Profession experience** (`src/job_xp.rs`): vanilla already keeps each
+profession's level across job switches (`st.Unit.jobsLevel`, a networked and
+saved `Map<String, Int>`; `_removeTrait` writes `jobsLevel[tid] = t.level`,
+`_addTrait` reads it back), but the progress inside the level, `UnitTrait.xp`,
+was lost ("will lose all experience gained as ..."). `_removeTrait` now also
+writes `jobsLevel[tid + "#xp"] = t.xp`, and `_addTrait` restores it into a trait
+it just created (a `getTrait(tid, null)` lookup before its own `getTrait(tid,
+&true)` found none, and `xp` is still 0) and resets the stored value to 0. No hxbit schema change:
+the extra keys are plain map entries every reader ignores (they look up job ids),
+so saves still load without the mod. Both functions run on the host only; the
+xp reaches clients through the existing sync. The switch confirm still shows the
+game's "will lose all experience" text. A switch made while playing without the
+mod leaves the stored value untouched, so it can come back later as stale
+progress. Skipped (logged) on mismatch.
+
 ## Install
 
 Two ways, pick one:
