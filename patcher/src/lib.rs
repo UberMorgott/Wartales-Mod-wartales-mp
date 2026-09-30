@@ -3,8 +3,10 @@
 // wartales-tips: patches Wartales' HashLink bytecode (hlboot.dat) so the item
 // icons shown on the new-game "start choice" preview carry the game's own
 // ItemTip tooltip on hover, and so enemy area attacks also hit the caster's
-// allies (see friendly_fire.rs).
+// allies (see friendly_fire.rs), and so a co-op client's Career Plan extra
+// attribute point is granted from the host's own offer (see career_plan.rs).
 
+mod career_plan;
 mod friendly_fire;
 
 use anyhow::{bail, Context, Result};
@@ -22,6 +24,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     patch_start_choice_item_tips(&mut code)?;
     patch_start_choice_unit_tips(&mut code)?;
     friendly_fire::patch_enemy_area_friendly_fire(&mut code).context("friendly fire")?;
+    career_plan::patch_career_plan(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

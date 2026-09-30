@@ -16,6 +16,7 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 - Lets you start even if a player has no human character assigned. For example, four players can use a modded starting party of three humans and one animal.
 - Adds hover tooltips to the items shown in the new-game starting-troop preview (bundled `wartales-tips` patch). If the game build differs, this part silently stays off and everything else keeps working.
 - Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do. Always on; part of the same bundled patch, so it stays off together with the tooltips on another game build.
+- Co-op fix for the Career Plan extra attribute point: a client could see "+2" on level-up and get only "+1". The host now grants the extra point on top of its own current offer, and ignores a grant when the unit has no aptitude point left. Needs every player on the same wartales-mp build.
 
 ## Install
 

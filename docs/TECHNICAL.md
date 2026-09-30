@@ -264,7 +264,14 @@ needs no patch for it.
    Enemies cast by a non-player-side unit, `SkillEval.addTarget` gets
    `checkValid = false` for every unit other than the caster that passes
    `canBeTarget`, so the area also hits the caster's allies; primary-target and
-   AI checks (`Unit.isValidTarget`) are unchanged. Host and client load the same
+   AI checks (`Unit.isValidTarget`) are unchanged.
+   It also fixes the co-op Career Plan extra attribute point
+   (`src/career_plan.rs`): the client sends `count = -1 - n` instead of its own
+   possibly stale `offer + n`, and the host closure (`onBonusAttributeApply`
+   confirm closure `call`) requires `aptitudePoints > 0`, then rebuilds a
+   negative count from its own `getAttributeUpCounts(unit).get(attr)` read
+   before `usedAptitudePoints++`. `count >= 0` keeps the old behaviour; every
+   player must run the same build. On an op mismatch only this fix is skipped. Host and client load the same
    `winmm.dll`, so both sides compute the same targets. It locates everything by name; if it
    cannot (another game build), it reports why in `shim.log`
    (`tips: not applied: …`) and the copy stays the byte-patched image, so the
