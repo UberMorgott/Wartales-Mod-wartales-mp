@@ -48,6 +48,28 @@ unit's lobby entry with `p = getUser().id`, so `allUnitsAssigned` and
 and clients; troops of `slots` units or fewer are unchanged. If the ops do not
 match, the fix is skipped (logged) and the other patches still apply.
 
+**Co-op: nobody waits** (`src/coop_gates.rs`): every co-op consensus in the
+world is decided on the host and already has a vanilla force path (hold the
+button until the bar fills). A plain click now takes it, so the first player
+who clicks decides: wait-all-players buttons (town/location, camp fire, rest,
+debriefs, group fight, travel post, trade route, tavern resume, ...) run on the
+first click, cast no vote on mouse-down any more (a gamepad press, which has no
+release, goes through `Button.doPadClick` straight to the click) and no longer
+show the hold-to-force bar; a leave request (`Place.setLeaveState__impl`) and a
+rest request (`Controller.playerSetRestState__impl`: dropped unless `game.mode`
+is a `CampMode`, not forced while already resting) set their state's `forced`
+flag; the first player's "next" advances a dialog (`Dialog.checkAllReady` reads the
+host's `coopSkipDialogInstanlty` option as on). An open window no longer
+locks the others: `Game.getPlayerLocked` and `Player.canCamp` ignore the synced
+`hasWindowOpened` (one player reading a character sheet used to block camp,
+leaving camp and leaving the tavern for everyone); a player busy with an
+NPC/chest/craft (`lockedWith`) still blocks. Game modes are global, so a
+host transition disposes every client's old mode with its windows. Not
+touched: mode-switch load barriers, battle round sync, owner-only confirms,
+world-map gathering. Decisions stay on the host; the input (push/pad) and
+window-lock changes run on every machine, so all players need the same build.
+Each gate is skipped (logged) on mismatch.
+
 ## Install
 
 Two ways, pick one:
