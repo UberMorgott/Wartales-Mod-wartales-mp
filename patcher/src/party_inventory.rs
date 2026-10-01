@@ -1647,6 +1647,81 @@ pub(crate) fn patch_party_inventory(code: &mut Bytecode) {
     }
 }
 
+/// `(fi, at)` of the `Int 2` (player) in the flags of `name`'s GlobalInventory call.
+fn plan_count_flags(
+    code: &Bytecode,
+    name: &str,
+    target: RefFun,
+    flags_arg: usize,
+) -> Result<(usize, usize)> {
+    let hits: Vec<usize> = code
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| s(code, f.name) == name)
+        .map(|(i, _)| i)
+        .collect();
+    let [fi] = hits[..] else {
+        bail!("expected one {name}, found {}", hits.len());
+    };
+    let f = &code.functions[fi];
+    let at = f
+        .ops
+        .iter()
+        .position(|op| matches!(call_target(op), Some((g, _)) if g == target))
+        .with_context(|| format!("{name}: no GlobalInventory call"))?;
+    let Some((_, args)) = call_target(&f.ops[at]) else {
+        unreachable!()
+    };
+    let flags = *args
+        .get(flags_arg)
+        .with_context(|| format!("{name}: flags argument"))?;
+    // flags = 1 | 2 | 256 built as Int/Or pairs
+    for i in (1..at).rev() {
+        if let (Some((x, v)), Opcode::Or { dst, a, b }) =
+            (int_value(code, &f.ops[i]), &f.ops[i + 1])
+        {
+            if *dst == flags && *a == flags && *b == x {
+                match v {
+                    2 => return Ok((fi, i)),
+                    v if v == 2 | F_OTHERS => bail!("already applied"),
+                    _ => {}
+                }
+            }
+        }
+    }
+    bail!("{name}: player flag not found")
+}
+
+/// hasItemWithChest / countWithChest (crafting, repair, healing, boat displays) also
+/// count the other players' inventories, matching what partyPrepare lets them pay
+/// with. Skipped (logged) on mismatch.
+pub(crate) fn patch_party_counts(code: &mut Bytecode) {
+    let plan = || -> Result<Vec<(usize, usize)>> {
+        let gi_t = obj_type(code, "st.player.GlobalInventory")?;
+        let has_count = method(code, gi_t, "hasItemCount")?.findex;
+        let get_count = method(code, gi_t, "getItemCount")?.findex;
+        Ok(vec![
+            plan_count_flags(code, "hasItemWithChest", has_count, 4)?,
+            plan_count_flags(code, "countWithChest", get_count, 3)?,
+        ])
+    };
+    match plan() {
+        Ok(sites) => {
+            let ptr = int_const(code, 2 | F_OTHERS);
+            for (fi, at) in &sites {
+                if let Opcode::Int { ptr: p, .. } = &mut code.functions[*fi].ops[*at] {
+                    *p = ptr;
+                }
+            }
+            eprintln!(
+                "patched party counts fn@{} fn@{}: with-chest counts include the other players",
+                code.functions[sites[0].0].findex.0, code.functions[sites[1].0].findex.0
+            );
+        }
+        Err(e) => eprintln!("party counts skipped: {e:#}"),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1735,5 +1810,41 @@ mod tests {
 
     fn nf_findex(code: &Bytecode, i: usize) -> usize {
         code.functions[i].findex.0
+    }
+
+    /// hasItemWithChest / countWithChest: only their `Int 2` flag becomes 6; idempotent.
+    #[test]
+    fn patches_counts() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let mut code = read(&image);
+        patch_party_counts(&mut code);
+        let patched = write(&code);
+        let back = read(&patched);
+        assert_eq!(back.ints[..orig.ints.len()], orig.ints[..]);
+        let mut changed = 0;
+        for (a, b) in orig.functions.iter().zip(&back.functions) {
+            assert_eq!(a.ops.len(), b.ops.len());
+            for (x, y) in a.ops.iter().zip(&b.ops) {
+                if format!("{x:?}") != format!("{y:?}") {
+                    let (Opcode::Int { dst: d1, ptr: p1 }, Opcode::Int { dst: d2, ptr: p2 }) =
+                        (x, y)
+                    else {
+                        panic!("unexpected edit {x:?} -> {y:?}");
+                    };
+                    assert_eq!(d1, d2);
+                    assert_eq!((orig.ints[p1.0], back.ints[p2.0]), (2, 6));
+                    assert!(["hasItemWithChest", "countWithChest"].contains(&s(&orig, a.name)));
+                    changed += 1;
+                }
+            }
+        }
+        assert_eq!(changed, 2);
+        let mut again = read(&patched);
+        patch_party_counts(&mut again);
+        assert!(write(&again) == patched);
     }
 }

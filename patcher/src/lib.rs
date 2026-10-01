@@ -64,6 +64,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     dlc_check::patch_dlc_check(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
     party_inventory::patch_party_inventory(&mut code);
+    party_inventory::patch_party_counts(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

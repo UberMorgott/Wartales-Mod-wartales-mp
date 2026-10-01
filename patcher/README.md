@@ -175,6 +175,10 @@ choice is allowed when the party (global + every player + chest, never equipped
 items) holds the item, cost labels count chest + other players, the "same type"
 substitution looks at the party, and the cost is paid with `checkChest`.
 Tavern event dialogs keep the tavern stock. No new RPC or synced field.
+The matching displays (`hasItemWithChest` / `countWithChest`: crafting recipes
+and craftable amounts, brewing, repair/heal/alter/boat costs) count the other
+players too (GlobalInventory flags `1|2|256` -> `1|2|4|256`); they already
+counted the global inventory, the chest and the boat chest on board.
 
 ## Install
 
