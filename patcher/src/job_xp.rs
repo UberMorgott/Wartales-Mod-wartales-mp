@@ -88,6 +88,7 @@ fn last_write(f: &Function, reg: Reg, before: usize) -> Option<&Opcode> {
 /// `Field lvl = t.level; ...; Field mv = jl.map; SafeCast m = mv; NullCheck m; ToDyn d = lvl; Call3 set(m, r1, d)`
 /// with `jl` loaded by `GetThis jobsLevel` and marked changed in between
 /// (`Field o = jl.obj; ...; CallMethod o.<0>(o, jl.bit)`, the hxbit MapData mark).
+#[allow(clippy::too_many_arguments)] // one call site; the refs are the matcher's inputs
 fn find_site(
     code: &Bytecode,
     unit_t: RefType,
