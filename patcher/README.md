@@ -25,12 +25,16 @@ primary-target choice and AI target selection still use the original
 A co-op fix, **Career Plan extra point** (`src/career_plan.rs`): the client's
 `UnitInfo.onBonusAttributeApply` sent `count = offer(attr) + n`, using its own,
 possibly stale, level-up offer (a stale offer gives `n` alone, so "+2" became
-"+1"), and the host closure applied it verbatim. The client now sends `-1 - n`;
-the host closure first requires `aptitudePoints > 0` (else nothing is granted
-or spent) and, for a negative `count`, rebuilds it as the host's own
-`getAttributeUpCounts(unit).get(attr) ?? 0` plus `n`, read before
-`usedAptitudePoints++`, the way the regular level-up closure re-checks its
-offer. `count >= 0` keeps the old behaviour. All players must run the same
+"+1"), and the host closure applied it verbatim. The client now sends
+`-1 - (n + (usedAptitudePoints << 2))`, the offer it saw; the host closure first
+requires `aptitudePoints > 0`, then, for a negative `count`, that the encoded
+`usedAptitudePoints` is still the unit's (a second confirm sent before the first
+one's grant arrived is stale: nothing is granted or spent), and rebuilds `count`
+as the host's own `getAttributeUpCounts(unit).get(attr) ?? 0` plus `n`, read
+before `usedAptitudePoints++`, the way the regular level-up closure re-checks its
+offer. Career Plan may target an attribute outside the offer (every upgradable
+attribute gets +/- buttons), so its base is 0 there. `count >= 0` keeps the old
+behaviour. All players must run the same
 build: an unpatched host would apply the negative count. If the ops do not
 match, the fix is skipped (logged) and the other patches still apply.
 

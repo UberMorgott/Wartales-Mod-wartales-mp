@@ -315,9 +315,12 @@ x86_64-pc-windows-gnu` из `shim\build.ps1`). Патч структурный �
 `Skill.gatherTargets` для навыка с `allowedTargets` = Enemies у кастера не со стороны игрока
 `SkillEval.addTarget` получает `checkValid = false` для всех, кроме кастера, прошедших
 `canBeTarget`; `Unit.isValidTarget` для основной цели и ИИ не тронут).
-Плюс фикс «Плана карьеры» в коопе (`src/career_plan.rs`): клиент шлёт `count = -1 - n`, хост
-требует `aptitudePoints > 0` и пересчитывает count от своего `getAttributeUpCounts` до
-`usedAptitudePoints++`; `count >= 0` — старое поведение; нужна одна сборка у всех.
+Плюс фикс «Плана карьеры» в коопе (`src/career_plan.rs`): клиент шлёт
+`count = -1 - (n + (usedAptitudePoints << 2))`, хост требует `aptitudePoints > 0` и совпадения
+закодированного `usedAptitudePoints` с текущим (иначе это устаревшее второе подтверждение: ничего не
+списывается и не начисляется) и пересчитывает count от своего `getAttributeUpCounts(...) ?? 0` до
+`usedAptitudePoints++` (План карьеры может выбрать атрибут вне предложения — база 0);
+`count >= 0` — старое поведение; нужна одна сборка у всех.
 И отряды больше экрана настройки (`src/customize_slots.rs`): в сцене пять мест
 (`Model0N`/`Camera0N`, число берётся из `characterIndex` конструктора `CustomizeScreen`);
 `CustomizeScreen.initS3d` не создаёт Character для лишних животных (первые по порядку отряда,

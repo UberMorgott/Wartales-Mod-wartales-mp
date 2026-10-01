@@ -266,11 +266,15 @@ needs no patch for it.
    `canBeTarget`, so the area also hits the caster's allies; primary-target and
    AI checks (`Unit.isValidTarget`) are unchanged.
    It also fixes the co-op Career Plan extra attribute point
-   (`src/career_plan.rs`): the client sends `count = -1 - n` instead of its own
-   possibly stale `offer + n`, and the host closure (`onBonusAttributeApply`
-   confirm closure `call`) requires `aptitudePoints > 0`, then rebuilds a
-   negative count from its own `getAttributeUpCounts(unit).get(attr)` read
-   before `usedAptitudePoints++`. `count >= 0` keeps the old behaviour; every
+   (`src/career_plan.rs`): the client sends
+   `count = -1 - (n + (usedAptitudePoints << 2))` instead of its own possibly
+   stale `offer + n`, and the host closure (`onBonusAttributeApply` confirm
+   closure `call`) requires `aptitudePoints > 0` and the encoded
+   `usedAptitudePoints` to be the unit's current one (else a stale second
+   confirm: nothing granted or spent), then rebuilds a negative count from its
+   own `getAttributeUpCounts(unit).get(attr) ?? 0` read before
+   `usedAptitudePoints++` (Career Plan may pick an attribute outside the offer:
+   base 0). `count >= 0` keeps the old behaviour; every
    player must run the same build. On an op mismatch only this fix is skipped.
    It also lets a starting troop be larger than the new-game customize scene
    (`src/customize_slots.rs`), which has five spots (`Model0N`/`Camera0N`; the

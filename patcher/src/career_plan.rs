@@ -14,17 +14,27 @@
 //
 // This pass makes the Career Plan path do the same:
 //
-//   client  count = -1 - n                        (was: offer + n)
+//   client  count = -1 - (n + (unit.usedAptitudePoints << 2))   (was: offer + n)
 //   host    if (unit == null) return;
 //           if (unit.aptitudePoints <= 0) skip the whole grant (no Influence spent);
 //           if (count < 0) {
-//               n = -1 - count;
+//               e = -1 - count; n = e & 3;
+//               if (e >> 2 != unit.usedAptitudePoints) skip the whole grant;
 //               base = 0;
 //               m = getAttributeUpCounts(unit);    // before usedAptitudePoints++
 //               if (m != null && attr != null) { v = m.get(attr); if (v != null) base = v; }
 //               count = base + n;
 //           }
 //           ... original body ...
+//
+// The offer is a function of `usedAptitudePoints`, which every grant bumps. A
+// request built against an older offer (a second confirm sent before the first
+// one's sync arrived) carries the old count and is dropped whole: no Influence,
+// no point, no attribute. It cannot be checked against the offer itself: Career
+// Plan legitimately targets attributes outside the offer (UnitInfo.hx:1839-1852
+// gives every upgradable attribute its +/- buttons with `count = offer ?? 0`,
+// `n` capped at `2 - count`), so `base = 0` for such an attribute is correct.
+// `n` is 0..2, so two bits hold it.
 //
 // `count >= 0` keeps the original behaviour, so a host running this image still
 // accepts the old encoding. The reverse is NOT compatible: an unpatched host
@@ -41,6 +51,9 @@ struct Plan {
     add_at: usize,
     cnt: Reg,
     extra: Reg,
+    /// The client register holding `this.unit` (null-checked) at the add.
+    client_unit: Reg,
+    used_f: RefField,
     // host: the L2234 closure's `call`
     host_fi: usize,
     at: usize,
@@ -106,9 +119,31 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let Opcode::Call2 { fun: map_get, .. } = ops[add_at - 6] else {
         unreachable!()
     };
+    // `this.unit`, null-checked right before getAttributeUpCounts and not rewritten up to the add.
+    let Opcode::Call1 {
+        arg0: client_unit, ..
+    } = ops[add_at - 8]
+    else {
+        unreachable!()
+    };
+    if client.regs[client_unit.0 as usize] != unit_t
+        || !matches!(ops[add_at - 9], Opcode::NullCheck { reg } if reg == client_unit)
+        || ops[add_at - 7..add_at].iter().any(|op| match op {
+            Opcode::Call2 { dst, .. }
+            | Opcode::UnsafeCast { dst, .. }
+            | Opcode::SafeCast { dst, .. }
+            | Opcode::GetThis { dst, .. }
+            | Opcode::Field { dst, .. } => *dst == client_unit,
+            Opcode::NullCheck { .. } => false,
+            _ => true,
+        })
+    {
+        bail!("client: the unit register is not live and null-checked at the add");
+    }
+    let (used_f, used_t) = field(code, unit_t, "usedAptitudePoints")?;
     let i32_t = client.regs[cnt.0 as usize];
-    if client.regs[extra.0 as usize] != i32_t || apt_t != i32_t {
-        bail!("client: count/n/aptitudePoints are not all i32");
+    if client.regs[extra.0 as usize] != i32_t || apt_t != i32_t || used_t != i32_t {
+        bail!("client: count/n/aptitudePoints/usedAptitudePoints are not all i32");
     }
     if !matches!(code.types[i32_t.0], Type::I32) {
         bail!("client: count is not i32");
@@ -236,6 +271,8 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         add_at,
         cnt,
         extra,
+        client_unit,
+        used_f,
         host_fi,
         at,
         skip,
@@ -255,6 +292,8 @@ fn plan(code: &Bytecode) -> Result<Plan> {
 
 fn apply(code: &mut Bytecode, p: Plan) {
     let zero_c = int_const(code, 0);
+    let two_c = int_const(code, 2);
+    let three_c = int_const(code, 3);
 
     // ---- host
     let f = &mut code.functions[p.host_fi];
@@ -269,6 +308,9 @@ fn apply(code: &mut Bytecode, p: Plan) {
     let map = reg(p.map_t);
     let dynv = reg(p.dyn_t);
     let nl = reg(p.null_i32_t);
+    let k = reg(p.i32_t);
+    let used = reg(p.i32_t);
+    let cur = reg(p.i32_t);
     let mut ops = vec![
         Opcode::JNull {
             reg: p.unit,
@@ -297,7 +339,32 @@ fn apply(code: &mut Bytecode, p: Plan) {
             dst: extra,
             src: p.count,
         },
-        Opcode::Decr { dst: extra },
+        Opcode::Decr { dst: extra }, // 6: e = -1 - count
+        Opcode::Int { dst: k, ptr: two_c },
+        Opcode::SShr {
+            dst: used,
+            a: extra,
+            b: k,
+        }, // 8: e >> 2
+        Opcode::Field {
+            dst: cur,
+            obj: p.unit,
+            field: p.used_f,
+        },
+        Opcode::JNotEq {
+            a: used,
+            b: cur,
+            offset: 0,
+        }, // 10 -> SKIP (stale offer)
+        Opcode::Int {
+            dst: k,
+            ptr: three_c,
+        },
+        Opcode::And {
+            dst: extra,
+            a: extra,
+            b: k,
+        }, // 12: n = e & 3
         Opcode::Mov {
             dst: base,
             src: zero,
@@ -310,11 +377,11 @@ fn apply(code: &mut Bytecode, p: Plan) {
         Opcode::JNull {
             reg: map,
             offset: 0,
-        }, // 9 -> ADD
+        }, // 15 -> ADD
         Opcode::JNull {
             reg: p.attr,
             offset: 0,
-        }, // 10 -> ADD
+        }, // 16 -> ADD
         Opcode::Call2 {
             dst: dynv,
             fun: p.map_get,
@@ -322,13 +389,13 @@ fn apply(code: &mut Bytecode, p: Plan) {
             arg1: p.attr,
         },
         Opcode::UnsafeCast { dst: nl, src: dynv },
-        Opcode::JNull { reg: nl, offset: 0 }, // 13 -> ADD
+        Opcode::JNull { reg: nl, offset: 0 }, // 19 -> ADD
         Opcode::SafeCast { dst: base, src: nl },
         Opcode::Add {
             dst: p.count,
             a: base,
             b: extra,
-        }, // 15 ADD
+        }, // 21 ADD
     ];
     let len = ops.len();
     // Block coordinates: block op j sits at `at + j`; original op t >= at moves to t + len.
@@ -339,29 +406,57 @@ fn apply(code: &mut Bytecode, p: Plan) {
             (0, outside(p.ret_null)),
             (3, outside(p.skip)),
             (4, len),
-            (9, 15),
-            (10, 15),
-            (13, 15),
+            (10, outside(p.skip)),
+            (15, 21),
+            (16, 21),
+            (19, 21),
         ],
     );
     insert_ops(f, p.at, ops);
     eprintln!(
-        "patched career-plan host fn@{}: {len} ops at {} (aptitude guard -> op {}, re-derive count reg{} from host offer)",
+        "patched career-plan host fn@{}: {len} ops at {} (aptitude/offer guard -> op {}, re-derive count reg{} from host offer)",
         f.findex.0,
         p.at,
         p.skip + len,
         p.count.0
     );
 
-    // ---- client: `cnt = cnt + n` -> `cnt = -n; cnt--`
+    // ---- client: `cnt = cnt + n` -> `cnt = -1 - (n + (unit.usedAptitudePoints << 2))`
     let f = &mut code.functions[p.client_fi];
-    f.ops[p.add_at] = Opcode::Neg {
+    f.regs.push(p.i32_t);
+    let two = Reg((f.regs.len() - 1) as u32);
+    f.ops[p.add_at] = Opcode::Field {
         dst: p.cnt,
-        src: p.extra,
+        obj: p.client_unit,
+        field: p.used_f,
     };
-    insert_ops(f, p.add_at + 1, vec![Opcode::Decr { dst: p.cnt }]);
+    insert_ops(
+        f,
+        p.add_at + 1,
+        vec![
+            Opcode::Int {
+                dst: two,
+                ptr: two_c,
+            },
+            Opcode::Shl {
+                dst: p.cnt,
+                a: p.cnt,
+                b: two,
+            },
+            Opcode::Add {
+                dst: p.cnt,
+                a: p.cnt,
+                b: p.extra,
+            },
+            Opcode::Neg {
+                dst: p.cnt,
+                src: p.cnt,
+            },
+            Opcode::Decr { dst: p.cnt },
+        ],
+    );
     eprintln!(
-        "patched career-plan client fn@{}: count = -1 - n at op {}",
+        "patched career-plan client fn@{}: count = -1 - (n + (usedAptitudePoints << 2)) at op {}",
         f.findex.0, p.add_at
     );
 }
@@ -430,28 +525,52 @@ mod tests {
         }
 
         let c = &back.functions[cfi];
+        let oc = &orig.functions[cfi];
+        let a = p.add_at;
         assert!(
-            matches!(c.ops[p.add_at], Opcode::Neg { dst, src } if dst == p.cnt && src == p.extra)
+            matches!(c.ops[a], Opcode::Field { dst, obj, field } if dst == p.cnt && obj == p.client_unit && field == p.used_f)
         );
-        assert!(matches!(c.ops[p.add_at + 1], Opcode::Decr { dst } if dst == p.cnt));
-        assert_eq!(c.ops.len(), orig.functions[cfi].ops.len() + 1);
+        assert!(matches!(c.ops[a + 1], Opcode::Int { ptr, .. } if back.ints[ptr.0] == 2));
+        assert!(
+            matches!(c.ops[a + 2], Opcode::Shl { dst, a: x, .. } if dst == p.cnt && x == p.cnt)
+        );
+        assert!(
+            matches!(c.ops[a + 3], Opcode::Add { dst, a: x, b } if dst == p.cnt && x == p.cnt && b == p.extra)
+        );
+        assert!(matches!(c.ops[a + 4], Opcode::Neg { dst, src } if dst == p.cnt && src == p.cnt));
+        assert!(matches!(c.ops[a + 5], Opcode::Decr { dst } if dst == p.cnt));
+        assert_eq!(c.ops.len(), oc.ops.len() + 5);
+        assert_eq!(ops(&c.ops[..a]), ops(&oc.ops[..a]));
+        assert_eq!(ops(&c.ops[a + 6..]), ops(&oc.ops[a + 1..]));
 
         let h = &back.functions[hfi];
         let oh = &orig.functions[hfi];
-        assert_eq!(h.ops.len(), oh.ops.len() + 16);
-        assert_eq!(h.regs.len(), oh.regs.len() + 7);
+        let n = 22;
+        assert_eq!(h.ops.len(), oh.ops.len() + n);
+        assert_eq!(h.regs.len(), oh.regs.len() + 10);
         assert_eq!(ops(&h.ops[..p.at - 1]), ops(&oh.ops[..p.at - 1]));
-        assert_eq!(ops(&h.ops[p.at + 16..]), ops(&oh.ops[p.at..]));
-        assert!(matches!(h.ops[p.at + 15], Opcode::Add { dst, .. } if dst == p.count));
-        // Every jump lands inside the function, the aptitude guard on the old skip target.
+        assert_eq!(ops(&h.ops[p.at + n..]), ops(&oh.ops[p.at..]));
+        assert!(matches!(h.ops[p.at + n - 1], Opcode::Add { dst, .. } if dst == p.count));
+        assert!(matches!(h.ops[p.at + 8], Opcode::SShr { .. }));
+        assert!(
+            matches!(h.ops[p.at + 9], Opcode::Field { obj, field, .. } if obj == p.unit && field == p.used_f)
+        );
+        assert!(matches!(h.ops[p.at + 12], Opcode::And { .. }));
+        // Every jump lands inside the function; the aptitude and stale-offer
+        // guards on the old skip target (before the Influence spend).
         for i in 0..h.ops.len() {
             for t in jump_targets(h, i) {
                 assert!(t < h.ops.len(), "op {i} jumps out of range");
             }
         }
-        assert_eq!(jump_targets(h, p.at + 3), vec![p.skip + 16]);
-        assert_eq!(jump_targets(h, p.at), vec![p.ret_null + 16]);
-        assert_eq!(jump_targets(h, p.at - 1), vec![p.skip + 16]);
+        assert_eq!(jump_targets(h, p.at + 3), vec![p.skip + n]);
+        assert_eq!(jump_targets(h, p.at + 10), vec![p.skip + n]);
+        assert_eq!(jump_targets(h, p.at + 4), vec![p.at + n]);
+        for j in [15, 16, 19] {
+            assert_eq!(jump_targets(h, p.at + j), vec![p.at + 21]);
+        }
+        assert_eq!(jump_targets(h, p.at), vec![p.ret_null + n]);
+        assert_eq!(jump_targets(h, p.at - 1), vec![p.skip + n]);
 
         // A second pass finds nothing to patch and leaves the image alone.
         let mut again = read(&patched);
