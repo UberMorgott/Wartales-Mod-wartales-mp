@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Morgott. Licensed under CC BY-NC 4.0.
 //
-// Co-op: a leave from a place (town, tavern, location) is never blocked by
-// another player's business.
+// Co-op: a leave from a place (town, tavern, location) or from the owned tavern
+// is never blocked by another player's business.
 //
 // Vanilla, in a place (world.PlaceView), the host decides every leave:
 // `PlaceContent.update` disables the Leave button while ANY connected player
@@ -24,14 +24,15 @@
 //        // player only; an empty list means nobody asks any more)
 //        // a leave is pending: release this machine's own lock the vanilla way
 //        if (!game.inFade() && me.lockedWith != null) {
-//            w = the top window, in game.mode.windows then game.globalUI.windows,
-//                of a lock-holding class (UnitInfo, ChooseUnit, FiefMandateDetails,
-//                GarnisonManager, CounterChest) whose tryClose() (canBeClosed) is true;
+//            w = flClosable(game): the top window, in game.mode.windows then
+//                game.globalUI.windows, of a lock-holding class whose tryClose()
+//                (canBeClosed) is true (LOCK_WINDOWS);
 //            if (w != null && w != lastClosed) { lastClosed = w; println; w.close(); }
 //        }
 //        // host: leave as soon as nothing refuses, waiting (never skipping) otherwise
-//        if (isAuth) { why = flWhy(view, true); print it when it changes;
-//                      if (why == 0) view.tryClose(); }
+//        if (isAuth) { why = flWhy(view, true);
+//                      if (why == 0 || why == dialog open) why = flDialog(view) || why;
+//                      print it when it changes; if (why == 0) view.tryClose(); }
 //      `close()` is the class's own close: Window.close (removeChild -> onRemove
 //      -> the onClose the lock site installed, which clears lockedWith and, for
 //      the dialog inspect, unhides the dialog), ChooseUnit.close -> cancel() ->
@@ -39,21 +40,67 @@
 //      player's own Escape / Cancel does. The lock clears on the owner and
 //      replicates; tryClose re-checks everything and leave() (guarded by
 //      `leaving`) runs syncLeaveMode, the normal barrier.
-//      Waited on, not cancelled: activities / crafting / gathering (they set
-//      lockLeave themselves and end on their own), a shared dialog (every player
-//      sees it and can end it), fades, cinematics, a running mode switch.
+//      Crafting that has not started is cancelled the same way: ui.win.Craft
+//      (opened by Tool.startCraft with its Activity in `act`) has the onClose
+//      `if (!act.started) { act.cancel(); act.onClose(); }` (Tool.hx), which is
+//      what its X / Escape runs; flClosable takes a Craft only while
+//      `!act.started` and while no modal window is open over it (its sub-windows
+//      Alter (same `act` test) and Dismantle are closed first, back to the Craft;
+//      a confirm or any other modal window over it keeps the wait). Gathering
+//      and scripted activities are cancelled in their ChooseUnit, as before.
+//      Started activities, crafts and gathering have no safe cancel: the leave
+//      waits until they end ("player busy" with their `lockedWith`).
+//   F4 The shared dialog (host): flDialog(view) finds the ui.win.Dialog in
+//      game.mode.windows and ends it with its own Dialog.tryClose (what Escape
+//      calls: `visible && api.allowLeave` -> leave(null), the Leave button's
+//      action) only at an idle choice point: no leave already running
+//      (`alreadyLeave`), no modal window over it in either window list, no
+//      mode switch or pause, the Leave choice is on screen (`leaveButton`,
+//      created by displayChoices iff the node allows leaving) and the dialog is
+//      visible (a choice being resolved hides it: dialog__impl sets hidden
+//      around its script event; special actions hide it, lock a player or open
+//      a modal window). flWhy's earlier refusals (a player lockedWith, fade,
+//      cinematic, camera entering the dialog) come first. After the leave, its
+//      choice buttons are reset (resetChoices), so a late Leave / choice click
+//      (setClick finds buttons by net id in the window tree) cannot run leave()
+//      a second time (Dialog.leave re-runs onLeft when alreadyLeave). Scripted
+//      dialogs that cannot be left (props.noLeave / api.allowLeave = false: no
+//      Leave choice) keep the wait ("dialog can't be left"); so does any other
+//      state ("dialog busy"). The place leave also waits while a Dialog window
+//      still exists (its leave script event runs after the camera returns).
+//   T  The owned tavern (world.tavern.TavernMode). Vanilla Tavern.askLeave__impl
+//      (TavernWindow Leave, RPC to the host) returns silently while any player
+//      is locked or the controller is locked, and never retries;
+//      Controller.closeTavern__impl (Escape) skips the player-lock test.
+//      Tavern.askLeave__impl gets `if (tlAsk(this)) return;` in front:
+//        tlAsk (host, multi): why = tlWhy(game) (player lockedWith, fade, alive
+//        lock, mode-switch barrier running); 0 -> clear pending, vanilla body
+//        runs (syncLeaveMode); else mark pending (global = this TavernMode;
+//        `tavern.leaveState.forced = true` through the proxy mark, as
+//        Place.setLeaveState__impl does: that field is replicated, saved and
+//        otherwise unused, Tavern.enter recreates it) and return.
+//      Controller.closeTavern__impl gets `if (tlClose(this)) return;`: in multi,
+//      in a TavernMode, it runs tavern.askLeave__impl() instead (same policy).
+//      TavernMode.update, every machine, `tlUpdate(mode)`: while
+//      `leaveState.forced` (host: and the pending global is this mode, else a
+//      stale flag from a save or an earlier visit is cleared) every machine
+//      closes its own lock-holding window as F2; the host re-checks tlWhy each
+//      frame and calls askLeave__impl once nothing refuses.
 //   F3 Diagnostics (shim.log "game: mp: ..." lines): tryClose prints the reason
 //      it refuses ("mp: tryClose refused: <why>"), the pending leave prints each
-//      change of what it waits on ("mp: leave pending: <why|go>") and every window
-//      it closes ("mp: leave closes <type>"), PlaceView.leave prints a refusal
-//      while the game is paused (at most every 5 s).
+//      change of what it waits on ("mp: leave pending: <why|go>", "mp: tavern
+//      leave pending: <why|go>"), every window it closes ("mp: leave closes
+//      <type>") and every dialog it ends ("mp: leave ends dialog");
+//      PlaceView.leave prints a refusal while the game is paused (at most every
+//      5 s).
 //
 // Coordination: the G1 repeat guard still runs the Leave button once per click
 // burst and drops clicks while the mode-switch barrier runs; the pending leave
 // waits for that barrier too and leave() runs once per PlaceView. The follow
 // pass is world-map only.
 //
-// Validated before editing; a mismatch skips the pass (logged).
+// Validated before editing; a mismatch skips the pass (logged). The tavern part
+// (T) is validated on its own and skipped alone on a mismatch.
 
 use super::*;
 use crate::asm::{push_fn, Asm, Regs};
@@ -64,11 +111,13 @@ const PENDING: &str = "mp: leave pending: ";
 const REFUSED: &str = "mp: tryClose refused: ";
 const CLOSES: &str = "mp: leave closes ";
 const PAUSED: &str = "mp: leave refused: paused";
+const ENDS: &str = "mp: leave ends dialog";
+const TPENDING: &str = "mp: tavern leave pending: ";
 /// Seconds between two "paused" refusal lines.
 const PAUSED_EVERY: f64 = 5.0;
 
-/// Reason codes of `flWhy` (0 = nothing refuses) and their log text.
-const REASONS: [&str; 11] = [
+/// Reason codes of `flWhy` / `flDialog` / `tlWhy` (0 = nothing refuses) and their log text.
+const REASONS: [&str; 14] = [
     "go",
     "lockLeave",
     "player busy",
@@ -80,16 +129,36 @@ const REASONS: [&str; 11] = [
     "dialog open",
     "mode switch running",
     "paused",
+    "dialog can't be left",
+    "dialog busy",
+    "alive lock",
 ];
-const R_LOCKED: i32 = 2;
+const R_LOCKED: usize = 2;
+const R_FADE: usize = 5;
+const R_DIALOG: usize = 8;
+const R_SYNC: usize = 9;
+const R_PAUSED: usize = 10;
+const R_NO_LEAVE: usize = 11;
+const R_DLG_BUSY: usize = 12;
+const R_ALIVE: usize = 13;
 
-/// Window classes whose `close()` is the vanilla cancel of a `lockedWith`.
-const LOCK_WINDOWS: [&str; 5] = [
-    "ui.win.UnitInfo",
-    "ui.win.ChooseUnit",
-    "ui.win.fief.FiefMandateDetails",
-    "ui.win.GarnisonManager",
-    "ui.win.CounterChest",
+/// Window classes whose `close()` is the vanilla cancel of a `lockedWith`, and the
+/// extra test before the pending leave closes one: 0 none; 1 no modal window is
+/// open over it (above it in its list, or in globalUI.windows for a mode
+/// window); 2 = 1 and its `act` (ui.win.Activity) has not started.
+const LOCK_WINDOWS: [(&str, i32); 8] = [
+    ("ui.win.UnitInfo", 0),
+    ("ui.win.ChooseUnit", 0),
+    ("ui.win.fief.FiefMandateDetails", 0),
+    ("ui.win.GarnisonManager", 0),
+    ("ui.win.CounterChest", 0),
+    ("ui.win.Craft", 2),
+    ("ui.win.Alter", 2),
+    ("ui.win.Dismantle", 1),
+];
+const SKIP: [[&str; 8]; 2] = [
+    ["s00", "s01", "s02", "s03", "s04", "s05", "s06", "s07"],
+    ["s10", "s11", "s12", "s13", "s14", "s15", "s16", "s17"],
 ];
 
 type F = (RefField, RefType);
@@ -100,6 +169,49 @@ struct T {
     i32_: RefType,
     f64_: RefType,
     str_: RefType,
+}
+
+/// A LOCK_WINDOWS entry: class global, its type, the instance type, the guard
+/// and (guard 2) the `act` field.
+struct Lock {
+    g: RefGlobal,
+    gt: RefType,
+    ct: RefType,
+    guard: i32,
+    act: Option<RefField>,
+}
+
+/// ui.win.Dialog.
+struct Dlg {
+    t: RefType,
+    cls: (RefGlobal, RefType),
+    already: RefField,
+    visible: RefField,
+    leave_btn: F,
+    choices: F,
+    try_close: RefFun,
+    reset: RefFun,
+}
+
+/// The owned tavern part.
+struct Tav {
+    tm_t: RefType,
+    tm_cls: (RefGlobal, RefType),
+    tm_game: RefField,
+    get_tavern: RefFun,
+    tav_t: RefType,
+    tav_game: RefField,
+    tav_ls: RefField,
+    ctrl_game: RefField,
+    px_obj: F,
+    px_bit: RefField,
+    px_mark: RefField,
+    is_locked: RefFun,
+    ask: RefFun,
+    ask_fi: usize,
+    close_fi: usize,
+    upd_fi: usize,
+    dbg_file: usize,
 }
 
 struct Plan {
@@ -142,8 +254,14 @@ struct Plan {
     w_name: F,
     w_try_close: RefField,
     w_close: RefField,
-    classes: Vec<(RefGlobal, RefType)>,
+    w_modal: F,
+    /// Construct index of `WindowModalMode.None`.
+    modal_none: i32,
+    locks: Vec<Lock>,
+    act_t: RefType,
+    act_started: RefField,
     base_check: RefFun,
+    dlg: Dlg,
     // functions
     is_multi: RefFun,
     any_locked: (RefFun, RefType),
@@ -166,6 +284,7 @@ struct Plan {
     /// PlaceContent.update: the `JTrue anyPlayerLocked` that disables Leave.
     content_at: usize,
     dbg_file: usize,
+    tav: Option<Tav>,
 }
 
 fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
@@ -234,6 +353,21 @@ fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
         bail!("{name}: class global is not {want}");
     }
     Ok((g, t))
+}
+
+fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
+    let mut cur = Some(t);
+    while let Some(c) = cur {
+        if c == of {
+            return Ok(true);
+        }
+        cur = obj(code, c)?.super_;
+    }
+    Ok(false)
+}
+
+fn no_jump_to(f: &Function, at: usize) -> bool {
+    !(0..f.ops.len()).any(|i| jump_targets(f, i).contains(&at))
 }
 
 fn plan(code: &Bytecode) -> Result<Plan> {
@@ -320,16 +454,36 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
     let w_try_close = slot(code, win_t, "tryClose")?;
     let w_close = slot(code, win_t, "close")?;
-    let mut classes = vec![];
-    for name in LOCK_WINDOWS {
-        let mut cur = Some(obj_type(code, name)?);
-        while let Some(c) = cur.filter(|&c| c != win_t) {
-            cur = obj(code, c)?.super_;
-        }
-        if cur.is_none() {
+    let w_modal = field(code, win_t, "modal")?;
+    let modal_none = match &code.types[w_modal.1 .0] {
+        Type::Enum { constructs, .. } => constructs
+            .iter()
+            .position(|c| s(code, c.name) == "None" && c.params.is_empty()),
+        _ => None,
+    }
+    .context("Window.modal is not an enum with a None construct")?;
+    let modal_none = i32::try_from(modal_none)?;
+    let act_t = obj_type(code, "ui.win.Activity")?;
+    let act_started = typed(act_t, "started", t.bool_)?;
+    let mut locks = vec![];
+    for (name, guard) in LOCK_WINDOWS {
+        let ct = obj_type(code, name)?;
+        if !is_sub(code, ct, win_t)? {
             bail!("{name} is not a ui.Window");
         }
-        classes.push(class_global(code, name)?);
+        let (g, gt) = class_global(code, name)?;
+        let act = if guard == 2 {
+            Some(typed(ct, "act", act_t)?)
+        } else {
+            None
+        };
+        locks.push(Lock {
+            g,
+            gt,
+            ct,
+            guard,
+            act,
+        });
     }
     let base_t = obj_type(code, "hl.BaseType")?;
     let check = method(code, base_t, "check")?;
@@ -344,6 +498,46 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         }
         Ok(f)
     };
+
+    // ui.win.Dialog: Escape's tryClose = `visible && allowLeave -> leave(null)`.
+    let dlg_t = obj_type(code, "ui.win.Dialog")?;
+    if !is_sub(code, dlg_t, win_t)? {
+        bail!("ui.win.Dialog is not a ui.Window");
+    }
+    let leave_btn = field(code, dlg_t, "leaveButton")?;
+    let choices = field(code, dlg_t, "currentChoices")?;
+    if obj(code, leave_btn.1).is_err() || !matches!(code.types[choices.1 .0], Type::Virtual { .. })
+    {
+        bail!("Dialog.leaveButton / currentChoices have unexpected types");
+    }
+    let dlg_try_close = proto(code, dlg_t, "tryClose")?;
+    if sig(code, dlg_try_close)? != (vec![dlg_t], t.bool_) {
+        bail!("unexpected Dialog.tryClose signature");
+    }
+    let dlg_leave = method(code, dlg_t, "leave")?.findex;
+    let tc = &code.functions[fun_index(code, dlg_try_close)?];
+    let api_allow = tc.ops.iter().any(|op| {
+        matches!(op, Opcode::Field { obj, field, .. }
+            if obj_field_name(code, tc.regs[obj.0 as usize], *field) == Some("allowLeave"))
+    });
+    let calls_leave = tc
+        .ops
+        .iter()
+        .any(|op| matches!(op, Opcode::Call2 { fun, .. } if *fun == dlg_leave));
+    if !api_allow || !calls_leave {
+        bail!("Dialog.tryClose does not test allowLeave and call leave()");
+    }
+    let dlg = Dlg {
+        t: dlg_t,
+        cls: class_global(code, "ui.win.Dialog")?,
+        already: typed(dlg_t, "alreadyLeave", t.bool_)?,
+        visible: typed(dlg_t, "visible", t.bool_)?,
+        leave_btn,
+        choices,
+        try_close: dlg_try_close,
+        reset: m(dlg_t, "resetChoices", &[dlg_t], t.void)?,
+    };
+
     let is_multi = m(game_t, "get_isMulti", &[game_t], t.bool_)?;
     let in_fade = m(game_t, "inFade", &[game_t], t.bool_)?;
     let paused = m(game_t, "get_paused", &[game_t], t.bool_)?;
@@ -417,7 +611,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     {
         bail!("PlaceView.tryClose does not call leave()");
     }
-    if (0..tc.ops.len()).any(|i| jump_targets(tc, i).contains(&0)) {
+    if !no_jump_to(tc, 0) {
         bail!("PlaceView.tryClose: a jump targets op 0");
     }
 
@@ -427,7 +621,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("unexpected PlaceView.update signature");
     }
     let update_fi = fun_index(code, upd.findex)?;
-    if (0..upd.ops.len()).any(|i| jump_targets(upd, i).contains(&0)) {
+    if !no_jump_to(upd, 0) {
         bail!("PlaceView.update: a jump targets op 0");
     }
 
@@ -447,7 +641,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if !shape || reads(lv, v_leaving, view_t).is_none_or(|i| i < paused_ret) {
         bail!("PlaceView.leave: no `if (paused) return` before the leaving test");
     }
-    if (0..lv.ops.len()).any(|i| jump_targets(lv, i).contains(&paused_ret)) {
+    if !no_jump_to(lv, paused_ret) {
         bail!("PlaceView.leave: a jump targets the paused return");
     }
 
@@ -483,7 +677,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("PlaceContent.update: the lock test does not feed set_enable");
     }
 
-    Ok(Plan {
+    let mut p = Plan {
         dbg_file: debug_file(code, "src/world/PlaceView.hx")?,
         t,
         view_t,
@@ -520,8 +714,13 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         w_name,
         w_try_close,
         w_close,
-        classes,
+        w_modal,
+        modal_none,
+        locks,
+        act_t,
+        act_started,
         base_check: check.findex,
+        dlg,
         is_multi,
         any_locked: (any_locked, lock_ref),
         get_locked,
@@ -539,7 +738,153 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         paused_ret,
         content_fi,
         content_at,
+        tav: None,
+    };
+    match plan_tavern(code, &p, place_t) {
+        Ok(tv) => p.tav = Some(tv),
+        Err(e) => eprintln!("force leave: owned tavern part skipped: {e:#}"),
+    }
+    Ok(p)
+}
+
+/// Name of field `f` of object type `t`, if `t` is an object.
+fn obj_field_name(code: &Bytecode, t: RefType, f: RefField) -> Option<&str> {
+    let o = code.types[t.0].get_type_obj()?;
+    o.fields.get(f.0).map(|x| s(code, x.name))
+}
+
+/// The owned-tavern sites: Tavern.askLeave__impl, Controller.closeTavern__impl,
+/// TavernMode.update, and the leaveState proxy mark copied from
+/// Place.setLeaveState__impl.
+fn plan_tavern(code: &Bytecode, p: &Plan, place_t: RefType) -> Result<Tav> {
+    let t = &p.t;
+    let ctrl_t = p.g_ctrl.1;
+    let tm_t = obj_type(code, "world.tavern.TavernMode")?;
+    let tav_t = obj_type(code, "st.player.Tavern")?;
+    let typed = |o: RefType, name: &str, want: RefType| -> Result<RefField> {
+        let (f, ft) = field(code, o, name)?;
+        if ft != want {
+            bail!("field {name} has an unexpected type");
+        }
+        Ok(f)
+    };
+    let m =
+        |o: RefType, name: &str, want_args: &[RefType], want_ret: RefType| -> Result<&Function> {
+            let f = method(code, o, name)?;
+            if sig(code, f.findex)? != (want_args.to_vec(), want_ret) {
+                bail!("unexpected {name} signature");
+            }
+            Ok(f)
+        };
+    let tm_game = typed(tm_t, "game", p.game_t)?;
+    let get_tavern = m(tm_t, "get_tavern", &[tm_t], tav_t)?.findex;
+    let tav_game = typed(tav_t, "game", p.game_t)?;
+    let tav_ls = typed(tav_t, "leaveState", p.p_leave_state.1)?;
+    let ctrl_game = typed(ctrl_t, "game", p.game_t)?;
+    let is_locked = m(ctrl_t, "isLocked", &[ctrl_t], t.bool_)?.findex;
+    let sync = method(code, ctrl_t, "syncLeaveMode")?.findex;
+
+    // The proxy mark, as Place.setLeaveState__impl writes `forced`:
+    //   o = ls.obj; NullCheck o; bit = ls.bit; o.<mark>(bit); ls.forced = v
+    let px_t = p.p_leave_state.1;
+    let sl = method(code, place_t, "setLeaveState__impl")?;
+    let px = |r: &Reg| sl.regs[r.0 as usize] == px_t;
+    let hits: Vec<(F, RefField, RefField)> = (4..sl.ops.len())
+        .filter_map(|k| match &sl.ops[k - 4..=k] {
+            [Opcode::Field {
+                dst: o,
+                obj: x0,
+                field: objf,
+            }, Opcode::NullCheck { reg: o2 }, Opcode::Field {
+                dst: b,
+                obj: x1,
+                field: bitf,
+            }, Opcode::CallMethod {
+                field: mark, args, ..
+            }, Opcode::SetField {
+                obj: x2,
+                field: forced,
+                ..
+            }] if *forced == p.ls_forced
+                && px(x0)
+                && px(x1)
+                && px(x2)
+                && o == o2
+                && args[..] == [*o, *b] =>
+            {
+                Some(((*objf, sl.regs[o.0 as usize]), *bitf, *mark))
+            }
+            _ => None,
+        })
+        .collect();
+    let [(px_obj, px_bit, px_mark)] = hits[..] else {
+        bail!(
+            "Place.setLeaveState__impl: expected one marked `forced` write, found {}",
+            hits.len()
+        );
+    };
+    if !matches!(code.types[px_obj.1 .0], Type::Virtual { .. })
+        || field_t(code, px_t, px_bit) != Some(t.i32_)
+        || field_t(code, px_t, px_obj.0) != Some(px_obj.1)
+    {
+        bail!("leaveState proxy obj / bit have unexpected types");
+    }
+
+    // Tavern.askLeave__impl: `if (anyPlayerLocked(&true)) return; if
+    // (ctrl.isLocked()) return; ctrl.syncLeaveMode(..)`.
+    let ask = m(tav_t, "askLeave__impl", &[tav_t], t.void)?;
+    let call_of = |f: &Function, want: RefFun| {
+        f.ops.iter().position(|op| match op {
+            Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. } | Opcode::Call3 { fun, .. } => {
+                *fun == want
+            }
+            _ => false,
+        })
+    };
+    let order = [
+        call_of(ask, p.any_locked.0),
+        call_of(ask, is_locked),
+        call_of(ask, sync),
+    ];
+    if order.iter().any(Option::is_none) || !order.windows(2).all(|w| w[0] < w[1]) {
+        bail!("Tavern.askLeave__impl: lock tests / syncLeaveMode not found: {order:?}");
+    }
+    if !no_jump_to(ask, 0) {
+        bail!("Tavern.askLeave__impl: a jump targets op 0");
+    }
+    // Controller.closeTavern__impl: `if (isLocked() || waitLocks.length > 0)
+    // return; if (mode is TavernMode) syncLeaveMode(..)`.
+    let ct = m(ctrl_t, "closeTavern__impl", &[ctrl_t], t.void)?;
+    if call_of(ct, is_locked).is_none() || call_of(ct, sync).is_none() || !no_jump_to(ct, 0) {
+        bail!("Controller.closeTavern__impl has an unexpected shape");
+    }
+    let upd = m(tm_t, "update", &[tm_t, t.f64_], t.void)?;
+    if !no_jump_to(upd, 0) {
+        bail!("TavernMode.update: a jump targets op 0");
+    }
+    Ok(Tav {
+        tm_t,
+        tm_cls: class_global(code, "world.tavern.TavernMode")?,
+        tm_game,
+        get_tavern,
+        tav_t,
+        tav_game,
+        tav_ls,
+        ctrl_game,
+        px_obj,
+        px_bit,
+        px_mark,
+        is_locked,
+        ask: ask.findex,
+        ask_fi: fun_index(code, ask.findex)?,
+        close_fi: fun_index(code, ct.findex)?,
+        upd_fi: fun_index(code, upd.findex)?,
+        dbg_file: debug_file(code, "src/world/tavern/TavernMode.hx")?,
     })
+}
+
+fn field_t(code: &Bytecode, t: RefType, f: RefField) -> Option<RefType> {
+    code.types[t.0].get_type_obj()?.fields.get(f.0).map(|x| x.t)
 }
 
 struct Globals {
@@ -549,6 +894,12 @@ struct Globals {
     closed: RefGlobal,
     /// sys_time of the last "paused" refusal line.
     paused_at: RefGlobal,
+    /// Host: the TavernMode whose leave is pending (null = none).
+    tl_mode: RefGlobal,
+    /// Last logged tavern pending reason + 1.
+    tl_last: RefGlobal,
+    /// The window the pending tavern leave closed last.
+    tl_closed: RefGlobal,
 }
 
 fn add_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
@@ -556,12 +907,81 @@ fn add_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
     RefGlobal(code.globals.len() - 1)
 }
 
+/// Int constant refs for every reason code.
+fn reason_ints(code: &mut Bytecode) -> Vec<hlbc::types::RefInt> {
+    (0..REASONS.len() as i32)
+        .map(|i| int_const(code, i))
+        .collect()
+}
+
+/// `Field md = w.modal; JNull md -> l; mi = EnumIndex md; JEq mi, none -> l`:
+/// falls through only when `w` is a modal window.
+fn modal_test(a: &mut Asm, p: &Plan, w: Reg, md: Reg, mi: Reg, none: Reg, l: &'static str) {
+    a.op(Opcode::Field {
+        dst: md,
+        obj: w,
+        field: p.w_modal.0,
+    });
+    a.jmp(Opcode::JNull { reg: md, offset: 0 }, l);
+    a.op(Opcode::EnumIndex { dst: mi, value: md });
+    a.jmp(
+        Opcode::JEq {
+            a: mi,
+            b: none,
+            offset: 0,
+        },
+        l,
+    );
+}
+
+/// Loop over `lst` top-down: `i = lst.length; head: if (i <= 0) goto out;
+/// w = lst[--i]; if (w == null) goto head;` (the caller emits the body).
+#[allow(clippy::too_many_arguments)]
+fn top_down(
+    a: &mut Asm,
+    p: &Plan,
+    lst: Reg,
+    i: Reg,
+    zero: Reg,
+    raw: Reg,
+    d: Reg,
+    w: Reg,
+    head: &'static str,
+    out: &'static str,
+) {
+    a.op(Opcode::Field {
+        dst: i,
+        obj: lst,
+        field: p.a_len,
+    });
+    a.loop_head(head);
+    a.jmp(
+        Opcode::JSLte {
+            a: i,
+            b: zero,
+            offset: 0,
+        },
+        out,
+    );
+    a.op(Opcode::Decr { dst: i });
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: lst,
+        field: p.a_raw.0,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: i,
+    });
+    a.op(Opcode::UnsafeCast { dst: w, src: d });
+    a.jmp(Opcode::JNull { reg: w, offset: 0 }, head);
+}
+
 /// `flWhy(view, poll) -> I32`: the first thing that makes `view.tryClose()`
 /// refuse (same order), and with `poll` what the pending leave also waits on.
 fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
-    let ints: Vec<_> = (0..REASONS.len() as i32)
-        .map(|i| int_const(code, i))
-        .collect();
+    let ints = reason_ints(code);
     let t = &p.t;
     let mut r = Regs(vec![p.view_t, t.bool_]);
     let (game, place, b, code_r, nul) = (
@@ -636,7 +1056,7 @@ fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         arg1: nul,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "cine");
-    ret(&mut a, 2);
+    ret(&mut a, R_LOCKED);
     // 3 cinematic
     a.label("cine");
     a.op(Opcode::Field {
@@ -680,7 +1100,7 @@ fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         arg0: game,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "auth");
-    ret(&mut a, 5);
+    ret(&mut a, R_FADE);
     // a client's tryClose forwards to the host: nothing else refuses there
     a.label("auth");
     a.op(Opcode::Field {
@@ -781,7 +1201,7 @@ fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         field: p.v_focus.0,
     });
     a.jmp(Opcode::JNull { reg: fe, offset: 0 }, "sync");
-    ret(&mut a, 8);
+    ret(&mut a, R_DIALOG);
     a.label("sync");
     a.op(Opcode::Field {
         dst: ctrl,
@@ -825,7 +1245,7 @@ fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         "paused",
     );
     a.label("busy");
-    ret(&mut a, 9);
+    ret(&mut a, R_SYNC);
     a.label("paused");
     a.op(Opcode::Call1 {
         dst: b,
@@ -833,7 +1253,7 @@ fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         arg0: game,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ok");
-    ret(&mut a, 10);
+    ret(&mut a, R_PAUSED);
     a.label("ok");
     ret(&mut a, 0);
     push_fn(
@@ -846,16 +1266,14 @@ fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     )
 }
 
-const TEXT_LABELS: [&str; 11] = [
-    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10",
+const TEXT_LABELS: [&str; 14] = [
+    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10", "t11", "t12", "t13",
 ];
 
-/// `flLog(view, prefix, why)`: println(prefix + text(why)); for "player busy"
+/// `flLog(game, prefix, why)`: println(prefix + text(why)); for "player busy"
 /// also the first locked player's `lockedWith` and whose it is.
 fn add_log(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
-    let ints: Vec<_> = (0..REASONS.len() as i32)
-        .map(|i| int_const(code, i))
-        .collect();
+    let ints = reason_ints(code);
     let texts: Vec<_> = REASONS
         .iter()
         .map(|x| str_global(code, p.t.str_, x))
@@ -866,13 +1284,12 @@ fn add_log(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
     let unknown = str_global(code, p.t.str_, "?");
     let t = &p.t;
     let bp_t = p.g_me.1;
-    let mut r = Regs(vec![p.view_t, t.str_, t.i32_]);
-    let (s_r, x, y, k, game, arr, n, zero) = (
+    let mut r = Regs(vec![p.game_t, t.str_, t.i32_]);
+    let (s_r, x, y, k, arr, n, zero) = (
         r.r(t.str_),
         r.r(t.str_),
         r.r(t.str_),
         r.r(t.i32_),
-        r.r(p.game_t),
         r.r(p.arr_t),
         r.r(t.i32_),
         r.r(t.i32_),
@@ -886,6 +1303,7 @@ fn add_log(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
         r.r(t.bool_),
         r.r(t.void),
     );
+    let game = Reg(0);
     let mut a = Asm::new();
     a.op(Opcode::GetGlobal {
         dst: x,
@@ -917,7 +1335,7 @@ fn add_log(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
     });
     a.op(Opcode::Int {
         dst: k,
-        ptr: ints[R_LOCKED as usize],
+        ptr: ints[R_LOCKED],
     });
     a.jmp(
         Opcode::JNotEq {
@@ -927,10 +1345,6 @@ fn add_log(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
         },
         "print",
     );
-    a.op(Opcode::GetThis {
-        dst: game,
-        field: p.v_game.0,
-    });
     a.jmp(
         Opcode::JNull {
             reg: game,
@@ -1051,7 +1465,7 @@ fn add_log(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
     a.op(Opcode::Ret { ret: v });
     push_fn(
         code,
-        vec![p.view_t, t.str_, t.i32_],
+        vec![p.game_t, t.str_, t.i32_],
         t.void,
         r.0,
         a.finish(),
@@ -1065,14 +1479,26 @@ fn add_refused(code: &mut Bytecode, p: &Plan, why: RefFun, log: RefFun) -> Resul
     let refused = str_global(code, p.t.str_, REFUSED);
     let t = &p.t;
     let mut r = Regs(vec![p.view_t]);
-    let (b, c, zero, pre, v) = (
+    let (b, c, zero, pre, v, game) = (
         r.r(t.bool_),
         r.r(t.i32_),
         r.r(t.i32_),
         r.r(t.str_),
         r.r(t.void),
+        r.r(p.game_t),
     );
     let mut a = Asm::new();
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: p.v_game.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "end",
+    );
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(false),
@@ -1099,7 +1525,7 @@ fn add_refused(code: &mut Bytecode, p: &Plan, why: RefFun, log: RefFun) -> Resul
     a.op(Opcode::Call3 {
         dst: v,
         fun: log,
-        arg0: Reg(0),
+        arg0: game,
         arg1: pre,
         arg2: c,
     });
@@ -1109,26 +1535,80 @@ fn add_refused(code: &mut Bytecode, p: &Plan, why: RefFun, log: RefFun) -> Resul
 }
 
 /// `flClosable(game) -> Window`: the top window of a lock-holding class that
-/// may be closed (`tryClose()`), in game.mode.windows then game.globalUI.windows.
+/// may be closed (`tryClose()` and its LOCK_WINDOWS guard), in game.mode.windows
+/// then game.globalUI.windows.
 fn add_closable(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
     let i0 = int_const(code, 0);
+    let inone = int_const(code, p.modal_none);
     let t = &p.t;
     let mut r = Regs(vec![p.game_t]);
-    let (mode, gui, lst, i, zero, raw, d, w, b) = (
+    let (mode, gui, lst, i, zero, none, raw, d, w) = (
         r.r(p.g_mode.1),
         r.r(p.g_gui.1),
         r.r(p.arr_t),
         r.r(t.i32_),
         r.r(t.i32_),
+        r.r(t.i32_),
         r.r(p.a_raw.1),
         r.r(dyn_t),
         r.r(p.win_t),
-        r.r(t.bool_),
     );
-    let cls: Vec<(RefGlobal, Reg)> = p.classes.iter().map(|&(g, ct)| (g, r.r(ct))).collect();
+    let (b, above, gm, md, mi, act) = (
+        r.r(t.bool_),
+        r.r(t.bool_),
+        r.r(t.bool_),
+        r.r(p.w_modal.1),
+        r.r(t.i32_),
+        r.r(p.act_t),
+    );
+    let cls: Vec<(Reg, Option<Reg>)> = p
+        .locks
+        .iter()
+        .map(|l| (r.r(l.gt), l.act.map(|_| r.r(l.ct))))
+        .collect();
     let mut a = Asm::new();
     a.op(Opcode::Int { dst: zero, ptr: i0 });
-    for (k, (next, head, hit)) in [("gui", "loop1", "hit1"), ("none", "loop2", "hit2")]
+    a.op(Opcode::Int {
+        dst: none,
+        ptr: inone,
+    });
+    // gm: a modal window is open in globalUI.windows (over every mode window)
+    a.op(Opcode::Bool {
+        dst: gm,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Field {
+        dst: gui,
+        obj: Reg(0),
+        field: p.g_gui.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: gui,
+            offset: 0,
+        },
+        "pre_done",
+    );
+    a.op(Opcode::Field {
+        dst: lst,
+        obj: gui,
+        field: p.u_windows.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: lst,
+            offset: 0,
+        },
+        "pre_done",
+    );
+    top_down(&mut a, p, lst, i, zero, raw, d, w, "pre", "pre_done");
+    modal_test(&mut a, p, w, md, mi, none, "pre");
+    a.op(Opcode::Bool {
+        dst: gm,
+        value: ValBool(true),
+    });
+    a.label("pre_done");
+    for (k, (next, head, miss)) in [("gui", "loop1", "miss1"), ("none", "loop2", "miss2")]
         .into_iter()
         .enumerate()
     {
@@ -1150,6 +1630,10 @@ fn add_closable(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun>
                 obj: mode,
                 field: p.m_windows.0,
             });
+            a.op(Opcode::Mov {
+                dst: above,
+                src: gm,
+            });
         } else {
             a.label("gui");
             a.op(Opcode::Field {
@@ -1169,6 +1653,10 @@ fn add_closable(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun>
                 obj: gui,
                 field: p.u_windows.0,
             });
+            a.op(Opcode::Bool {
+                dst: above,
+                value: ValBool(false),
+            });
         }
         a.jmp(
             Opcode::JNull {
@@ -1177,35 +1665,12 @@ fn add_closable(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun>
             },
             next,
         );
-        a.op(Opcode::Field {
-            dst: i,
-            obj: lst,
-            field: p.a_len,
-        });
-        a.loop_head(head);
-        a.jmp(
-            Opcode::JSLte {
-                a: i,
-                b: zero,
-                offset: 0,
-            },
-            next,
-        );
-        a.op(Opcode::Decr { dst: i });
-        a.op(Opcode::Field {
-            dst: raw,
-            obj: lst,
-            field: p.a_raw.0,
-        });
-        a.op(Opcode::GetArray {
-            dst: d,
-            array: raw,
-            index: i,
-        });
-        a.op(Opcode::UnsafeCast { dst: w, src: d });
-        a.jmp(Opcode::JNull { reg: w, offset: 0 }, head);
-        for &(g, cr) in &cls {
-            a.op(Opcode::GetGlobal { dst: cr, global: g });
+        top_down(&mut a, p, lst, i, zero, raw, d, w, head, next);
+        for (j, (l, &(cr, cw))) in p.locks.iter().zip(&cls).enumerate() {
+            a.op(Opcode::GetGlobal {
+                dst: cr,
+                global: l.g,
+            });
             // A Window goes to BaseType.check's Dyn argument as is.
             a.op(Opcode::Call2 {
                 dst: b,
@@ -1213,17 +1678,54 @@ fn add_closable(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun>
                 arg0: cr,
                 arg1: w,
             });
-            a.jmp(Opcode::JTrue { cond: b, offset: 0 }, hit);
+            a.jmp(Opcode::JFalse { cond: b, offset: 0 }, SKIP[k][j]);
+            if l.guard >= 1 {
+                a.jmp(
+                    Opcode::JTrue {
+                        cond: above,
+                        offset: 0,
+                    },
+                    miss,
+                );
+            }
+            if let (Some(f), Some(cw)) = (l.act, cw) {
+                a.op(Opcode::UnsafeCast { dst: cw, src: w });
+                a.op(Opcode::Field {
+                    dst: act,
+                    obj: cw,
+                    field: f,
+                });
+                a.jmp(
+                    Opcode::JNull {
+                        reg: act,
+                        offset: 0,
+                    },
+                    miss,
+                );
+                a.op(Opcode::Field {
+                    dst: b,
+                    obj: act,
+                    field: p.act_started,
+                });
+                a.jmp(Opcode::JTrue { cond: b, offset: 0 }, miss);
+            }
+            a.op(Opcode::CallMethod {
+                dst: b,
+                field: p.w_try_close,
+                args: vec![w],
+            });
+            a.jmp(Opcode::JFalse { cond: b, offset: 0 }, miss);
+            a.op(Opcode::Ret { ret: w });
+            a.label(SKIP[k][j]);
         }
-        a.jmp(Opcode::JAlways { offset: 0 }, head);
-        a.label(hit);
-        a.op(Opcode::CallMethod {
-            dst: b,
-            field: p.w_try_close,
-            args: vec![w],
+        // not taken: a modal window here covers the ones below it
+        a.label(miss);
+        modal_test(&mut a, p, w, md, mi, none, head);
+        a.op(Opcode::Bool {
+            dst: above,
+            value: ValBool(true),
         });
-        a.jmp(Opcode::JFalse { cond: b, offset: 0 }, head);
-        a.op(Opcode::Ret { ret: w });
+        a.jmp(Opcode::JAlways { offset: 0 }, head);
     }
     a.label("none");
     a.op(Opcode::Null { dst: w });
@@ -1231,16 +1733,381 @@ fn add_closable(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun>
     push_fn(code, vec![p.game_t], p.win_t, r.0, a.finish(), p.dbg_file)
 }
 
-/// `flUpdate(view)`, at the top of PlaceView.update; see the module comment.
-fn add_update(
-    code: &mut Bytecode,
+/// `flDialog(view) -> I32` (host, pending leave): 0 when no ui.win.Dialog is in
+/// game.mode.windows; otherwise ends it at an idle choice point (see F4) and
+/// returns what the leave waits on (8 dialog open, 9, 10, 11, 12).
+fn add_dialog(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
+    let ints = reason_ints(code);
+    let inone = int_const(code, p.modal_none);
+    let ends = str_global(code, p.t.str_, ENDS);
+    let t = &p.t;
+    let dl_t = &p.dlg;
+    let mut r = Regs(vec![p.view_t]);
+    let (game, mode, gui, lst, i, zero, none, raw, d, w) = (
+        r.r(p.game_t),
+        r.r(p.g_mode.1),
+        r.r(p.g_gui.1),
+        r.r(p.arr_t),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(p.a_raw.1),
+        r.r(dyn_t),
+        r.r(p.win_t),
+    );
+    let (b, above, md, mi, cr, dl, lb, cc, ctrl, n, c, s_r, v) = (
+        r.r(t.bool_),
+        r.r(t.bool_),
+        r.r(p.w_modal.1),
+        r.r(t.i32_),
+        r.r(dl_t.cls.1),
+        r.r(dl_t.t),
+        r.r(dl_t.leave_btn.1),
+        r.r(dl_t.choices.1),
+        r.r(p.g_ctrl.1),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.str_),
+        r.r(t.void),
+    );
+    let mut a = Asm::new();
+    let ret = |a: &mut Asm, k: usize| {
+        a.op(Opcode::Int {
+            dst: c,
+            ptr: ints[k],
+        });
+        a.op(Opcode::Ret { ret: c });
+    };
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
+    a.op(Opcode::Int {
+        dst: none,
+        ptr: inone,
+    });
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: p.v_game.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "no",
+    );
+    a.op(Opcode::Field {
+        dst: mode,
+        obj: game,
+        field: p.g_mode.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: mode,
+            offset: 0,
+        },
+        "no",
+    );
+    a.op(Opcode::Field {
+        dst: lst,
+        obj: mode,
+        field: p.m_windows.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: lst,
+            offset: 0,
+        },
+        "no",
+    );
+    a.op(Opcode::Bool {
+        dst: above,
+        value: ValBool(false),
+    });
+    top_down(&mut a, p, lst, i, zero, raw, d, w, "scan", "no");
+    a.op(Opcode::GetGlobal {
+        dst: cr,
+        global: dl_t.cls.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: cr,
+        arg1: w,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "found");
+    modal_test(&mut a, p, w, md, mi, none, "scan");
+    a.op(Opcode::Bool {
+        dst: above,
+        value: ValBool(true),
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "scan");
+    a.label("found");
+    a.op(Opcode::UnsafeCast { dst: dl, src: w });
+    // its leave runs: wait for it (the window goes once the leave event ends)
+    a.op(Opcode::Field {
+        dst: b,
+        obj: dl,
+        field: dl_t.already,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "over");
+    ret(&mut a, R_DIALOG);
+    // a modal window over it (confirm, viewer, chooser of a choice): busy
+    a.label("over");
+    a.jmp(
+        Opcode::JFalse {
+            cond: above,
+            offset: 0,
+        },
+        "global",
+    );
+    ret(&mut a, R_DLG_BUSY);
+    a.label("global");
+    a.op(Opcode::Field {
+        dst: gui,
+        obj: game,
+        field: p.g_gui.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: gui,
+            offset: 0,
+        },
+        "sync",
+    );
+    a.op(Opcode::Field {
+        dst: lst,
+        obj: gui,
+        field: p.u_windows.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: lst,
+            offset: 0,
+        },
+        "sync",
+    );
+    top_down(&mut a, p, lst, i, zero, raw, d, w, "gscan", "sync");
+    modal_test(&mut a, p, w, md, mi, none, "gscan");
+    ret(&mut a, R_DLG_BUSY);
+    // flWhy reports "dialog open" before these: never during a mode switch / pause
+    a.label("sync");
+    a.op(Opcode::Field {
+        dst: ctrl,
+        obj: game,
+        field: p.g_ctrl.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: ctrl,
+            offset: 0,
+        },
+        "paused",
+    );
+    a.op(Opcode::Field {
+        dst: b,
+        obj: ctrl,
+        field: p.c_lock_sync,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "syncing");
+    a.op(Opcode::Field {
+        dst: lst,
+        obj: ctrl,
+        field: p.c_wait_locks.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: lst,
+            offset: 0,
+        },
+        "paused",
+    );
+    a.op(Opcode::Field {
+        dst: n,
+        obj: lst,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSLte {
+            a: n,
+            b: zero,
+            offset: 0,
+        },
+        "paused",
+    );
+    a.label("syncing");
+    ret(&mut a, R_SYNC);
+    a.label("paused");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.paused,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "fade");
+    ret(&mut a, R_PAUSED);
+    a.label("fade");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.in_fade,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "choice");
+    ret(&mut a, R_FADE);
+    // the Leave choice is on screen, or the node cannot be left
+    a.label("choice");
+    a.op(Opcode::Field {
+        dst: lb,
+        obj: dl,
+        field: dl_t.leave_btn.0,
+    });
+    a.jmp(Opcode::JNotNull { reg: lb, offset: 0 }, "visible");
+    a.op(Opcode::Field {
+        dst: cc,
+        obj: dl,
+        field: dl_t.choices.0,
+    });
+    a.jmp(Opcode::JNull { reg: cc, offset: 0 }, "busy");
+    ret(&mut a, R_NO_LEAVE);
+    a.label("busy");
+    ret(&mut a, R_DLG_BUSY);
+    a.label("visible");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: dl,
+        field: dl_t.visible,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "hidden");
+    // what Escape / the Leave button does: allowLeave -> leave(null)
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: dl_t.try_close,
+        arg0: dl,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "noleave");
+    // drop the choice buttons: a late click finds nothing to run leave() again
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: dl_t.reset,
+        arg0: dl,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s_r,
+        global: ends,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: s_r,
+    });
+    ret(&mut a, R_DIALOG);
+    a.label("noleave");
+    ret(&mut a, R_NO_LEAVE);
+    // hidden: a choice is being resolved (dialog__impl) or a local hide
+    a.label("hidden");
+    ret(&mut a, R_DLG_BUSY);
+    a.label("no");
+    ret(&mut a, 0);
+    push_fn(code, vec![p.view_t], t.i32_, r.0, a.finish(), p.dbg_file)
+}
+
+/// Close this machine's own lock-holding window (not during a fade), as F2:
+/// `if (!inFade && me.lockedWith != null) { w = closable(game);
+///  if (w != null && w != g_closed) { g_closed = w; println(CLOSES + name); w.close(); } }`
+/// then falls through to `out`.
+#[allow(clippy::too_many_arguments)]
+fn close_own(
+    a: &mut Asm,
     p: &Plan,
-    g: &Globals,
+    closable: RefFun,
+    closes: RefGlobal,
+    g_closed: RefGlobal,
+    game: Reg,
+    regs: [Reg; 7],
+    out: &'static str,
+) {
+    let [b, me, lw, w, last_w, name, s_r] = regs;
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.in_fade,
+        arg0: game,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, out);
+    a.op(Opcode::Field {
+        dst: me,
+        obj: game,
+        field: p.g_me.0,
+    });
+    a.jmp(Opcode::JNull { reg: me, offset: 0 }, out);
+    a.op(Opcode::Field {
+        dst: lw,
+        obj: me,
+        field: p.bp_locked.0,
+    });
+    a.jmp(Opcode::JNull { reg: lw, offset: 0 }, out);
+    a.op(Opcode::Call1 {
+        dst: w,
+        fun: closable,
+        arg0: game,
+    });
+    a.jmp(Opcode::JNull { reg: w, offset: 0 }, out);
+    a.op(Opcode::GetGlobal {
+        dst: last_w,
+        global: g_closed,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: w,
+            b: last_w,
+            offset: 0,
+        },
+        out,
+    );
+    a.op(Opcode::SetGlobal {
+        global: g_closed,
+        src: w,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s_r,
+        global: closes,
+    });
+    a.op(Opcode::Field {
+        dst: name,
+        obj: w,
+        field: p.w_name.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: s_r,
+        fun: p.str_add,
+        arg0: s_r,
+        arg1: name,
+    });
+}
+
+/// Rest of [`close_own`]: println + close (separate so the void register is the caller's).
+fn close_own_tail(a: &mut Asm, p: &Plan, w: Reg, s_r: Reg, v: Reg) {
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: s_r,
+    });
+    a.op(Opcode::CallMethod {
+        dst: v,
+        field: p.w_close,
+        args: vec![w],
+    });
+}
+
+struct Fns {
     why: RefFun,
     log: RefFun,
     closable: RefFun,
-) -> Result<RefFun> {
-    let i0 = int_const(code, 0);
+    dialog: RefFun,
+}
+
+/// `flUpdate(view)`, at the top of PlaceView.update; see the module comment.
+fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, f: &Fns) -> Result<RefFun> {
+    let ints = reason_ints(code);
     let i1 = int_const(code, 1);
     let pending = str_global(code, p.t.str_, PENDING);
     let closes = str_global(code, p.t.str_, CLOSES);
@@ -1267,6 +2134,7 @@ fn add_update(
         r.r(t.i32_),
         r.r(t.void),
     );
+    let (c2, k) = (r.r(t.i32_), r.r(t.i32_));
     let mut a = Asm::new();
     a.op(Opcode::GetThis {
         dst: game,
@@ -1332,7 +2200,10 @@ fn add_update(
         obj: arr,
         field: p.a_len,
     });
-    a.op(Opcode::Int { dst: zero, ptr: i0 });
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
     a.jmp(
         Opcode::JSLte {
             a: c,
@@ -1342,71 +2213,17 @@ fn add_update(
         "idle",
     );
     // A leave is pending: release this machine's own lock, never during a fade.
-    a.op(Opcode::Call1 {
-        dst: b,
-        fun: p.in_fade,
-        arg0: game,
-    });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "host");
-    a.op(Opcode::Field {
-        dst: me,
-        obj: game,
-        field: p.g_me.0,
-    });
-    a.jmp(Opcode::JNull { reg: me, offset: 0 }, "host");
-    a.op(Opcode::Field {
-        dst: lw,
-        obj: me,
-        field: p.bp_locked.0,
-    });
-    a.jmp(Opcode::JNull { reg: lw, offset: 0 }, "host");
-    a.op(Opcode::Call1 {
-        dst: w,
-        fun: closable,
-        arg0: game,
-    });
-    a.jmp(Opcode::JNull { reg: w, offset: 0 }, "host");
-    a.op(Opcode::GetGlobal {
-        dst: last_w,
-        global: g.closed,
-    });
-    a.jmp(
-        Opcode::JEq {
-            a: w,
-            b: last_w,
-            offset: 0,
-        },
+    close_own(
+        &mut a,
+        p,
+        f.closable,
+        closes,
+        g.closed,
+        game,
+        [b, me, lw, w, last_w, name, s_r],
         "host",
     );
-    a.op(Opcode::SetGlobal {
-        global: g.closed,
-        src: w,
-    });
-    a.op(Opcode::GetGlobal {
-        dst: s_r,
-        global: closes,
-    });
-    a.op(Opcode::Field {
-        dst: name,
-        obj: w,
-        field: p.w_name.0,
-    });
-    a.op(Opcode::Call2 {
-        dst: s_r,
-        fun: p.str_add,
-        arg0: s_r,
-        arg1: name,
-    });
-    a.op(Opcode::Call1 {
-        dst: v,
-        fun: p.println,
-        arg0: s_r,
-    });
-    a.op(Opcode::CallMethod {
-        dst: v,
-        field: p.w_close,
-        args: vec![w],
-    });
+    close_own_tail(&mut a, p, w, s_r, v);
     // Host: leave once nothing refuses; print what it waits on when that changes.
     a.label("host");
     a.op(Opcode::Field {
@@ -1421,10 +2238,51 @@ fn add_update(
     });
     a.op(Opcode::Call2 {
         dst: c,
-        fun: why,
+        fun: f.why,
         arg0: Reg(0),
         arg1: b,
     });
+    // nothing else refuses, or only "dialog open": the shared dialog decides
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: c,
+            b: zero,
+            offset: 0,
+        },
+        "dlg",
+    );
+    a.op(Opcode::Int {
+        dst: k,
+        ptr: ints[R_DIALOG],
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: c,
+            b: k,
+            offset: 0,
+        },
+        "log",
+    );
+    a.label("dlg");
+    a.op(Opcode::Call1 {
+        dst: c2,
+        fun: f.dialog,
+        arg0: Reg(0),
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: c2,
+            b: zero,
+            offset: 0,
+        },
+        "log",
+    );
+    a.op(Opcode::Mov { dst: c, src: c2 });
+    a.label("log");
     a.op(Opcode::Int { dst: one, ptr: i1 });
     a.op(Opcode::Add {
         dst: c1,
@@ -1453,13 +2311,12 @@ fn add_update(
     });
     a.op(Opcode::Call3 {
         dst: v,
-        fun: log,
-        arg0: Reg(0),
+        fun: f.log,
+        arg0: game,
         arg1: s_r,
         arg2: c,
     });
     a.label("go");
-    a.op(Opcode::Int { dst: zero, ptr: i0 });
     a.jmp(
         Opcode::JNotEq {
             a: c,
@@ -1476,7 +2333,10 @@ fn add_update(
     a.jmp(Opcode::JAlways { offset: 0 }, "end");
     // Nothing pending: forget the last reason and window.
     a.label("idle");
-    a.op(Opcode::Int { dst: zero, ptr: i0 });
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
     a.op(Opcode::SetGlobal {
         global: g.last,
         src: zero,
@@ -1549,14 +2409,699 @@ fn add_paused(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
     push_fn(code, vec![], t.void, r.0, a.finish(), p.dbg_file)
 }
 
+// ---------- owned tavern ----------
+
+/// `tlMark(ls, v)`: `if (ls.forced != v) { if (ls.obj != null) ls.obj.<mark>(ls.bit);
+/// ls.forced = v; }`, the replicated write Place.setLeaveState__impl does.
+fn add_mark(code: &mut Bytecode, p: &Plan, tv: &Tav) -> Result<RefFun> {
+    let t = &p.t;
+    let px_t = p.p_leave_state.1;
+    let mut r = Regs(vec![px_t, t.bool_]);
+    let (b, o, bit, v) = (r.r(t.bool_), r.r(tv.px_obj.1), r.r(t.i32_), r.r(t.void));
+    let mut a = Asm::new();
+    a.op(Opcode::Field {
+        dst: b,
+        obj: Reg(0),
+        field: p.ls_forced,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: b,
+            b: Reg(1),
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Field {
+        dst: o,
+        obj: Reg(0),
+        field: tv.px_obj.0,
+    });
+    a.jmp(Opcode::JNull { reg: o, offset: 0 }, "set");
+    a.op(Opcode::Field {
+        dst: bit,
+        obj: Reg(0),
+        field: tv.px_bit,
+    });
+    a.op(Opcode::CallMethod {
+        dst: v,
+        field: tv.px_mark,
+        args: vec![o, bit],
+    });
+    a.label("set");
+    a.op(Opcode::SetField {
+        obj: Reg(0),
+        field: p.ls_forced,
+        src: Reg(1),
+    });
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(
+        code,
+        vec![px_t, t.bool_],
+        t.void,
+        r.0,
+        a.finish(),
+        tv.dbg_file,
+    )
+}
+
+/// `tlWhy(game) -> I32`: what Tavern.askLeave__impl refuses on (a player
+/// lockedWith, fade, alive lock), then a running mode-switch barrier
+/// (syncLeaveMode would queue or drop the request).
+fn add_tl_why(code: &mut Bytecode, p: &Plan, tv: &Tav) -> Result<RefFun> {
+    let ints = reason_ints(code);
+    let t = &p.t;
+    let mut r = Regs(vec![p.game_t]);
+    let (b, rf, c, ctrl, wl, n, zero) = (
+        r.r(t.bool_),
+        r.r(p.any_locked.1),
+        r.r(t.i32_),
+        r.r(p.g_ctrl.1),
+        r.r(p.arr_t),
+        r.r(t.i32_),
+        r.r(t.i32_),
+    );
+    let mut a = Asm::new();
+    let ret = |a: &mut Asm, k: usize| {
+        a.op(Opcode::Int {
+            dst: c,
+            ptr: ints[k],
+        });
+        a.op(Opcode::Ret { ret: c });
+    };
+    // askLeave__impl's own test: anyPlayerLocked(true)
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ref { dst: rf, src: b });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.any_locked.0,
+        arg0: Reg(0),
+        arg1: rf,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "fade");
+    ret(&mut a, R_LOCKED);
+    // ctrl.isLocked() = lockAlives || inFade
+    a.label("fade");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.in_fade,
+        arg0: Reg(0),
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "alive");
+    ret(&mut a, R_FADE);
+    a.label("alive");
+    a.op(Opcode::Field {
+        dst: ctrl,
+        obj: Reg(0),
+        field: p.g_ctrl.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: ctrl,
+            offset: 0,
+        },
+        "ok",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: tv.is_locked,
+        arg0: ctrl,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "sync");
+    ret(&mut a, R_ALIVE);
+    a.label("sync");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: ctrl,
+        field: p.c_lock_sync,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "busy");
+    a.op(Opcode::Field {
+        dst: wl,
+        obj: ctrl,
+        field: p.c_wait_locks.0,
+    });
+    a.jmp(Opcode::JNull { reg: wl, offset: 0 }, "ok");
+    a.op(Opcode::Field {
+        dst: n,
+        obj: wl,
+        field: p.a_len,
+    });
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
+    a.jmp(
+        Opcode::JSLte {
+            a: n,
+            b: zero,
+            offset: 0,
+        },
+        "ok",
+    );
+    a.label("busy");
+    ret(&mut a, R_SYNC);
+    a.label("ok");
+    ret(&mut a, 0);
+    push_fn(code, vec![p.game_t], t.i32_, r.0, a.finish(), tv.dbg_file)
+}
+
+struct TFns {
+    log: RefFun,
+    closable: RefFun,
+    mark: RefFun,
+    why: RefFun,
+}
+
+/// `tlAsk(tavern) -> Bool`, in front of Tavern.askLeave__impl: true = the
+/// request is pending (askLeave returns), false = the vanilla body runs.
+fn add_tl_ask(code: &mut Bytecode, p: &Plan, tv: &Tav, g: &Globals, f: &TFns) -> Result<RefFun> {
+    let ints = reason_ints(code);
+    let i1 = int_const(code, 1);
+    let tpending = str_global(code, p.t.str_, TPENDING);
+    let t = &p.t;
+    let mut r = Regs(vec![tv.tav_t]);
+    let (game, b, ls, c, c1, last, zero, one, md, s_r, v) = (
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(p.p_leave_state.1),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(p.g_mode.1),
+        r.r(t.str_),
+        r.r(t.void),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: tv.tav_game,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "vanilla",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_multi,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: game,
+        field: p.g_auth,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::GetThis {
+        dst: ls,
+        field: tv.tav_ls,
+    });
+    a.jmp(Opcode::JNull { reg: ls, offset: 0 }, "vanilla");
+    a.op(Opcode::Call1 {
+        dst: c,
+        fun: f.why,
+        arg0: game,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: c,
+            b: zero,
+            offset: 0,
+        },
+        "pend",
+    );
+    // Nothing refuses: no request pending any more; the vanilla body leaves now.
+    a.op(Opcode::Null { dst: md });
+    a.op(Opcode::SetGlobal {
+        global: g.tl_mode,
+        src: md,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: f.mark,
+        arg0: ls,
+        arg1: b,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: last,
+        global: g.tl_last,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: last,
+            b: zero,
+            offset: 0,
+        },
+        "vanilla",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.tl_last,
+        src: zero,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s_r,
+        global: tpending,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: f.log,
+        arg0: game,
+        arg1: s_r,
+        arg2: c,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "vanilla");
+    // Pending: remember the mode, tell everyone (replicated flag), log changes.
+    a.label("pend");
+    a.op(Opcode::Field {
+        dst: md,
+        obj: game,
+        field: p.g_mode.0,
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.tl_mode,
+        src: md,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: f.mark,
+        arg0: ls,
+        arg1: b,
+    });
+    a.op(Opcode::Int { dst: one, ptr: i1 });
+    a.op(Opcode::Add {
+        dst: c1,
+        a: c,
+        b: one,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: last,
+        global: g.tl_last,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: c1,
+            b: last,
+            offset: 0,
+        },
+        "handled",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.tl_last,
+        src: c1,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s_r,
+        global: tpending,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: f.log,
+        arg0: game,
+        arg1: s_r,
+        arg2: c,
+    });
+    a.label("handled");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("vanilla");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![tv.tav_t], t.bool_, r.0, a.finish(), tv.dbg_file)
+}
+
+/// `tlUpdate(mode)`, at the top of TavernMode.update (every machine).
+fn add_tl_update(code: &mut Bytecode, p: &Plan, tv: &Tav, g: &Globals, f: &TFns) -> Result<RefFun> {
+    let ints = reason_ints(code);
+    let i1 = int_const(code, 1);
+    let tpending = str_global(code, p.t.str_, TPENDING);
+    let closes = str_global(code, p.t.str_, CLOSES);
+    let t = &p.t;
+    let mut r = Regs(vec![tv.tm_t]);
+    let (game, b, auth, tav, ls, fl, md) = (
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(t.bool_),
+        r.r(tv.tav_t),
+        r.r(p.p_leave_state.1),
+        r.r(t.bool_),
+        r.r(p.g_mode.1),
+    );
+    let (me, lw, w, last_w, name, s_r) = (
+        r.r(p.g_me.1),
+        r.r(p.bp_locked.1),
+        r.r(p.win_t),
+        r.r(p.win_t),
+        r.r(t.str_),
+        r.r(t.str_),
+    );
+    let (c, c1, last, one, zero, v) = (
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.void),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: tv.tm_game,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_multi,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "end");
+    a.op(Opcode::Call1 {
+        dst: tav,
+        fun: tv.get_tavern,
+        arg0: Reg(0),
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: tav,
+            offset: 0,
+        },
+        "idle",
+    );
+    a.op(Opcode::Field {
+        dst: ls,
+        obj: tav,
+        field: tv.tav_ls,
+    });
+    a.jmp(Opcode::JNull { reg: ls, offset: 0 }, "idle");
+    a.op(Opcode::Field {
+        dst: fl,
+        obj: ls,
+        field: p.ls_forced,
+    });
+    a.op(Opcode::Field {
+        dst: auth,
+        obj: game,
+        field: p.g_auth,
+    });
+    a.jmp(
+        Opcode::JFalse {
+            cond: auth,
+            offset: 0,
+        },
+        "client",
+    );
+    // Host: pending only for this mode's own request; any other `forced`
+    // (a save, an earlier visit) is stale and cleared.
+    a.op(Opcode::GetGlobal {
+        dst: md,
+        global: g.tl_mode,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: md,
+            b: Reg(0),
+            offset: 0,
+        },
+        "mine",
+    );
+    a.jmp(
+        Opcode::JFalse {
+            cond: fl,
+            offset: 0,
+        },
+        "idle",
+    );
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: f.mark,
+        arg0: ls,
+        arg1: b,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "idle");
+    a.label("mine");
+    a.label("client");
+    a.jmp(
+        Opcode::JFalse {
+            cond: fl,
+            offset: 0,
+        },
+        "idle",
+    );
+    // Pending: release this machine's own lock, never during a fade.
+    close_own(
+        &mut a,
+        p,
+        f.closable,
+        closes,
+        g.tl_closed,
+        game,
+        [b, me, lw, w, last_w, name, s_r],
+        "host",
+    );
+    close_own_tail(&mut a, p, w, s_r, v);
+    // Host: leave through askLeave__impl once nothing refuses.
+    a.label("host");
+    a.jmp(
+        Opcode::JFalse {
+            cond: auth,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Call1 {
+        dst: c,
+        fun: f.why,
+        arg0: game,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: c,
+            b: zero,
+            offset: 0,
+        },
+        "wait",
+    );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: tv.ask,
+        arg0: tav,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "end");
+    a.label("wait");
+    a.op(Opcode::Int { dst: one, ptr: i1 });
+    a.op(Opcode::Add {
+        dst: c1,
+        a: c,
+        b: one,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: last,
+        global: g.tl_last,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: c1,
+            b: last,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.tl_last,
+        src: c1,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s_r,
+        global: tpending,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: f.log,
+        arg0: game,
+        arg1: s_r,
+        arg2: c,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "end");
+    // Nothing pending: forget the last reason and window.
+    a.label("idle");
+    a.op(Opcode::SetGlobal {
+        global: g.tl_last,
+        src: zero,
+    });
+    a.op(Opcode::Null { dst: w });
+    a.op(Opcode::SetGlobal {
+        global: g.tl_closed,
+        src: w,
+    });
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![tv.tm_t], t.void, r.0, a.finish(), tv.dbg_file)
+}
+
+/// `tlClose(ctrl) -> Bool`, in front of Controller.closeTavern__impl (Escape in
+/// the tavern): in multi, in a TavernMode, run tavern.askLeave__impl() (the
+/// pending policy) instead and return true.
+fn add_tl_close(code: &mut Bytecode, p: &Plan, tv: &Tav) -> Result<RefFun> {
+    let t = &p.t;
+    let ctrl_t = p.g_ctrl.1;
+    let mut r = Regs(vec![ctrl_t]);
+    let (game, b, md, cr, tm, tav, v) = (
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(p.g_mode.1),
+        r.r(tv.tm_cls.1),
+        r.r(tv.tm_t),
+        r.r(tv.tav_t),
+        r.r(t.void),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: tv.ctrl_game,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "vanilla",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_multi,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::Field {
+        dst: md,
+        obj: game,
+        field: p.g_mode.0,
+    });
+    a.jmp(Opcode::JNull { reg: md, offset: 0 }, "vanilla");
+    a.op(Opcode::GetGlobal {
+        dst: cr,
+        global: tv.tm_cls.0,
+    });
+    // A GameMode goes to BaseType.check's Dyn argument as is.
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: cr,
+        arg1: md,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::UnsafeCast { dst: tm, src: md });
+    a.op(Opcode::Call1 {
+        dst: tav,
+        fun: tv.get_tavern,
+        arg0: tm,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: tav,
+            offset: 0,
+        },
+        "vanilla",
+    );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: tv.ask,
+        arg0: tav,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("vanilla");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![ctrl_t], t.bool_, r.0, a.finish(), tv.dbg_file)
+}
+
 /// New functions, in the order `apply` appends them.
 struct Added {
     why: RefFun,
     log: RefFun,
     refused: RefFun,
     closable: RefFun,
+    dialog: RefFun,
     update: RefFun,
     paused: RefFun,
+    tav: Option<TAdded>,
+}
+
+struct TAdded {
+    mark: RefFun,
+    why: RefFun,
+    ask: RefFun,
+    update: RefFun,
+    close: RefFun,
+}
+
+/// `if (hook(this)) return;` in front of op 0 of a Void function.
+fn guard_hook(f: &mut Function, bool_t: RefType, void_t: RefType, fun: RefFun) {
+    f.regs.push(bool_t);
+    let b = Reg((f.regs.len() - 1) as u32);
+    f.regs.push(void_t);
+    let v = Reg((f.regs.len() - 1) as u32);
+    insert_ops(
+        f,
+        0,
+        vec![
+            Opcode::Call1 {
+                dst: b,
+                fun,
+                arg0: Reg(0),
+            },
+            Opcode::JFalse { cond: b, offset: 1 },
+            Opcode::Ret { ret: v },
+        ],
+    );
 }
 
 fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
@@ -1565,12 +3110,22 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         last: add_global(code, p.t.i32_),
         closed: add_global(code, p.win_t),
         paused_at: add_global(code, p.t.f64_),
+        tl_mode: add_global(code, p.g_mode.1),
+        tl_last: add_global(code, p.t.i32_),
+        tl_closed: add_global(code, p.win_t),
     };
     let why = add_why(code, p)?;
     let log = add_log(code, p, dyn_t)?;
     let refused = add_refused(code, p, why, log)?;
     let closable = add_closable(code, p, dyn_t)?;
-    let update = add_update(code, p, &g, why, log, closable)?;
+    let dialog = add_dialog(code, p, dyn_t)?;
+    let fns = Fns {
+        why,
+        log,
+        closable,
+        dialog,
+    };
+    let update = add_update(code, p, &g, &fns)?;
     let paused = add_paused(code, p, &g)?;
 
     let mut hook = |fi: usize, at: usize, op: fn(Reg, RefFun) -> Opcode, fun: RefFun| {
@@ -1596,14 +3151,55 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
     if let Opcode::JTrue { cond, .. } = f.ops[p.content_at] {
         f.ops[p.content_at] = Opcode::JTrue { cond, offset: 0 };
     }
+
+    let tav = match &p.tav {
+        None => None,
+        Some(tv) => {
+            let mark = add_mark(code, p, tv)?;
+            let twhy = add_tl_why(code, p, tv)?;
+            let tf = TFns {
+                log,
+                closable,
+                mark,
+                why: twhy,
+            };
+            let ask = add_tl_ask(code, p, tv, &g, &tf)?;
+            let tupdate = add_tl_update(code, p, tv, &g, &tf)?;
+            let close = add_tl_close(code, p, tv)?;
+            guard_hook(&mut code.functions[tv.ask_fi], p.t.bool_, p.t.void, ask);
+            guard_hook(&mut code.functions[tv.close_fi], p.t.bool_, p.t.void, close);
+            let f = &mut code.functions[tv.upd_fi];
+            f.regs.push(p.t.void);
+            let v = Reg((f.regs.len() - 1) as u32);
+            insert_ops(f, 0, vec![this_call(v, tupdate)]);
+            Some(TAdded {
+                mark,
+                why: twhy,
+                ask,
+                update: tupdate,
+                close,
+            })
+        }
+    };
     Ok(Added {
         why,
         log,
         refused,
         closable,
+        dialog,
         update,
         paused,
+        tav,
     })
+}
+
+/// Indices of every function `apply` edits.
+fn touched(p: &Plan) -> Vec<usize> {
+    let mut v = vec![p.update_fi, p.try_close_fi, p.leave_fi, p.content_fi];
+    if let Some(tv) = &p.tav {
+        v.extend([tv.ask_fi, tv.close_fi, tv.upd_fi]);
+    }
+    v
 }
 
 /// Applies the force leave, or leaves `code` untouched and logs why.
@@ -1616,21 +3212,24 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
         }
     };
     let snap = crate::asm::Snap::take(code);
-    let saved: Vec<Function> = [p.update_fi, p.try_close_fi, p.leave_fi, p.content_fi]
-        .iter()
-        .map(|&i| code.functions[i].clone())
-        .collect();
+    let sites = touched(&p);
+    let saved: Vec<Function> = sites.iter().map(|&i| code.functions[i].clone()).collect();
     match apply(code, &p) {
-        Ok(a) => eprintln!(
-            "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, windows fn@{}), tryClose -> fn@{}, leave -> fn@{}",
-            a.update.0, a.why.0, a.log.0, a.closable.0, a.refused.0, a.paused.0
-        ),
+        Ok(a) => {
+            eprintln!(
+                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, windows fn@{}, dialog fn@{}), tryClose -> fn@{}, leave -> fn@{}",
+                a.update.0, a.why.0, a.log.0, a.closable.0, a.dialog.0, a.refused.0, a.paused.0
+            );
+            if let Some(t) = a.tav {
+                eprintln!(
+                    "patched force leave (owned tavern): askLeave -> fn@{}, closeTavern -> fn@{}, TavernMode.update -> fn@{} (why fn@{}, mark fn@{})",
+                    t.ask.0, t.close.0, t.update.0, t.why.0, t.mark.0
+                );
+            }
+        }
         Err(e) => {
             snap.restore(code);
-            for (f, i) in saved
-                .into_iter()
-                .zip([p.update_fi, p.try_close_fi, p.leave_fi, p.content_fi])
-            {
+            for (f, i) in saved.into_iter().zip(sites) {
                 code.functions[i] = f;
             }
             eprintln!("force leave skipped: {e:#}");
@@ -1651,19 +3250,24 @@ mod tests {
         };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
+        let tv = p.tav.as_ref().expect("owned tavern part planned");
         let mut code = read(&image);
         let added = apply(&mut code, &p).expect("apply");
+        let ta = added.tav.as_ref().expect("owned tavern part applied");
         let patched = write(&code);
         let back = read(&patched);
 
-        // Appended only: 6 functions (+ their types), 3 globals.
+        // Appended only: 12 functions (+ their types), 6 globals.
         let nf = orig.functions.len();
-        assert_eq!(back.functions.len(), nf + 6);
+        assert_eq!(back.functions.len(), nf + 12);
         assert_eq!(&back.types[..orig.types.len()], &orig.types[..]);
         let ng = orig.globals.len();
         assert_eq!(&back.globals[..ng], &orig.globals[..]);
-        assert_eq!(&back.globals[ng..ng + 3], &[p.t.i32_, p.win_t, p.t.f64_]);
-        let touched = [p.update_fi, p.try_close_fi, p.leave_fi, p.content_fi];
+        assert_eq!(
+            &back.globals[ng..ng + 6],
+            &[p.t.i32_, p.win_t, p.t.f64_, p.g_mode.1, p.t.i32_, p.win_t]
+        );
+        let touched = touched(&p);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
             assert_eq!(
@@ -1678,8 +3282,14 @@ mod tests {
             added.log,
             added.refused,
             added.closable,
+            added.dialog,
             added.update,
             added.paused,
+            ta.mark,
+            ta.why,
+            ta.ask,
+            ta.update,
+            ta.close,
         ];
         for (k, f) in back.functions[nf..].iter().enumerate() {
             assert_eq!(f.findex, new[k]);
@@ -1692,6 +3302,7 @@ mod tests {
             (p.update_fi, 0, added.update),
             (p.try_close_fi, 0, added.refused),
             (p.leave_fi, p.paused_ret, added.paused),
+            (tv.upd_fi, 0, ta.update),
         ] {
             let (a, b) = (&orig.functions[fi], &back.functions[fi]);
             shifted(a, b, at, 1);
@@ -1699,6 +3310,18 @@ mod tests {
                 matches!(b.ops[at], Opcode::Call1 { fun: f, arg0: Reg(0), .. } | Opcode::Call0 { fun: f, .. } if f == fun)
             );
             check_types(&back, b, at..at + 1);
+        }
+        // `if (hook(this)) return;` in front of askLeave__impl / closeTavern__impl.
+        for (fi, fun) in [(tv.ask_fi, ta.ask), (tv.close_fi, ta.close)] {
+            let (a, b) = (&orig.functions[fi], &back.functions[fi]);
+            shifted(a, b, 0, 3);
+            assert!(matches!(
+                b.ops[..3],
+                [Opcode::Call1 { fun: f, arg0: Reg(0), dst }, Opcode::JFalse { cond, offset: 1 }, Opcode::Ret { .. }]
+                    if f == fun && cond == dst
+            ));
+            check_types(&back, b, 0..3);
+            check_flow(b);
         }
         // leave: the probe sits between `JFalse paused` and its Ret.
         let lb = &back.functions[p.leave_fi];
@@ -1714,7 +3337,12 @@ mod tests {
         assert_eq!(cb.ops.len(), orig.functions[p.content_fi].ops.len());
 
         // The whitelist is checked against window classes, the slots are Window's.
-        assert_eq!(p.classes.len(), LOCK_WINDOWS.len());
+        assert_eq!(p.locks.len(), LOCK_WINDOWS.len());
+        assert_eq!(
+            p.locks.iter().filter(|l| l.act.is_some()).count(),
+            2,
+            "Craft and Alter carry act"
+        );
         let gu = method(&orig, obj_type(&orig, "Game").unwrap(), "update").unwrap();
         for slot in [p.w_try_close, p.w_close] {
             assert!(gu
@@ -1722,6 +3350,40 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, Opcode::CallMethod { field, .. } if *field == slot)));
         }
+        // WindowModalMode.None is the default modal the Window constructor stores.
+        let wc = method(&orig, p.win_t, "__constructor__").unwrap();
+        let none_global = wc.ops.iter().enumerate().find_map(|(i, o)| match o {
+            Opcode::SetThis { field, src } if *field == p.w_modal.0 => {
+                wc.ops[..i].iter().rev().find_map(|o| match o {
+                    Opcode::GetGlobal { dst, global } if dst == src => Some(*global),
+                    _ => None,
+                })
+            }
+            _ => None,
+        });
+        let none_global = none_global.expect("ctor stores a modal global");
+        let set_modal = method(&orig, p.win_t, "setModal").unwrap();
+        assert!(set_modal
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::GetGlobal { global, .. } if *global == none_global)));
+        assert!(matches!(
+            &orig.types[p.w_modal.1 .0],
+            Type::Enum { constructs, .. } if s(&orig, constructs[p.modal_none as usize].name) == "None"
+        ));
+        // The mark is the vanilla proxy mark: same slot, receiver and argument types.
+        let mark = back.functions.iter().find(|f| f.findex == ta.mark).unwrap();
+        let mk = mark
+            .ops
+            .iter()
+            .find_map(|o| match o {
+                Opcode::CallMethod { field, args, .. } => Some((*field, args.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mk.0, tv.px_mark);
+        assert_eq!(mark.regs[mk.1[0].0 as usize], tv.px_obj.1);
+        assert_eq!(mark.regs[mk.1[1].0 as usize], p.t.i32_);
 
         // Every virtual call resolves to the intended method with a matching signature.
         for f in &back.functions[nf..] {
@@ -1736,13 +3398,17 @@ mod tests {
     }
 
     /// `CallMethod` receiver / slot / arguments / result agree with the method the
-    /// slot holds in the receiver's class, and only tryClose / close are called.
+    /// slot holds in the receiver's class, and only tryClose / close are called on
+    /// objects (a virtual receiver is the leaveState proxy mark, checked above).
     fn check_virtual_calls(code: &Bytecode, f: &Function) {
         for op in &f.ops {
             let Opcode::CallMethod { dst, field, args } = op else {
                 continue;
             };
             let recv = f.regs[args[0].0 as usize];
+            if matches!(code.types[recv.0], Type::Virtual { .. }) {
+                continue;
+            }
             let mut cur = Some(recv);
             let mut found = None;
             while let Some(c) = cur {
@@ -1778,6 +3444,32 @@ mod tests {
         }
     }
 
+    /// Every appended function reachable from `roots` (direct calls only).
+    fn reachable<'a>(b: &'a Bytecode, first_new: usize, roots: &[RefFun]) -> Vec<&'a Function> {
+        let by = |fun: RefFun| b.functions.iter().find(|g| g.findex == fun);
+        let mut out: Vec<&Function> = vec![];
+        let mut todo: Vec<RefFun> = roots.to_vec();
+        while let Some(fun) = todo.pop() {
+            let Some(g) = by(fun) else { continue };
+            if out.iter().any(|o| o.findex == fun) {
+                continue;
+            }
+            out.push(g);
+            for op in &g.ops {
+                if let Opcode::Call0 { fun, .. }
+                | Opcode::Call1 { fun, .. }
+                | Opcode::Call2 { fun, .. }
+                | Opcode::Call3 { fun, .. } = op
+                {
+                    if fun.0 >= first_new {
+                        todo.push(*fun);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The whole pipeline (coop_gates G1/G2/G6 before, diag and the rest after):
     /// the pass still applies on top of G2/G6, and its hooks reach type-correct code.
     #[test]
@@ -1788,6 +3480,7 @@ mod tests {
         };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
+        let tv = p.tav.as_ref().expect("owned tavern part planned");
         let out = crate::patch_image(&image).expect("patch_image");
         let b = read(&out);
         assert!(plan(&b).is_err(), "force leave was not applied");
@@ -1795,27 +3488,19 @@ mod tests {
             Opcode::Call1 { fun, .. } | Opcode::Call0 { fun, .. } => fun,
             ref o => panic!("fn@{} op {at}: {o:?}", b.functions[fi].findex.0),
         };
-        let by = |fun: RefFun| b.functions.iter().find(|g| g.findex == fun).expect("fn");
-        // PlaceView.update and tryClose keep the hook at op 0 (diag does not touch them).
-        let upd = by(callee(p.update_fi, 0));
-        let refused = by(callee(p.try_close_fi, 0));
-        let mut ours = vec![upd, refused];
-        for g in [upd, refused] {
-            for op in &g.ops {
-                if let Opcode::Call1 { fun, .. }
-                | Opcode::Call2 { fun, .. }
-                | Opcode::Call3 { fun, .. } = op
-                {
-                    if fun.0 >= orig.functions.len() + orig.natives.len() {
-                        ours.push(by(*fun));
-                    }
-                }
-            }
-        }
-        assert!(
-            ours.len() >= 5,
-            "update/refused reach why, log and the window scan"
-        );
+        // The hooks stay at op 0 (no other pass touches these functions).
+        let roots = [
+            callee(p.update_fi, 0),
+            callee(p.try_close_fi, 0),
+            callee(tv.upd_fi, 0),
+            callee(tv.ask_fi, 0),
+            callee(tv.close_fi, 0),
+        ];
+        let first_new = orig.functions.len() + orig.natives.len();
+        assert!(roots.iter().all(|f| f.0 >= first_new));
+        let ours = reachable(&b, first_new, &roots);
+        // All 12 but flPaused (it hangs off PlaceView.leave, which diag also edits).
+        assert_eq!(ours.len(), 11, "functions the hooks reach");
         for g in ours {
             check_flow(g);
             check_types(&b, g, 0..g.ops.len());
@@ -1855,6 +3540,7 @@ mod tests {
             })
             .collect();
         assert!(!filters.is_empty());
+        let by = |fun: RefFun| b.functions.iter().find(|g| g.findex == fun).expect("fn");
         for fun in filters {
             let g = by(fun);
             assert!(!g

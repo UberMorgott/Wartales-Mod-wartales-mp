@@ -79,26 +79,38 @@ window-lock changes run on every machine, so all players need the same build.
 Each gate is skipped (logged) on mismatch.
 
 **Co-op: force leave** (`src/force_leave.rs`): a leave from a place (town,
-tavern, location) is never blocked by another player's business. The Leave
-button is no longer disabled while another player is `lockedWith` an entity
-(`place.lockLeave`, set by scripts and activities, still hides it). Once a
-leave is requested (`Place.leaveState.forced`, replicated), every machine
-closes its own lock-holding window the way Escape / Cancel does
-(`UnitInfo` of an inspected NPC, also the dialog "inspect" choice; the dialog
-customize `ChooseUnit` through its cancel, which refunds the cost;
-`FiefMandateDetails`, `GarnisonManager`, `CounterChest`), never during a
-fade; their own `onClose` clears the lock. The host polls
-`PlaceView.tryClose` every frame and leaves through the normal
-`syncLeaveMode` barrier as soon as nothing refuses; it waits (never skips)
-on fades, cinematics, a shared dialog, a running mode switch, and on activities,
-crafting and gathering, which have no safe cancel once started and end on
-their own (a dialog that cannot be left keeps it pending until it ends). The
-request stays pending while somebody still asks (`leaveState.players`; a
-withdrawn gamepad toggle drops it). Not covered: the owned tavern's own leave
-(`TavernMode`, `Tavern.askLeave`) still refuses while someone is
-`lockedWith`. shim.log shows `mp: tryClose refused: <why>`, `mp: leave
-pending: <why|go>` (on change, with the busy player's `lockedWith`) and
-`mp: leave closes <window>`. Skipped (logged) on mismatch.
+tavern, location) or from the owned tavern is never blocked by another
+player's business. The Leave button is no longer disabled while another player
+is `lockedWith` an entity (`place.lockLeave`, set by scripts and activities,
+still hides it). Once a leave is requested (`Place.leaveState.forced`,
+replicated), every machine closes its own lock-holding window the way Escape /
+Cancel does (`UnitInfo` of an inspected NPC, also the dialog "inspect" choice;
+the dialog customize `ChooseUnit` through its cancel, which refunds the cost;
+`FiefMandateDetails`, `GarnisonManager`, `CounterChest`; a `Craft` whose
+activity has not started, through its own cancel-before-start `onClose`, after
+its `Alter` / `Dismantle` sub-window), never during a fade and never under
+another modal window; their own `onClose` clears the lock. The host polls
+`PlaceView.tryClose` every frame and leaves through the normal `syncLeaveMode`
+barrier as soon as nothing refuses. A shared dialog is ended by the host with
+its own `Dialog.tryClose` (the Leave choice: `allowLeave` -> `leave`) at an
+idle choice point only (Leave choice on screen, dialog visible, no leave
+running, no modal window over it, no mode switch / pause / fade), then its
+choice buttons are reset so a late click cannot leave twice; a scripted
+dialog that cannot be left (no Leave choice) keeps the wait. It waits (never
+skips) on fades, cinematics, a running mode switch and on started
+activities, crafting and gathering, which have no safe cancel and end on their
+own. The request stays pending while somebody still asks
+(`leaveState.players`; a withdrawn gamepad toggle drops it). The owned tavern
+(`TavernMode`): `Tavern.askLeave__impl` (Leave button) and
+`Controller.closeTavern__impl` (Escape) no longer drop a refused request: it
+stays pending (host global + the replicated, otherwise unused
+`Tavern.leaveState.forced`), every machine closes its own lock-holding window,
+and the host retries every frame, waiting on a busy player, fade, alive lock
+and a running mode switch, then leaves through the vanilla `syncLeaveMode`.
+shim.log shows `mp: tryClose refused: <why>`, `mp: leave pending: <why|go>`,
+`mp: tavern leave pending: <why|go>` (on change, with the busy player's
+`lockedWith`), `mp: leave closes <window>` and `mp: leave ends dialog`.
+Skipped (logged) on mismatch; the tavern part alone when only it mismatches.
 **Hold speed** (`src/hold_speed.rs`): `BaseUI.holdAction`, the one function
 behind every press-and-hold ring, divides its duration by 3 at entry
 (NPC/entity trigger 0.45 s -> 0.15 s, gamepad place exit and skill-bar arrow
