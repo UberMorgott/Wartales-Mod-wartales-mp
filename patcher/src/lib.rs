@@ -25,7 +25,8 @@
 // wartales-mp's "mod files differ from the host" text (see mod_version.rs), and so a co-op
 // leave from a place is never blocked by another player's business (see force_leave.rs), and
 // so a co-op mode switch never waits forever for a client that left or stopped answering (see
-// barrier.rs).
+// barrier.rs), and so an exception in a game network handler is logged instead of ending
+// the co-op session (see net_guard.rs).
 
 mod asm;
 mod barrier;
@@ -43,6 +44,7 @@ mod job_confirm;
 mod job_xp;
 mod loot_all;
 mod mod_version;
+mod net_guard;
 mod party_inventory;
 mod skill_cost;
 
@@ -79,6 +81,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     party_inventory::patch_party_lists(&mut code);
     loot_all::patch_loot_all(&mut code);
     mod_version::patch_mod_version(&mut code);
+    net_guard::patch_net_guard(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

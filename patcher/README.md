@@ -225,6 +225,25 @@ and craftable amounts, brewing, repair/heal/alter/boat costs) count the other
 players too (GlobalInventory flags `1|2|256` -> `1|2|4|256`); they already
 counted the global inventory, the chest and the boat chest on board.
 
+**Network handler guard** (`src/net_guard.rs`): in vanilla an exception thrown
+while a machine handles network data unwinds through the relay service; on the
+host that ends its relay connection and every guest is dropped. Now the game's
+own handler bodies run under a trap: every `<name>__impl` call of the 152
+generated `networkRPC` functions (701 calls) and the `host.onMessage` calls of
+`processMessage`, on the host and on guests. The exception is swallowed only
+when hxbit's shared state is provably intact: the handler started and ended
+outside any message writer or send (a writer depth counter around every
+`NetworkHost` writer and `beginRPC`/`endRPC`) and outside a dispatch, and the
+host, its ctx, the input buffer and position, `receivingClient`, the client's
+`processID` and a receive generation (bumped per message) are unchanged. Then
+`targetClient` is restored, `mp: net: RPC handler <Class.method> threw,
+ignored: <error>` and the stack go to shim.log (at most 50 lines a run), and
+the impl's result reads as its type's default (an RPC with result answers it).
+Otherwise the exception is rethrown (vanilla). Game state the handler changed
+before it threw is kept. Not covered, still vanilla: argument decoding,
+property sync, object registration, full sync, RPC result callbacks, protocol
+errors. Skipped (logged) on mismatch.
+
 ## Install
 
 Two ways, pick one:
