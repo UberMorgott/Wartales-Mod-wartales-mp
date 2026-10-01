@@ -21,7 +21,8 @@
 // gets sort / quick stack / take similar buttons (see chest_buttons.rs), and so
 // item costs paid "with the chest" (crafting, repairs, dialogs, injury remedies) also
 // draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
-// loot screen has its Take all button in co-op too (see loot_all.rs).
+// loot screen has its Take all button in co-op too (see loot_all.rs), and so the join gate shows
+// wartales-mp's "mod files differ from the host" text (see mod_version.rs).
 
 mod asm;
 mod career_plan;
@@ -36,6 +37,7 @@ mod hold_speed;
 mod job_confirm;
 mod job_xp;
 mod loot_all;
+mod mod_version;
 mod party_inventory;
 mod skill_cost;
 
@@ -69,6 +71,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     party_inventory::patch_party_counts(&mut code);
     party_inventory::patch_party_lists(&mut code);
     loot_all::patch_loot_all(&mut code);
+    mod_version::patch_mod_version(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

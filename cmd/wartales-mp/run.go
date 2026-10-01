@@ -19,6 +19,7 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/firewall"
 	"github.com/UberMorgott/wartales-mp/internal/install"
 	"github.com/UberMorgott/wartales-mp/internal/master"
+	"github.com/UberMorgott/wartales-mp/internal/modver"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
 	"github.com/UberMorgott/wartales-mp/internal/relay"
 	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
@@ -58,6 +59,7 @@ func runCmd(args []string) error {
 	// is nothing to serve.
 	// A nil channel blocks forever, which is exactly what -no-watch means.
 	var done <-chan struct{}
+	var gamePID uint32 // 0 with -no-watch: gameDir then looks the game up
 	if !*noWatch {
 		pid, exited, err := watchGame()
 		if err != nil {
@@ -65,7 +67,19 @@ func runCmd(args []string) error {
 		}
 		logger.Printf("attached to %s, pid %d", gameExe, pid)
 		done = exited
+		gamePID = pid
 	}
+
+	// Fingerprint the mod files now, while the game loads them; a join
+	// compares them with the host's (internal/modver). An unknown folder
+	// only leaves them unchecked.
+	gdir, err := gameDir(gamePID)
+	if err != nil {
+		logger.Printf("WARNING: modver: game folder unknown (%v); mod files will not be compared with other players", err)
+	} else {
+		logger.Printf("modver: game folder %s", gdir)
+	}
+	mod := modver.NewSession(gdir, logger.Printf)
 
 	rl := relay.New(logger)
 	mapper := nat.NewMapper(*port, logger)
@@ -91,6 +105,7 @@ func runCmd(args []string) error {
 		SDRStatus:  bridge.Status,
 		Bridge:     bridge,
 		LinkKey:    binary.BigEndian.Uint32(key[:]),
+		Mod:        mod,
 	})
 	bridge.OnPeer = ms.ServeSDRLink
 	// A connection arriving on the public port from the internet is the only

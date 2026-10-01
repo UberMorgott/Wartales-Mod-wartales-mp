@@ -252,9 +252,13 @@ type lobbyArgs struct {
 // the host's master, which holds the authoritative state.
 func (s *Server) lobbyCommand(cmd string, args json.RawMessage, p Peer) (any, error) {
 	if !p.Remote() && cmd != "lobby/resolveShortCode" {
+		cl := s.uplink()
 		if raw, ok, err := s.forward(cmd, args); ok {
 			if err == nil && cmd == "lobby/join" {
 				s.logHostTransport(raw)
+			}
+			if err == nil && cmd == "lobby/infoInvite" {
+				raw = s.fromHost(cl, raw)
 			}
 			return raw, err
 		}
@@ -712,6 +716,9 @@ func (s *Server) issueInvite(id string, p Peer) (string, error) {
 // locally.
 func (s *Server) lobbyInfoInvite(a lobbyArgs, args json.RawMessage, p Peer) (any, error) {
 	if s.lobbies.get(a.Invite) != nil {
+		if p.Remote() {
+			return s.withHostMod(s.lobbyInfo(a.Invite))
+		}
 		return s.lobbyInfo(a.Invite)
 	}
 	if p.Remote() {
@@ -721,7 +728,7 @@ func (s *Server) lobbyInfoInvite(a lobbyArgs, args json.RawMessage, p Peer) (any
 		if id == "" {
 			return nil, nil
 		}
-		return s.lobbyInfo(id)
+		return s.withHostMod(s.lobbyInfo(id))
 	}
 	resolve, err := json.Marshal(map[string]any{"shortCode": a.Invite, "filters": map[string]any{}})
 	if err != nil {
@@ -808,7 +815,7 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 		if id == "" {
 			return nil, nil
 		}
-		return s.lobbyInfo(id)
+		return s.withHostMod(s.lobbyInfo(id))
 	}
 
 	// Our own code (host pasting its own code) resolves locally.
@@ -820,8 +827,12 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 	}
 
 	if s.linked() {
+		cl := s.uplink()
 		raw, _, err := s.forward("lobby/resolveShortCode", args)
-		return raw, err
+		if err != nil {
+			return raw, err
+		}
+		return s.fromHost(cl, raw), nil
 	}
 	c, err := code.DecodeAny(a.ShortCode)
 	if err != nil {
@@ -845,7 +856,7 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 			failures = append(failures, what+": "+err.Error())
 			return nil, false
 		}
-		cl, err := s.attachLink(conn, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Game: p.GameID(), Key: key}, what, probe)
+		cl, err := s.attachLink(conn, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Game: p.GameID(), Key: key, Mod: s.localMod()}, what, probe)
 		if err != nil {
 			s.opt.Log.Printf("master: route %s failed: %v", what, err)
 			failures = append(failures, what+": "+err.Error())
@@ -867,7 +878,9 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 		s.lobbies.inviteLobby = ""
 		s.lobbies.syncInviteLocked()
 		s.lobbies.mu.Unlock()
-		return raw, true
+		// A route that works is final, whatever the mod check says: a
+		// mismatch must not fall through to the next route.
+		return s.fromHost(cl, raw), true
 	}
 
 	if c.Endpoint != nil {

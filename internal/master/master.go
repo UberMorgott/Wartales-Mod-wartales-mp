@@ -19,6 +19,7 @@ import (
 
 	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/link"
+	"github.com/UberMorgott/wartales-mp/internal/modver"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
 	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
 	"github.com/UberMorgott/wartales-mp/internal/wsx"
@@ -70,6 +71,9 @@ type Options struct {
 	// LinkKey is embedded in join codes that carry an SDR route; a proxy-link
 	// over SDR must present it, and one over TCP must when it presents any.
 	LinkKey uint32
+	// Mod is this player's mod-file fingerprint (see modcheck.go); nil means
+	// unknown, which is never a mismatch.
+	Mod *modver.Session
 
 	// DirectTimeout bounds a guest's connect to the host's endpoint before
 	// the cascade moves on to SDR (0 = DefaultDirectTimeout).
@@ -187,7 +191,14 @@ func (s *Server) ServeSDRLink(c net.Conn, peer uint64) {
 func (s *Server) serveLink(c net.Conn, kind string, accept link.Accept) {
 	addr := c.RemoteAddr().String()
 	s.opt.Log.Printf("link: accepted %s from %s", kind, addr)
-	link.Serve(c, accept, func(cmd string, args json.RawMessage, peer *link.Peer) (any, error) {
+	vetted := func(u link.User) error {
+		if err := accept(u); err != nil {
+			return err
+		}
+		s.noteGuestMod(u.Name, u.Mod)
+		return nil
+	}
+	link.Serve(c, vetted, func(cmd string, args json.RawMessage, peer *link.Peer) (any, error) {
 		s.opt.Log.Printf("link: <- %s from %s (%s) %s", cmd, peer.Name(), peer.UserID(), applog.Trunc(args))
 		result, err := s.Handle(cmd, args, peer)
 		if err != nil {
@@ -411,6 +422,13 @@ func (s *Server) forward(cmd string, args json.RawMessage) (json.RawMessage, boo
 	}
 	raw, err := cl.Call(cmd, args)
 	return raw, true, err
+}
+
+// uplink is the link to the host's master, nil when we are not a guest.
+func (s *Server) uplink() *link.Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.client
 }
 
 func (s *Server) linked() bool {

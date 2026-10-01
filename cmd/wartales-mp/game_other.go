@@ -12,3 +12,8 @@ const gameExe = "Wartales.exe"
 func watchGame() (uint32, <-chan struct{}, error) {
 	return 0, nil, fmt.Errorf("watching %s is only supported on Windows, use -no-watch", gameExe)
 }
+
+// gameDir is Windows-only too: elsewhere the game folder is unknown.
+func gameDir(uint32) (string, error) {
+	return "", fmt.Errorf("finding the %s folder is only supported on Windows", gameExe)
+}

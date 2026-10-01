@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/UberMorgott/wartales-mp/internal/modver"
 	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
@@ -37,6 +38,8 @@ type User struct {
 	Steam string `json:"steam,omitempty"` // the real Steam id, for a lobby on SDR
 	Game  string `json:"game,omitempty"`  // the id the guest's game calls its own (its user/login uid)
 	Key   uint32 `json:"key,omitempty"`   // from the join code; a link over SDR must present it
+	// Mod is the guest's mod-file fingerprint; nil from an older wartales-mp.
+	Mod *modver.Info `json:"mod,omitempty"`
 }
 
 // Handler answers a command forwarded by a guest.
@@ -81,6 +84,9 @@ func (p *Peer) SteamID() string { return p.user.Steam }
 
 // GameID returns the id the guest's game calls its own, or "" for an old guest.
 func (p *Peer) GameID() string { return p.user.Game }
+
+// Mod returns the guest's mod-file fingerprint, or nil for an older guest.
+func (p *Peer) Mod() *modver.Info { return p.user.Mod }
 
 // Name returns the guest's display name.
 func (p *Peer) Name() string { return p.user.Name }

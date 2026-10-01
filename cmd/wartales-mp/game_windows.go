@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -65,6 +66,50 @@ func watchGame() (uint32, <-chan struct{}, error) {
 		_, _ = syscall.WaitForSingleObject(h, syscall.INFINITE)
 	}()
 	return pid, done, nil
+}
+
+var procQueryFullProcessImageNameW = syscall.NewLazyDLL("kernel32.dll").NewProc("QueryFullProcessImageNameW")
+
+// processQueryLimitedInformation is PROCESS_QUERY_LIMITED_INFORMATION.
+const processQueryLimitedInformation = 0x1000
+
+// gameDir is the folder of the game's executable: pid's image, or, for pid 0
+// (-no-watch), the first Wartales.exe running. The mod files to fingerprint
+// (winmm.dll, res1.pak) live next to it.
+func gameDir(pid uint32) (string, error) {
+	if pid == 0 {
+		procs, err := processList()
+		if err != nil {
+			return "", err
+		}
+		for _, p := range procs {
+			if strings.EqualFold(p.name, gameExe) {
+				pid = p.pid
+				break
+			}
+		}
+		if pid == 0 {
+			return "", fmt.Errorf("no %s process found", gameExe)
+		}
+	}
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, pid)
+	if err != nil {
+		return "", fmt.Errorf("open process %d: %w", pid, err)
+	}
+	defer syscall.CloseHandle(h) //nolint:errcheck // read-only query handle
+	const pathMax = 32768        // the longest Win32 path, in UTF-16 units
+	buf := make([]uint16, pathMax)
+	n := uint32(pathMax)
+	r, _, callErr := procQueryFullProcessImageNameW.Call(uintptr(h), 0,
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&n))) //nolint:gosec // G103: a Win32 call taking out-pointers; buf and n outlive it
+	if r == 0 {
+		return "", fmt.Errorf("image path of process %d: %w", pid, callErr)
+	}
+	exe := syscall.UTF16ToString(buf[:n])
+	if !strings.EqualFold(filepath.Base(exe), gameExe) {
+		return "", fmt.Errorf("process %d is %s, not %s", pid, exe, gameExe)
+	}
+	return filepath.Dir(exe), nil
 }
 
 // proc is one entry of the process snapshot.
