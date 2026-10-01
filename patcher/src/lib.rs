@@ -17,9 +17,12 @@
 // or toggled follow with F (see follow.rs), and so skill tooltips outside a battle show
 // the skill's Valor cost for units that are not (yet) the player's (see skill_cost.rs),
 // and so the in-game DLC ownership check never reports a player as missing a DLC,
-// printing a warning instead (see dlc_check.rs).
+// printing a warning instead (see dlc_check.rs), and so the co-op shared chest panel
+// gets its own sort button (see chest_buttons.rs).
 
+mod asm;
 mod career_plan;
+mod chest_buttons;
 mod coop_gates;
 mod customize_slots;
 mod diag;
@@ -56,6 +59,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     follow::patch_follow(&mut code);
     skill_cost::patch_skill_cost(&mut code);
     dlc_check::patch_dlc_check(&mut code);
+    chest_buttons::patch_chest_buttons(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

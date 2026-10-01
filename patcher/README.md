@@ -148,6 +148,13 @@ the DLC and the whole party lost its content. Where vanilla would say
 if owned. A player who really lacks a DLC then gets its content too and may
 hit missing data there. The lobby's start gate (`LobbyState.missingDlcs`) is
 already off (`internal/hlpatch`, patch 7). Skipped (logged) on mismatch.
+**Shared chest buttons** (`src/chest_buttons.rs`): the co-op chest panel of the
+inventory side panel (`GameInventory.chestInventory`) gets a row of icons at
+its top left. Sort: the player panel's sort menu (icon `SortButton`, entries
+`Texts.tips.inventory_sort`) applied to the camp chest through the
+host-authoritative `st.Inventory.netSortBy` RPC, the call the camp chest window
+uses. Built in `GameInventory`'s constructor with the same domkit calls as the
+player panel's buttons; skipped (logged) on mismatch.
 
 ## Install
 
