@@ -70,13 +70,35 @@ host's `coopSkipDialogInstanlty` option as on). An open window no longer
 locks the others: `Game.getPlayerLocked` and `Player.canCamp` ignore the synced
 `hasWindowOpened` (one player reading a character sheet used to block camp,
 leaving camp and leaving the tavern for everyone); a player busy with an
-NPC/chest/craft (`lockedWith`) still blocks. Game modes are global, so a
+NPC/chest/craft (`lockedWith`) still blocks camp (a place leave: see force
+leave below). Game modes are global, so a
 host transition disposes every client's old mode with its windows. Not
 touched: mode-switch load barriers, battle round sync, owner-only confirms,
 world-map gathering. Decisions stay on the host; the input (push/pad) and
 window-lock changes run on every machine, so all players need the same build.
 Each gate is skipped (logged) on mismatch.
 
+**Co-op: force leave** (`src/force_leave.rs`): a leave from a place (town,
+tavern, location) is never blocked by another player's business. The Leave
+button is no longer disabled while another player is `lockedWith` an entity
+(`place.lockLeave`, set by scripts and activities, still hides it). Once a
+leave is requested (`Place.leaveState.forced`, replicated), every machine
+closes its own lock-holding window the way Escape / Cancel does
+(`UnitInfo` of an inspected NPC, also the dialog "inspect" choice; the dialog
+customize `ChooseUnit` through its cancel, which refunds the cost;
+`FiefMandateDetails`, `GarnisonManager`, `CounterChest`), never during a
+fade; their own `onClose` clears the lock. The host polls
+`PlaceView.tryClose` every frame and leaves through the normal
+`syncLeaveMode` barrier as soon as nothing refuses; it waits (never skips)
+on fades, cinematics, a shared dialog, a running mode switch, and on activities,
+crafting and gathering, which have no safe cancel once started and end on
+their own (a dialog that cannot be left keeps it pending until it ends). The
+request stays pending while somebody still asks (`leaveState.players`; a
+withdrawn gamepad toggle drops it). Not covered: the owned tavern's own leave
+(`TavernMode`, `Tavern.askLeave`) still refuses while someone is
+`lockedWith`. shim.log shows `mp: tryClose refused: <why>`, `mp: leave
+pending: <why|go>` (on change, with the busy player's `lockedWith`) and
+`mp: leave closes <window>`. Skipped (logged) on mismatch.
 **Hold speed** (`src/hold_speed.rs`): `BaseUI.holdAction`, the one function
 behind every press-and-hold ring, divides its duration by 3 at entry
 (NPC/entity trigger 0.45 s -> 0.15 s, gamepad place exit and skill-bar arrow

@@ -255,7 +255,9 @@ pub(crate) mod testutil {
                     is(dst, |t| matches!(t, Type::I32))
                 }
                 Opcode::Add { dst, a, b } | Opcode::Sub { dst, a, b } => {
-                    rt(dst) == rt(a) && rt(a) == rt(b) && is(dst, |t| matches!(t, Type::I32))
+                    rt(dst) == rt(a)
+                        && rt(a) == rt(b)
+                        && is(dst, |t| matches!(t, Type::I32 | Type::F64))
                 }
                 Opcode::JSLt { a, b, .. }
                 | Opcode::JSGte { a, b, .. }

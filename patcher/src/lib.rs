@@ -22,7 +22,8 @@
 // item costs paid "with the chest" (crafting, repairs, dialogs, injury remedies) also
 // draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
 // loot screen has its Take all button in co-op too (see loot_all.rs), and so the join gate shows
-// wartales-mp's "mod files differ from the host" text (see mod_version.rs).
+// wartales-mp's "mod files differ from the host" text (see mod_version.rs), and so a co-op
+// leave from a place is never blocked by another player's business (see force_leave.rs).
 
 mod asm;
 mod career_plan;
@@ -32,6 +33,7 @@ mod customize_slots;
 mod diag;
 mod dlc_check;
 mod follow;
+mod force_leave;
 mod friendly_fire;
 mod hold_speed;
 mod job_confirm;
@@ -59,6 +61,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     career_plan::patch_career_plan(&mut code);
     customize_slots::patch_customize_slots(&mut code);
     coop_gates::patch_coop_gates(&mut code);
+    force_leave::patch_force_leave(&mut code);
     hold_speed::patch_hold_speed(&mut code);
     job_xp::patch_job_xp(&mut code);
     job_confirm::patch_job_confirm(&mut code);

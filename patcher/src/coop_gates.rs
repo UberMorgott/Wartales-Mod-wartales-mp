@@ -61,7 +61,8 @@
 //      ANY player has a window open (e.g. one player reading a UnitInfo sheet
 //      blocks everyone). Both reads become `false`: a window is local and never
 //      blocks. `lockedWith` (a player busy with an NPC, chest, craft or
-//      gathering) still blocks, as it does for the vanilla force path.
+//      gathering) still blocks, as it does for the vanilla force path; for a
+//      place leave, force_leave.rs closes those windows first and then leaves.
 //
 // Not touched (see coop-gates notes): mode-transition load barriers
 // (Controller.waitForClients/waitForUnlock/waitForHost), battle round sync

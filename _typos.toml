@@ -10,6 +10,8 @@ alikes = "alikes"
 [default.extend-identifiers]
 # The game's own method name (ent.BasePlayer.recalPlayer, Player.hx:524).
 recalPlayer = "recalPlayer"
+# The game's own window class (ui.win.GarnisonManager, fief garrison).
+GarnisonManager = "GarnisonManager"
 
 [files]
 # Vendored hlbc (third-party, MIT): re-vendoring would undo any fix.
