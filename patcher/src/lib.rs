@@ -51,6 +51,7 @@ mod net_guard;
 mod party_inventory;
 mod skill_cost;
 mod slot4_diag;
+mod take_all;
 mod tip_overflow;
 
 use anyhow::{bail, Context, Result};
@@ -86,6 +87,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     party_inventory::patch_party_counts(&mut code);
     party_inventory::patch_party_lists(&mut code);
     loot_all::patch_loot_all(&mut code);
+    take_all::patch_take_all(&mut code);
     mod_version::patch_mod_version(&mut code);
     net_guard::patch_net_guard(&mut code);
     tip_overflow::patch_tip_overflow(&mut code);
