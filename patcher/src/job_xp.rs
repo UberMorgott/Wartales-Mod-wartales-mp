@@ -382,7 +382,7 @@ fn const_str(code: &Bytecode, g: RefGlobal) -> Option<&str> {
 /// A global holding the String constant `value`, the way the Haxe compiler emits
 /// string literals (a `String` object initialised from the constants table),
 /// appended when missing.
-fn str_global(code: &mut Bytecode, str_t: RefType, value: &'static str) -> RefGlobal {
+pub(crate) fn str_global(code: &mut Bytecode, str_t: RefType, value: &'static str) -> RefGlobal {
     let found = code.constants.iter().flatten().find(|c| {
         code.globals.get(c.global.0) == Some(&str_t)
             && matches!(c.fields[..], [si, _] if code.strings.get(si).is_some_and(|x| x.as_str() == value))

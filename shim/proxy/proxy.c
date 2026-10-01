@@ -229,6 +229,46 @@ static int detour_host_resolve(unsigned char *host) {
 }
 
 // ---------------------------------------------------------------------------
+// Hook 1b: hl_sys_print (libhl.dll). The game's stdout goes nowhere; its
+// traces and every Log.logError message (printed by the error_log bytecode
+// pass) are copied into shim.log as "game:" lines, so a co-op softlock leaves
+// evidence. hl_sys_print takes the UTF-16 bytes of a HashLink String.
+// ---------------------------------------------------------------------------
+
+typedef void (*sys_print_fn)(unsigned char *msg);
+static sys_print_fn real_sys_print; // MinHook trampoline to the original
+
+// GAME_LINES_MAX bounds what a spamming trace can cost: shim_log opens and
+// appends the file per line.
+#define GAME_LINES_MAX 20000
+static volatile LONG game_lines;
+
+static void detour_sys_print(unsigned char *msg) {
+	if (msg != NULL) {
+		const wchar_t *w = (const wchar_t *)msg;
+		// 300 UTF-16 units fit shim_log's 1 KB line once encoded (<= 900 bytes).
+		size_t n = wcsnlen(w, 300);
+		while (n > 0 && (w[n - 1] == L'\n' || w[n - 1] == L'\r'))
+			n--;
+		if (n > 0) {
+			LONG k = InterlockedIncrement(&game_lines);
+			if (k <= GAME_LINES_MAX) {
+				char utf8[300 * 3 + 1];
+				int m = WideCharToMultiByte(CP_UTF8, 0, w, (int)n, utf8, (int)sizeof(utf8) - 1, NULL, NULL);
+				if (m > 0) {
+					utf8[m] = 0;
+					shim_log("game: %s", utf8);
+				}
+			} else if (k == GAME_LINES_MAX + 1) {
+				shim_log("game: further output not logged (%d lines)", GAME_LINES_MAX);
+			}
+		}
+	}
+	if (real_sys_print != NULL)
+		real_sys_print(msg);
+}
+
+// ---------------------------------------------------------------------------
 // Hook 2: ssl_conf_set_ca (ssl.hdll). Certificate verification stays on; we
 // only add one more trusted root.
 // ---------------------------------------------------------------------------
@@ -843,6 +883,8 @@ static DWORD WINAPI worker(LPVOID unused) {
 	if (libhl != NULL) {
 		void *p = (void *)GetProcAddress(libhl, "hl_host_resolve");
 		hook_one("libhl!hl_host_resolve", p, (void *)detour_host_resolve, (void **)&real_host_resolve);
+		p = (void *)GetProcAddress(libhl, "hl_sys_print");
+		hook_one("libhl!hl_sys_print", p, (void *)detour_sys_print, (void **)&real_sys_print);
 	} else {
 		shim_log("hook libhl!hl_host_resolve: libhl.dll not loaded");
 	}

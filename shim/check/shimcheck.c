@@ -870,6 +870,27 @@ int main(int argc, char **argv) {
 	check(log_contains(log, "attach: winmm.dll proxy loaded"), "shim.log records the attach");
 	check(log_contains(log, "hook kernelbase!CreateFileW: installed"), "shim.log records the CreateFileW hook");
 
+	// 3b. The game's stdout (hl_sys_print, UTF-16) is copied into shim.log;
+	//     the original still runs, a bare newline adds no line.
+	check(wait_log(log, "hook libhl!hl_sys_print: installed", 10000), "shim.log records the hl_sys_print hook");
+	{
+		typedef void (*print_fn)(unsigned char *);
+		typedef int (*calls_fn)(void);
+		print_fn pr = (print_fn)(void *)GetProcAddress(fake_hl, "hl_sys_print");
+		calls_fn calls = (calls_fn)(void *)GetProcAddress(fake_hl, "fake_sys_print_calls");
+		static const wchar_t line[] = L"mp: onClientReady waitLocks left=0 \x00e9\r\n";
+		static const wchar_t nl[] = L"\n";
+		check(pr != NULL && calls != NULL, "fake hl_sys_print present");
+		if (pr != NULL && calls != NULL) {
+			pr((unsigned char *)line);
+			pr((unsigned char *)nl);
+			check(calls() == 2, "the original hl_sys_print still runs");
+			check(log_contains(log, "] game: mp: onClientReady waitLocks left=0 \xc3\xa9\r\n"),
+				"shim.log carries the printed line as UTF-8 without its newline");
+			check(!log_contains(log, "] game: \r\n"), "a bare newline adds no line");
+		}
+	}
+
 	// 4. The hashlink way: _wfopen + fread via ucrtbase.
 	got = read_crt(game, &m);
 	printf("      fread: %lu bytes\n", (unsigned long)m);

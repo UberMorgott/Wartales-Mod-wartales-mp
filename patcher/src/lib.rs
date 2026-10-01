@@ -10,11 +10,13 @@
 // and so no co-op player waits for the others once the world is loaded (see
 // coop_gates.rs), and so hold-to-confirm rings fill three times faster (see
 // hold_speed.rs), and so a profession keeps its experience when the unit
-// switches jobs (see job_xp.rs).
+// switches jobs (see job_xp.rs), and so every error the game reports is also
+// printed for the shim log with a trace of the co-op mode-switch barrier (see diag.rs).
 
 mod career_plan;
 mod coop_gates;
 mod customize_slots;
+mod diag;
 mod friendly_fire;
 mod hold_speed;
 mod job_xp;
@@ -39,6 +41,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     coop_gates::patch_coop_gates(&mut code);
     hold_speed::patch_hold_speed(&mut code);
     job_xp::patch_job_xp(&mut code);
+    diag::patch_diag(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
