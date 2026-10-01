@@ -122,10 +122,12 @@ leader is more than 9 away (the leader's own position when that point is not
 walkable), then `resetSoftTarget(&true)` like a click without taking the move
 priority. Sprint is mirrored with `Controller.playerSetShift` (a moving
 leader's synced `flags` bit 8; a resting leader means walk); `updateSprint`
-does not send its key-driven shift meanwhile. Leader: vanilla's synced
-`GameState.playerMovePriority` (the player who last clicked), else a moving
-player, else the host; a player in a menu or in vanilla soft regroup comes last.
-A manual move (`Controller.playerGoto` not sent by follow, `playerGotoEntity`,
+does not send its key-driven shift meanwhile. Leader: only vanilla's synced
+`GameState.playerMovePriority`, the player who last moved by their own input
+(ground click, mouse hold, pad; an entity click takes it too via
+`resetSoftTarget(null)`), or the host while it is unset; never another
+follower or just whoever is moving (that chained the caravans). The holder
+itself does not follow. A manual move (`Controller.playerGoto` not sent by follow, `playerGotoEntity`,
 `BasePlayer.updateMoveHold`) turns F off and pauses following until it ends (at
 least 1.5 s). No follow in battle, in a
 city, on water, in a cutscene, or while the player is locked with an NPC/chest,

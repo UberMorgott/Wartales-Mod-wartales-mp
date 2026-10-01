@@ -16,8 +16,9 @@
 //
 //   World.update, right before `updateSprint()`:        followUpdate(this, dt)
 //   World.updateSprint, its `playerSetShift` send:       skipped while fActive
-//   Controller.playerGoto (unless sent by follow), Controller.playerGotoEntity,
-//   BasePlayer.updateMoveHold (mouse hold / pad):        followCancel(game)
+//   Controller.playerGoto (unless sent by follow):       followCancel(game, false)
+//   Controller.playerGotoEntity (entity click):          followCancel(game, true)
+//   BasePlayer.updateMoveHold (mouse hold / pad):        followCancel(game, false)
 //   World.dispose (quit / load):                         followReset()
 //
 //   followUpdate(world, dt):
@@ -31,10 +32,12 @@
 //       no own manual move pending (fManual: until me.target == null and MANUAL_HOLD s passed),
 //       me.lockedWith, me.waitActionIcon, me.scriptedMoveData, world.currentWindow all null,
 //       !me.onWater, a leader exists and is not on water;
-//     leader = best other connected, visible (on land, has units) player:
-//       +16 playerMovePriority, +4 current leader still moving, +2 moving (target != null),
-//       +1 host (state.player), -8 in a menu (hasWindowOpened: likely following itself),
-//       -8 softTarget (vanilla regroup); first in players order on a tie;
+//     leader = state.playerMovePriority (the last player who moved by their own
+//       input: the host sets it on a ground click, mouse hold, pad move and, via
+//       followCancel, an entity click; a follow move never takes it), or
+//       state.player (host) while it is null; none if that is me (I lead) or it
+//       is offline / hidden. Never "whoever moves": that picked other followers
+//       and chained the caravans (A -> B -> C);
 //     fActive = true; fLeader = leader; at most every TICK s (sys_time):
 //       want = leader.target != null && leader.flags & 8 != 0;  // a resting leader: walk
 //       if (want != (me.flags & 8 != 0)) ctrl.playerSetShift(want);
@@ -45,8 +48,9 @@
 //           fIssuing = true; ctrl.playerGoto(p.x, p.y, null); fIssuing = false;
 //           me.resetSoftTarget(&true);   // like a click, without taking playerMovePriority
 //       }
-//   followCancel(game): if (!fIssuing) { fManual = true; fManualAt = now;
-//                                        if (fOn) { fOn = false; notify OFF } }
+//   followCancel(game, claim): if (!fIssuing) { fManual = true; fManualAt = now;
+//       if (claim && me != null) me.resetSoftTarget(null);  // entity click: take priority
+//       if (fOn) { fOn = false; notify OFF } }
 //   followReset(): fOn = fManual = fIssuing = fActive = false; fLeader = null.
 //
 // Only the RPCs a click and the sprint key already send are used: the host
@@ -222,7 +226,6 @@ struct Types {
     bool_: RefType,
     i32_: RefType,
     f64_: RefType,
-    dyn_: RefType,
     dynobj: RefType,
     str_: RefType,
 }
@@ -240,8 +243,8 @@ struct Plan {
     /// World.updateSprint and its `playerSetShift` send.
     sprint_fi: usize,
     sprint_at: usize,
-    /// (function index, `game` field of arg 0, name) of the cancel hooks.
-    hooks: Vec<(usize, RefField, &'static str)>,
+    /// (function index, `game` field of arg 0, claims priority, name) of the cancel hooks.
+    hooks: Vec<(usize, RefField, bool, &'static str)>,
     /// World.dispose (end of the world map: quit or load).
     dispose_fi: usize,
     dbg_file: usize,
@@ -254,15 +257,10 @@ struct Plan {
     game_sevents: F,
     game_mode: F,
     game_battle: F,
-    state_players: F,
     state_player: F,
     state_priority: F,
     state_city: F,
     state_cine: RefField,
-    proxy_array: F,
-    arr_t: RefType,
-    arr_len: RefField,
-    arr_raw: F,
     bp_x: RefField,
     bp_y: RefField,
     bp_target: F,
@@ -271,8 +269,6 @@ struct Plan {
     bp_flags: F,
     flags_value: RefField,
     bp_connected: RefField,
-    bp_window: RefField,
-    bp_soft: RefField,
     bp_locked: F,
     bp_wait: F,
     bp_scripted: F,
@@ -304,7 +300,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bool_: prim("bool", |t| matches!(t, Type::Bool))?,
         i32_: prim("i32", |t| matches!(t, Type::I32))?,
         f64_: prim("f64", |t| matches!(t, Type::F64))?,
-        dyn_: prim("dynamic", |t| matches!(t, Type::Dyn))?,
         dynobj: prim("dynobj", |t| matches!(t, Type::DynObj))?,
         str_: obj_type(code, "String")?,
     };
@@ -344,7 +339,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("World is not a Game.mode type");
     }
     let state_t = game_state.1;
-    let state_players = field(code, state_t, "players")?;
     let state_player = field(code, state_t, "player")?;
     let state_priority = field(code, state_t, "playerMovePriority")?;
     let state_city = field(code, state_t, "currentCity")?;
@@ -357,10 +351,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
             bail!("GameState.{what} is not a BasePlayer");
         }
     }
-    let proxy_array = field(code, state_players.1, "array")?;
-    let arr_t = obj_type(code, "hl.types.ArrayObj")?;
-    let arr_len = typed(arr_t, "length", t.i32_)?;
-    let arr_raw = field(code, arr_t, "array")?;
 
     let bp_x = typed(bp_t, "x", t.f64_)?;
     let bp_y = typed(bp_t, "y", t.f64_)?;
@@ -370,8 +360,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let bp_flags = field(code, bp_t, "flags")?;
     let flags_value = typed(bp_flags.1, "value", t.i32_)?;
     let bp_connected = typed(bp_t, "connected", t.bool_)?;
-    let bp_window = typed(bp_t, "hasWindowOpened", t.bool_)?;
-    let bp_soft = typed(bp_t, "softTarget", t.bool_)?;
     let bp_locked = field(code, bp_t, "lockedWith")?;
     let bp_wait = field(code, bp_t, "waitActionIcon")?;
     let bp_scripted = field(code, bp_t, "scriptedMoveData")?;
@@ -483,17 +471,19 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
 
     let mut hooks = vec![];
-    for (f, game_f, what) in [
-        (player_goto, ctrl_game, "Controller.playerGoto"),
-        (goto_entity, ctrl_game, "Controller.playerGotoEntity"),
-        (move_hold, bp_game, "BasePlayer.updateMoveHold"),
+    // A ground click (World.onEvent) and a hold / pad move (playerUpdateTarget)
+    // take playerMovePriority themselves; an entity click does not.
+    for (f, game_f, claim, what) in [
+        (player_goto, ctrl_game, false, "Controller.playerGoto"),
+        (goto_entity, ctrl_game, true, "Controller.playerGotoEntity"),
+        (move_hold, bp_game, false, "BasePlayer.updateMoveHold"),
     ] {
         let fi = fun_index(code, f)?;
         let g = &code.functions[fi];
         if (0..g.ops.len()).any(|i| jump_targets(g, i).contains(&0)) {
             bail!("{what}: a jump targets op 0");
         }
-        hooks.push((fi, game_f, what));
+        hooks.push((fi, game_f, claim, what));
     }
     let disp = method(code, world_t, "dispose")?;
     if fun_args(code, disp) != [world_t] {
@@ -526,15 +516,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         game_sevents,
         game_mode,
         game_battle,
-        state_players,
         state_player,
         state_priority,
         state_city,
         state_cine,
-        proxy_array,
-        arr_t,
-        arr_len,
-        arr_raw,
         bp_x,
         bp_y,
         bp_target,
@@ -543,8 +528,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bp_flags,
         flags_value,
         bp_connected,
-        bp_window,
-        bp_soft,
         bp_locked,
         bp_wait,
         bp_scripted,
@@ -675,10 +658,18 @@ fn add_notify(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     push_fn(code, p, vec![p.game_t, p.t.bool_], r.0, a.finish())
 }
 
-/// `followCancel(game)`: a manual move by this machine's player.
+/// `followCancel(game, claim)`: a manual move by this machine's player.
+/// `claim`: the move does not take `playerMovePriority` by itself (entity
+/// click), so take it here with `me.resetSoftTarget(null)`, as a ground click does.
 fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Result<RefFun> {
-    let mut r = Regs(vec![p.game_t]);
-    let (b, now, v) = (r.r(p.t.bool_), r.r(p.t.f64_), r.r(p.t.void));
+    let mut r = Regs(vec![p.game_t, p.t.bool_]);
+    let (b, now, v, me, rb) = (
+        r.r(p.t.bool_),
+        r.r(p.t.f64_),
+        r.r(p.t.void),
+        r.r(p.bp_t),
+        r.r(p.reset_soft.1),
+    );
     let mut a = Asm::new();
     a.op(Opcode::GetGlobal {
         dst: b,
@@ -701,6 +692,27 @@ fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         global: g.manual_at,
         src: now,
     });
+    a.jmp(
+        Opcode::JFalse {
+            cond: Reg(1),
+            offset: 0,
+        },
+        "noclaim",
+    );
+    a.op(Opcode::Field {
+        dst: me,
+        obj: Reg(0),
+        field: p.game_me,
+    });
+    a.jmp(Opcode::JNull { reg: me, offset: 0 }, "noclaim");
+    a.op(Opcode::Null { dst: rb });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: p.reset_soft.0,
+        arg0: me,
+        arg1: rb,
+    });
+    a.label("noclaim");
     a.op(Opcode::GetGlobal {
         dst: b,
         global: g.on,
@@ -722,18 +734,12 @@ fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
     });
     a.label("end");
     a.op(Opcode::Ret { ret: v });
-    push_fn(code, p, vec![p.game_t], r.0, a.finish())
+    push_fn(code, p, vec![p.game_t, p.t.bool_], r.0, a.finish())
 }
 
 /// `followUpdate(world, dt)`, see the module comment.
 fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Result<RefFun> {
     let i0 = int_const(code, 0);
-    let i1 = int_const(code, 1);
-    let i2 = int_const(code, 2);
-    let i4 = int_const(code, 4);
-    let i8 = int_const(code, 8);
-    let i16 = int_const(code, 16);
-    let im1 = int_const(code, -1);
     let ikey = int_const(code, KEY_F);
     let imask = int_const(code, SHIFT_BIT);
     let f0 = float_const(code, 0.0);
@@ -751,14 +757,7 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         r.r(t.bool_),
         r.r(t.void),
     );
-    let (k, i, n, score, best_score, ki) = (
-        r.r(t.i32_),
-        r.r(t.i32_),
-        r.r(t.i32_),
-        r.r(t.i32_),
-        r.r(t.i32_),
-        r.r(t.i32_),
-    );
+    let (k, i, n, ki) = (r.r(t.i32_), r.r(t.i32_), r.r(t.i32_), r.r(t.i32_));
     let (sev, focus, ui, mode, battle, city) = (
         r.r(p.game_sevents.1),
         r.r(p.get_focus.1),
@@ -774,20 +773,7 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         r.r(p.world_cur_win.1),
         r.r(p.bp_scripted.1),
     );
-    let (host, prio, cur, best, pl) = (
-        r.r(p.state_player.1),
-        r.r(p.state_priority.1),
-        r.r(p.bp_t),
-        r.r(p.bp_t),
-        r.r(p.bp_t),
-    );
-    let (proxy, adyn, arr, raw, d) = (
-        r.r(p.state_players.1),
-        r.r(p.proxy_array.1),
-        r.r(p.arr_t),
-        r.r(p.arr_raw.1),
-        r.r(t.dyn_),
-    );
+    let best = r.r(p.bp_t);
     let (ctrl, flags, want, mine, inertia, pt, rb) = (
         r.r(p.game_ctrl.1),
         r.r(p.bp_flags.1),
@@ -1074,210 +1060,29 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
     });
     a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "inactive");
 
-    // ---- leader
+    // ---- leader: only the player who last moved by their own input
+    // (GameState.playerMovePriority: the host sets it on a click, mouse hold,
+    // pad move or, via followCancel, an entity click; a follow move never
+    // takes it), or the host before anyone has moved. Nobody, ourselves
+    // (we lead), offline, hidden or on water: stay put. Never "whoever is
+    // moving": that picked other followers and chained the caravans.
     a.op(Opcode::Field {
-        dst: host,
-        obj: st,
-        field: p.state_player.0,
-    });
-    a.op(Opcode::Field {
-        dst: prio,
+        dst: best,
         obj: st,
         field: p.state_priority.0,
     });
-    a.op(Opcode::GetGlobal {
-        dst: cur,
-        global: g.leader,
-    });
-    a.op(Opcode::Null { dst: best });
-    a.op(Opcode::Int {
-        dst: best_score,
-        ptr: im1,
-    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: best,
+            offset: 0,
+        },
+        "haslead",
+    );
     a.op(Opcode::Field {
-        dst: proxy,
+        dst: best,
         obj: st,
-        field: p.state_players.0,
+        field: p.state_player.0,
     });
-    a.jmp(
-        Opcode::JNull {
-            reg: proxy,
-            offset: 0,
-        },
-        "inactive",
-    );
-    a.op(Opcode::Field {
-        dst: adyn,
-        obj: proxy,
-        field: p.proxy_array.0,
-    });
-    a.op(Opcode::SafeCast {
-        dst: arr,
-        src: adyn,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: arr,
-            offset: 0,
-        },
-        "inactive",
-    );
-    a.op(Opcode::Int { dst: i, ptr: i0 });
-    a.label("loop");
-    a.op(Opcode::Label);
-    a.op(Opcode::Field {
-        dst: n,
-        obj: arr,
-        field: p.arr_len,
-    });
-    a.jmp(
-        Opcode::JSGte {
-            a: i,
-            b: n,
-            offset: 0,
-        },
-        "picked",
-    );
-    a.op(Opcode::Field {
-        dst: raw,
-        obj: arr,
-        field: p.arr_raw.0,
-    });
-    a.op(Opcode::GetArray {
-        dst: d,
-        array: raw,
-        index: i,
-    });
-    a.op(Opcode::UnsafeCast { dst: pl, src: d });
-    a.op(Opcode::Incr { dst: i });
-    a.jmp(Opcode::JNull { reg: pl, offset: 0 }, "loop");
-    a.jmp(
-        Opcode::JEq {
-            a: pl,
-            b: me,
-            offset: 0,
-        },
-        "loop",
-    );
-    a.op(Opcode::Field {
-        dst: b,
-        obj: pl,
-        field: p.bp_connected,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "loop");
-    a.op(Opcode::Call1 {
-        dst: b,
-        fun: p.is_visible,
-        arg0: pl,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "loop");
-    a.op(Opcode::Int {
-        dst: score,
-        ptr: i0,
-    });
-    a.jmp(
-        Opcode::JNotEq {
-            a: pl,
-            b: prio,
-            offset: 0,
-        },
-        "notprio",
-    );
-    a.op(Opcode::Int { dst: k, ptr: i16 });
-    a.op(Opcode::Add {
-        dst: score,
-        a: score,
-        b: k,
-    });
-    a.label("notprio");
-    a.op(Opcode::Field {
-        dst: tgt,
-        obj: pl,
-        field: p.bp_target.0,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: tgt,
-            offset: 0,
-        },
-        "notmoving",
-    );
-    a.op(Opcode::Int { dst: k, ptr: i2 });
-    a.op(Opcode::Add {
-        dst: score,
-        a: score,
-        b: k,
-    });
-    a.jmp(
-        Opcode::JNotEq {
-            a: pl,
-            b: cur,
-            offset: 0,
-        },
-        "notmoving",
-    );
-    a.op(Opcode::Int { dst: k, ptr: i4 });
-    a.op(Opcode::Add {
-        dst: score,
-        a: score,
-        b: k,
-    });
-    a.label("notmoving");
-    a.jmp(
-        Opcode::JNotEq {
-            a: pl,
-            b: host,
-            offset: 0,
-        },
-        "nothost",
-    );
-    a.op(Opcode::Int { dst: k, ptr: i1 });
-    a.op(Opcode::Add {
-        dst: score,
-        a: score,
-        b: k,
-    });
-    a.label("nothost");
-    a.op(Opcode::Int { dst: k, ptr: i8 });
-    a.op(Opcode::Field {
-        dst: b,
-        obj: pl,
-        field: p.bp_window,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "nowindow");
-    a.op(Opcode::Sub {
-        dst: score,
-        a: score,
-        b: k,
-    });
-    a.label("nowindow");
-    a.op(Opcode::Field {
-        dst: b,
-        obj: pl,
-        field: p.bp_soft,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "scored");
-    a.op(Opcode::Sub {
-        dst: score,
-        a: score,
-        b: k,
-    });
-    a.label("scored");
-    a.jmp(
-        Opcode::JSLte {
-            a: score,
-            b: best_score,
-            offset: 0,
-        },
-        "loop",
-    );
-    a.op(Opcode::Mov { dst: best, src: pl });
-    a.op(Opcode::Mov {
-        dst: best_score,
-        src: score,
-    });
-    a.jmp(Opcode::JAlways { offset: 0 }, "loop");
-    a.label("picked");
     a.jmp(
         Opcode::JNull {
             reg: best,
@@ -1285,6 +1090,27 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         },
         "inactive",
     );
+    a.label("haslead");
+    a.jmp(
+        Opcode::JEq {
+            a: best,
+            b: me,
+            offset: 0,
+        },
+        "inactive",
+    );
+    a.op(Opcode::Field {
+        dst: b,
+        obj: best,
+        field: p.bp_connected,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "inactive");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_visible,
+        arg0: best,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "inactive");
     a.op(Opcode::Call1 {
         dst: b,
         fun: p.on_water,
@@ -1680,10 +1506,10 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         global: g.active,
         src: b,
     });
-    a.op(Opcode::Null { dst: cur });
+    a.op(Opcode::Null { dst: best });
     a.op(Opcode::SetGlobal {
         global: g.leader,
-        src: cur,
+        src: best,
     });
     a.op(Opcode::Ret { ret: v });
     push_fn(code, p, vec![p.world_t, t.f64_], r.0, a.finish())
@@ -1778,10 +1604,12 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
     );
 
     // Manual moves cancel follow.
-    for (fi, game_f, what) in &p.hooks {
+    for (fi, game_f, claim, what) in &p.hooks {
         let f = &mut code.functions[*fi];
         f.regs.push(p.game_t);
         let gr = Reg((f.regs.len() - 1) as u32);
+        f.regs.push(p.t.bool_);
+        let cb = Reg((f.regs.len() - 1) as u32);
         f.regs.push(p.t.void);
         let v = Reg((f.regs.len() - 1) as u32);
         insert_ops(
@@ -1793,15 +1621,24 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
                     obj: Reg(0),
                     field: *game_f,
                 },
-                Opcode::JNull { reg: gr, offset: 1 },
-                Opcode::Call1 {
+                Opcode::JNull { reg: gr, offset: 2 },
+                Opcode::Bool {
+                    dst: cb,
+                    value: ValBool(*claim),
+                },
+                Opcode::Call2 {
                     dst: v,
                     fun: cancel,
                     arg0: gr,
+                    arg1: cb,
                 },
             ],
         );
-        eprintln!("patched follow fn@{}: {what} cancels follow", f.findex.0);
+        eprintln!(
+            "patched follow fn@{}: {what} cancels follow{}",
+            f.findex.0,
+            if *claim { ", takes move priority" } else { "" }
+        );
     }
     eprintln!(
         "follow: notify fn@{}, cancel fn@{}, update fn@{}, reset fn@{}; hotkey F, start {START}, gap {GAP}, tick {TICK}s",
@@ -2080,7 +1917,7 @@ mod tests {
         assert_eq!(texts, [Some(FOLLOW_ON), Some(FOLLOW_OFF)]);
 
         let mut touched = vec![(p.update_fi, p.update_at, 1), (p.sprint_fi, p.sprint_at, 2)];
-        touched.extend(p.hooks.iter().map(|(fi, _, _)| (*fi, 0, 3)));
+        touched.extend(p.hooks.iter().map(|(fi, _, _, _)| (*fi, 0, 4)));
         touched.push((p.dispose_fi, 0, 1));
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             match touched.iter().find(|(fi, _, _)| *fi == i) {
@@ -2133,16 +1970,21 @@ mod tests {
             Opcode::GetGlobal { global, .. } if global == active));
         assert_eq!(jump_targets(sp, p.sprint_at + 1), vec![p.sprint_at + 3]);
         assert!(matches!(sp.ops[p.sprint_at + 2], Opcode::Call2 { fun, .. } if fun == p.set_shift));
-        // Each manual-move entry starts with `if (this.game != null) followCancel(this.game)`.
-        for (fi, _, what) in &p.hooks {
+        // Each manual-move entry starts with
+        // `if (this.game != null) followCancel(this.game, claim)`; only the entity click claims.
+        for (fi, _, claim, what) in &p.hooks {
             let h = &back.functions[*fi];
             assert!(
                 matches!(h.ops[0], Opcode::Field { obj: Reg(0), .. }),
                 "{what}"
             );
-            assert_eq!(jump_targets(h, 1), vec![3], "{what}");
+            assert_eq!(jump_targets(h, 1), vec![4], "{what}");
             assert!(
-                matches!(h.ops[2], Opcode::Call1 { fun, .. } if fun == cancel.findex),
+                matches!(h.ops[2], Opcode::Bool { value: ValBool(c), .. } if c == *claim),
+                "{what}"
+            );
+            assert!(
+                matches!(h.ops[3], Opcode::Call2 { fun, .. } if fun == cancel.findex),
                 "{what}"
             );
         }
@@ -2160,6 +2002,26 @@ mod tests {
         assert_eq!(calls(p.player_goto), 1);
         assert_eq!(calls(p.set_shift), 1);
         assert_eq!(calls(p.reset_soft.0), 1);
+        // Leader = playerMovePriority (else the host): no scan over the players
+        // that could pick another, moving follower.
+        assert!(update
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::Field { field, .. } if *field == p.state_priority.0)));
+        assert!(!update
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::GetArray { .. })));
+        // followCancel claims the priority (resetSoftTarget(null)) only when asked.
+        assert_eq!(
+            cancel
+                .ops
+                .iter()
+                .filter(|o| matches!(o, Opcode::Call2 { fun, .. } if *fun == p.reset_soft.0))
+                .count(),
+            1
+        );
+        assert_eq!(p.hooks.iter().filter(|h| h.2).count(), 1);
         let goto_at = update
             .ops
             .iter()
