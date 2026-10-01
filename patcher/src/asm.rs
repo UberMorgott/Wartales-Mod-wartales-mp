@@ -2,7 +2,7 @@
 //
 // Small helpers for appending hand-written functions: an op list with symbolic
 // jump labels, a register list, and a function appender. Used by the
-// chest_buttons and party_inventory passes.
+// chest_buttons, party_inventory, force_leave and tip_overflow passes.
 
 use super::*;
 use std::collections::HashMap;
