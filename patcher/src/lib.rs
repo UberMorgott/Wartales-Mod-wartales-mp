@@ -13,7 +13,8 @@
 // switches jobs (see job_xp.rs), and so every error the game reports is also
 // printed for the shim log with a trace of the co-op mode-switch barrier (see diag.rs),
 // and so a co-op caravan follows the moving player while its owner is in a menu
-// or toggled follow with F (see follow.rs).
+// or toggled follow with F (see follow.rs), and so skill tooltips outside a battle show
+// the skill's Valor cost for units that are not (yet) the player's (see skill_cost.rs).
 
 mod career_plan;
 mod coop_gates;
@@ -23,6 +24,7 @@ mod follow;
 mod friendly_fire;
 mod hold_speed;
 mod job_xp;
+mod skill_cost;
 
 use anyhow::{bail, Context, Result};
 use hlbc::opcodes::Opcode;
@@ -46,6 +48,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     job_xp::patch_job_xp(&mut code);
     diag::patch_diag(&mut code);
     follow::patch_follow(&mut code);
+    skill_cost::patch_skill_cost(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
