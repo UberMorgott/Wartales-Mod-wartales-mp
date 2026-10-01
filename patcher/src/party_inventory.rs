@@ -33,6 +33,12 @@
 // (getFormattedItem), and the cost is paid with checkChest = true. Tavern event
 // dialogs keep their own tavern stock path.
 //
+// Displays: hasItemWithChest / countWithChest also count the other players
+// (patch_party_counts); the injury heal panel's remedy list and the injury
+// tooltip's "remedy available" test (inlined GlobalInventory iterations, flags
+// player|chest) and with-chest cost buttons (Button.syncText, Debrief) do too
+// (patch_party_lists). The heal itself pays with useList(checkChest = true).
+//
 // Validated before editing; a mismatch skips the pass (logged).
 
 use super::asm::*;
@@ -1722,6 +1728,118 @@ pub(crate) fn patch_party_counts(code: &mut Bytecode) {
         Err(e) => eprintln!("party counts skipped: {e:#}"),
     }
 }
+
+/// `(fi, at)` of the `Int 2` (player) in `this.name`'s inlined GlobalInventory item
+/// iteration `flags = 2 | 256` (player + chest). The iteration must also have the
+/// other-players branch (`flags & 4`), so adding 4 lists their inventories (never
+/// equipped: that is 8 / 16).
+fn plan_iter_flags(code: &Bytecode, class: &str, name: &str) -> Result<(usize, usize)> {
+    let f = method(code, obj_type(code, class)?, name)?;
+    let fi = fun_index(code, f.findex)?;
+    let o = &f.ops;
+    let mut sites = vec![];
+    for i in 0..o.len().saturating_sub(2) {
+        let (Some((ra, va)), Some((rb, vb)), Opcode::Or { dst, a, b }) = (
+            int_value(code, &o[i]),
+            int_value(code, &o[i + 1]),
+            &o[i + 2],
+        ) else {
+            continue;
+        };
+        if *dst != ra || *a != ra || *b != rb || vb != F_CHEST {
+            continue;
+        }
+        match va {
+            F_PLAYER => sites.push((i, ra)),
+            v if v == F_PLAYER | F_OTHERS => bail!("{class}.{name}: already applied"),
+            _ => {}
+        }
+    }
+    let [(at, flags)] = sites[..] else {
+        bail!(
+            "{class}.{name}: {} player|chest flag sites (want 1)",
+            sites.len()
+        );
+    };
+    let others = o.windows(2).skip(at + 3).any(|w| {
+        matches!(
+            (int_value(code, &w[0]), &w[1]),
+            (Some((c, F_OTHERS)), Opcode::And { a, b, .. }) if *a == flags && *b == c
+        )
+    });
+    if !others {
+        bail!("{class}.{name}: no other-players branch");
+    }
+    Ok((fi, at))
+}
+
+/// `(fi, at)` of the `Int 256` flags of `Button.syncText`'s with-chest
+/// `GlobalInventory.getItemCount` (cost buttons with `checkChest`, e.g. Debrief).
+fn plan_button_flags(code: &Bytecode) -> Result<(usize, usize)> {
+    let gi_t = obj_type(code, "st.player.GlobalInventory")?;
+    let get_count = method(code, gi_t, "getItemCount")?.findex;
+    let f = method(code, obj_type(code, "ui.comp.Button")?, "syncText")?;
+    let fi = fun_index(code, f.findex)?;
+    let calls: Vec<usize> = f
+        .ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| matches!(call_target(op), Some((g, _)) if g == get_count))
+        .map(|(i, _)| i)
+        .collect();
+    let [c_at] = calls[..] else {
+        bail!(
+            "Button.syncText: {} getItemCount calls (want 1)",
+            calls.len()
+        );
+    };
+    let Some((_, args)) = call_target(&f.ops[c_at]) else {
+        unreachable!()
+    };
+    let (ii, v) =
+        int_set_before(code, f, args[3], c_at).context("Button.syncText: flags not constant")?;
+    match v {
+        F_CHEST => Ok((fi, ii)),
+        v if v == F_CHEST | F_OTHERS => bail!("Button.syncText: already applied"),
+        v => bail!("Button.syncText: chest flags {v}"),
+    }
+}
+
+/// The injury heal panel's remedy list and the injury tooltip's "remedy available"
+/// test (both own + chest) also look at the other players' inventories, and with-chest
+/// cost buttons (Debrief heal / repair) count them too. Paying is partyPrepare's job
+/// (InjuryHealPanel.heal and Debrief use useList with checkChest). Skipped (logged)
+/// on mismatch.
+pub(crate) fn patch_party_lists(code: &mut Bytecode) {
+    // (function index, op index, new flags value)
+    let plan = || -> Result<Vec<(usize, usize, i32)>> {
+        let heal = plan_iter_flags(code, "ui.win.InjuryHealPanel", "init")?;
+        let tip = plan_iter_flags(code, "battle.ui.comp.StatusIcon", "getTipContent")?;
+        let button = plan_button_flags(code)?;
+        Ok(vec![
+            (heal.0, heal.1, F_PLAYER | F_OTHERS),
+            (tip.0, tip.1, F_PLAYER | F_OTHERS),
+            (button.0, button.1, F_CHEST | F_OTHERS),
+        ])
+    };
+    match plan() {
+        Ok(sites) => {
+            for (fi, at, value) in &sites {
+                let ptr = int_const(code, *value);
+                if let Opcode::Int { ptr: p, .. } = &mut code.functions[*fi].ops[*at] {
+                    *p = ptr;
+                }
+            }
+            eprintln!(
+                "patched party lists fn@{} fn@{} fn@{}: remedies and cost buttons include the other players",
+                code.functions[sites[0].0].findex.0,
+                code.functions[sites[1].0].findex.0,
+                code.functions[sites[2].0].findex.0
+            );
+        }
+        Err(e) => eprintln!("party lists skipped: {e:#}"),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1845,6 +1963,54 @@ mod tests {
         assert_eq!(changed, 2);
         let mut again = read(&patched);
         patch_party_counts(&mut again);
+        assert!(write(&again) == patched);
+    }
+
+    /// Heal panel / injury tooltip `2 -> 6` and Button.syncText `256 -> 260` only; idempotent.
+    #[test]
+    fn patches_lists() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let mut code = read(&image);
+        patch_party_lists(&mut code);
+        let patched = write(&code);
+        let back = read(&patched);
+        assert_eq!(back.ints[..orig.ints.len()], orig.ints[..]);
+        let mut changed = vec![];
+        for (a, b) in orig.functions.iter().zip(&back.functions) {
+            assert_eq!(a.ops.len(), b.ops.len());
+            for (x, y) in a.ops.iter().zip(&b.ops) {
+                if format!("{x:?}") != format!("{y:?}") {
+                    let (Opcode::Int { dst: d1, ptr: p1 }, Opcode::Int { dst: d2, ptr: p2 }) =
+                        (x, y)
+                    else {
+                        panic!("unexpected edit {x:?} -> {y:?}");
+                    };
+                    assert_eq!(d1, d2);
+                    changed.push((
+                        s(&orig, a.name).to_string(),
+                        orig.ints[p1.0],
+                        back.ints[p2.0],
+                    ));
+                }
+            }
+        }
+        changed.sort();
+        assert_eq!(
+            changed,
+            [
+                ("getTipContent".to_string(), 2, 6),
+                ("init".to_string(), 2, 6),
+                ("syncText".to_string(), 256, 260),
+            ]
+        );
+        let mut again = read(&patched);
+        assert!(plan_iter_flags(&again, "ui.win.InjuryHealPanel", "init").is_err());
+        assert!(plan_button_flags(&again).is_err());
+        patch_party_lists(&mut again);
         assert!(write(&again) == patched);
     }
 }

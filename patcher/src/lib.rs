@@ -19,8 +19,8 @@
 // and so the in-game DLC ownership check never reports a player as missing a DLC,
 // printing a warning instead (see dlc_check.rs), and so the co-op shared chest panel
 // gets sort / quick stack / take similar buttons (see chest_buttons.rs), and so
-// item costs paid "with the chest" (crafting, repairs, dialogs) also draw on the
-// other co-op players' inventories (see party_inventory.rs).
+// item costs paid "with the chest" (crafting, repairs, dialogs, injury remedies) also
+// draw on, and list, the other co-op players' inventories (see party_inventory.rs).
 
 mod asm;
 mod career_plan;
@@ -65,6 +65,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     chest_buttons::patch_chest_buttons(&mut code);
     party_inventory::patch_party_inventory(&mut code);
     party_inventory::patch_party_counts(&mut code);
+    party_inventory::patch_party_lists(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
