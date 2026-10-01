@@ -104,6 +104,28 @@ shim copies the game's stdout (`hl_sys_print`) into `shim.log` as `game:`
 lines, so a stuck black screen shows which step never came. Skipped (logged) on
 mismatch.
 
+**Co-op auto-follow** (`src/follow.rs`): in co-op an open window does not pause
+the world map, so `World.update` gets a new `followUpdate` right before
+`updateSprint()`. While the local player has a window open
+(`GameUI.hasWindowOpened`: character sheet, inventory, ...) or has toggled
+follow with **F** (no world-map binding uses it; a log toast says
+"Follow: ON/OFF"), every 0.5 s their caravan sends the same RPC a ground click
+sends, `Controller.playerGoto`, to a point 5 units short of the leader once the
+leader is more than 9 away (the leader's own position when that point is not
+walkable), then `resetSoftTarget(&true)` like a click without taking the move
+priority. Sprint is mirrored with `Controller.playerSetShift` (a moving
+leader's synced `flags` bit 8; a resting leader means walk); `updateSprint`
+does not send its key-driven shift meanwhile. Leader: vanilla's synced
+`GameState.playerMovePriority` (the player who last clicked), else a moving
+player, else the host; a player in a menu or in vanilla soft regroup comes last.
+A manual move (`Controller.playerGoto` not sent by follow, `playerGotoEntity`,
+`BasePlayer.updateMoveHold`) turns F off and pauses following until it ends (at
+least 1.5 s). No follow in battle, in a
+city, on water, in a cutscene, or while the player is locked with an NPC/chest,
+waits to enter/camp or has an interaction window. Host logic is untouched: only
+vanilla client RPCs; the state is new zero-initialised globals on each machine,
+cleared by `World.dispose` (quit or load). Skipped (logged) on mismatch.
+
 ## Install
 
 Two ways, pick one:

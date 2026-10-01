@@ -346,6 +346,21 @@ x86_64-pc-windows-gnu` из `shim\build.ps1`). Патч структурный �
 ошибок), барьер смены режима (`syncLeaveMode`/`syncEnterMode`/`waitForClients`, `onClientReady`,
 `onServerReady`, `doLeaveMode`, шаги ухода) печатает шаги с `waitLocks.length`; shim перехватывает
 `libhl!hl_sys_print` и пишет stdout игры в `shim.log` строками `game:` (не больше 20000 за запуск).
+Автоследование в коопе (`src/follow.rs`): в коопе открытое окно не ставит мир на паузу
+(`Window.pauseGame` требует одного игрока), поэтому `World.update` идёт и при открытом листе
+персонажа. Перед `updateSprint()` вызывается новая `followUpdate`: пока у игрока открыто окно
+(`GameUI.hasWindowOpened`) или включено следование клавишей F (свободна на карте мира; тост через
+`GameUI.localNotify("ArenaNotif", {title})`), его караван раз в 0,5 с шлёт тот же RPC, что клик,
+`Controller.playerGoto` — в точку за 5 единиц до лидера, если до него дальше 9 (недостижимая точка
+заменяется позицией лидера), затем `resetSoftTarget(&true)`; бег копируется через
+`Controller.playerSetShift` (бит 8 синхронизируемых `flags` движущегося лидера; стоящий лидер —
+шаг), а отправка shift по клавишам в `updateSprint` на это время пропускается. Лидер:
+`GameState.playerMovePriority` (ванильный «кто последним кликнул», синхронизируется), затем
+движущийся, затем хост; игрок в меню или с `softTarget` — в последнюю очередь. Ручное движение (`Controller.playerGoto`/`playerGotoEntity`,
+`BasePlayer.updateMoveHold`) выключает F и на 1,5 с (и до остановки) глушит следование. Не
+следует: в бою, в городе, на воде, в катсцене, при `lockedWith`/`waitActionIcon`/`currentWindow`.
+Хост ничего нового не решает — только ванильные RPC, состояние в новых глобалах на каждой машине,
+сбрасывается в `World.dispose` (выход/загрузка).
 Хост и клиент грузят один
 `winmm.dll` — цели детерминированы. Побайтная сверка копии идёт уже с `tips(patch(оригинал))`; если `wartales-tips`
 отказал (другая сборка), в `shim.log` пишется `tips: not applied: <причина>`, а копия остаётся

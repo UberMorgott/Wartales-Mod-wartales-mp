@@ -371,7 +371,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
 }
 
 /// The text of global `g` when it is a String constant (`[bytes string index, length int index]`).
-fn const_str(code: &Bytecode, g: RefGlobal) -> Option<&str> {
+pub(crate) fn const_str(code: &Bytecode, g: RefGlobal) -> Option<&str> {
     let c = code.constants.as_ref()?.iter().find(|c| c.global == g)?;
     let [si, _] = c.fields[..] else {
         return None;
