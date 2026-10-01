@@ -85,7 +85,7 @@ struct Plan {
     probes: Vec<Probe>,
 }
 
-fn static_fn<'a>(code: &'a Bytecode, class: &str, name: &str) -> Result<&'a Function> {
+pub(crate) fn static_fn<'a>(code: &'a Bytecode, class: &str, name: &str) -> Result<&'a Function> {
     let mut hits = code.functions.iter().filter(|f| {
         s(code, f.name) == name
             && f.parent.is_some_and(

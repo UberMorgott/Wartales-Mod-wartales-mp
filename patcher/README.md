@@ -133,6 +133,22 @@ waits to enter/camp or has an interaction window. Host logic is untouched: only
 vanilla client RPCs; the state is new zero-initialised globals on each machine,
 cleared by `World.dispose` (quit or load). Skipped (logged) on mismatch.
 
+**DLC check** (`src/dlc_check.rs`): `BasePlayer.hasDlc`, the in-game DLC
+ownership check behind `GameState.hasFeature` (every player must own the DLC:
+DLC places, regions, world-bar buttons, script branches) and the dialog's
+"Some players do not own this additional content", never answers "missing"
+any more. A player's list arrives only with its own `setDlcs` RPC, and a
+`false` computed before that stays cached on the clients (only the host's
+`setDlcs__impl` clears the cache, and `GameState.time` stands still while the
+world is paused), so a player whose list lands late (by all signs the last
+to join; inferred from the bytecode, not traced live) was reported without
+the DLC and the whole party lost its content. Where vanilla would say
+"missing", the game now prints once per player and DLC
+`mp: dlc: player <id> does not own DLC <id> ...` (shim.log) and goes on as
+if owned. A player who really lacks a DLC then gets its content too and may
+hit missing data there. The lobby's start gate (`LobbyState.missingDlcs`) is
+already off (`internal/hlpatch`, patch 7). Skipped (logged) on mismatch.
+
 ## Install
 
 Two ways, pick one:

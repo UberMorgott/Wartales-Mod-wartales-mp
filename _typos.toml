@@ -7,6 +7,10 @@ Pn = "Pn"
 # "Crockford look-alikes": the plural of "look-alike", split after the hyphen.
 alikes = "alikes"
 
+[default.extend-identifiers]
+# The game's own method name (ent.BasePlayer.recalPlayer, Player.hx:524).
+recalPlayer = "recalPlayer"
+
 [files]
 # Vendored hlbc (third-party, MIT): re-vendoring would undo any fix.
 extend-exclude = ["patcher/vendor/"]

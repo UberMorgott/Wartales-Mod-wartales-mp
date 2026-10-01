@@ -14,12 +14,15 @@
 // printed for the shim log with a trace of the co-op mode-switch barrier (see diag.rs),
 // and so a co-op caravan follows the moving player while its owner is in a menu
 // or toggled follow with F (see follow.rs), and so skill tooltips outside a battle show
-// the skill's Valor cost for units that are not (yet) the player's (see skill_cost.rs).
+// the skill's Valor cost for units that are not (yet) the player's (see skill_cost.rs),
+// and so the in-game DLC ownership check never reports a player as missing a DLC,
+// printing a warning instead (see dlc_check.rs).
 
 mod career_plan;
 mod coop_gates;
 mod customize_slots;
 mod diag;
+mod dlc_check;
 mod follow;
 mod friendly_fire;
 mod hold_speed;
@@ -49,6 +52,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     diag::patch_diag(&mut code);
     follow::patch_follow(&mut code);
     skill_cost::patch_skill_cost(&mut code);
+    dlc_check::patch_dlc_check(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
