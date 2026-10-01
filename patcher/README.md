@@ -161,6 +161,21 @@ inventory the machine has authority over, else the `networkOperation` RPC (the
 host consumes and adds in one step). Built in `GameInventory`'s constructor with
 the same domkit calls as the player panel's buttons; skipped (logged) on mismatch.
 
+**Party inventory costs** (`src/party_inventory.rs`): vanilla pays "with chest"
+costs (`PlayerInventory.useList(inv, list, checkChest = true)`: crafting,
+brewing, repairs, healing, alter, boat work, Confession dialogs) from the
+player's own inventory, then the camp chest, then the boat chest, on the host.
+A prologue `list = partyPrepare(this, list)` (host only) first checks the whole
+list: global items must be held, every other entry must be covered by own +
+chest + boat + the other players' inventories; otherwise the list is left to
+vanilla (which fails, nothing consumed). Then the part vanilla cannot cover is
+taken from the other players in `state.players` order (stolen stacks first) and
+vanilla pays the rest. Classic dialogs get the Confession dialogs' scope: a
+choice is allowed when the party (global + every player + chest, never equipped
+items) holds the item, cost labels count chest + other players, the "same type"
+substitution looks at the party, and the cost is paid with `checkChest`.
+Tavern event dialogs keep the tavern stock. No new RPC or synced field.
+
 ## Install
 
 Two ways, pick one:

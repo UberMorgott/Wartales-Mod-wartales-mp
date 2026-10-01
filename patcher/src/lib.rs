@@ -18,7 +18,9 @@
 // the skill's Valor cost for units that are not (yet) the player's (see skill_cost.rs),
 // and so the in-game DLC ownership check never reports a player as missing a DLC,
 // printing a warning instead (see dlc_check.rs), and so the co-op shared chest panel
-// gets its own sort button (see chest_buttons.rs).
+// gets sort / quick stack / take similar buttons (see chest_buttons.rs), and so
+// item costs paid "with the chest" (crafting, repairs, dialogs) also draw on the
+// other co-op players' inventories (see party_inventory.rs).
 
 mod asm;
 mod career_plan;
@@ -32,6 +34,7 @@ mod friendly_fire;
 mod hold_speed;
 mod job_confirm;
 mod job_xp;
+mod party_inventory;
 mod skill_cost;
 
 use anyhow::{bail, Context, Result};
@@ -60,6 +63,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     skill_cost::patch_skill_cost(&mut code);
     dlc_check::patch_dlc_check(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
+    party_inventory::patch_party_inventory(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
