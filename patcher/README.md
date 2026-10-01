@@ -88,8 +88,8 @@ Cancel does (`UnitInfo` of an inspected NPC, also the dialog "inspect" choice;
 the dialog customize `ChooseUnit` through its cancel, which refunds the cost;
 `FiefMandateDetails`, `GarnisonManager`, `CounterChest`; a `Craft` whose
 activity has not started, through its own cancel-before-start `onClose`, after
-its `Alter` / `Dismantle` sub-window), never during a fade and never under
-another modal window; their own `onClose` clears the lock. The host polls
+its `Alter` / `Dismantle` sub-window; these three only with no other modal
+window over them), never during a fade; their own `onClose` clears the lock. The host polls
 `PlaceView.tryClose` every frame and leaves through the normal `syncLeaveMode`
 barrier as soon as nothing refuses. A shared dialog is ended by the host with
 its own `Dialog.tryClose` (the Leave choice: `allowLeave` -> `leave`) at an
