@@ -885,7 +885,9 @@ int main(int argc, char **argv) {
 			pr((unsigned char *)line);
 			pr((unsigned char *)nl);
 			check(calls() == 2, "the original hl_sys_print still runs");
-			check(log_contains(log, "] game: mp: onClientReady waitLocks left=0 \xc3\xa9\r\n"),
+			// Game lines are buffered and written by the shim's writer thread
+			// (every 500 ms), never by the printing thread.
+			check(wait_log(log, "] game: mp: onClientReady waitLocks left=0 \xc3\xa9\r\n", 5000),
 				"shim.log carries the printed line as UTF-8 without its newline");
 			check(!log_contains(log, "] game: \r\n"), "a bare newline adds no line");
 		}

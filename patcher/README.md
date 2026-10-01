@@ -100,15 +100,15 @@ progress. Skipped (logged) on mismatch.
 
 **Diagnostics** (`src/diag.rs`): prints only, changes no behaviour. Every
 `shiro.online.Log.logError` message (dropped fades, refused mode switches, a
-client refusing a mode it is not in) is printed at entry, before the online
-error cap, and the co-op mode-switch barrier prints its steps (`mp:
+client refusing a mode it is not in) is printed once it passes the game's own
+online error cap and repeat check (`lastERROR`), and the co-op mode-switch barrier prints its steps (`mp:
 syncLeaveMode` / `syncEnterMode lockSync= waitLocks=`, `waitForClients
 waitLocks= clients=`, `onClientReady` / `onServerReady left= callbacks=`,
 `doLeaveMode lockAlives= fading= fadeParams= onBreak= pending=` (what
 `waitAlive` waits on), `leave host faded`, `leave all clients ready`, `leave
 client alive`, `leave client faded`); every read is null-guarded. The
 shim copies the game's stdout (`hl_sys_print`) into `shim.log` as `game:`
-lines, so a stuck black screen shows which step never came. Skipped (logged) on
+lines (buffered in memory, written by a background thread every 500 ms), so a stuck black screen shows which step never came. Skipped (logged) on
 mismatch.
 
 **Co-op auto-follow** (`src/follow.rs`): in co-op an open window does not pause

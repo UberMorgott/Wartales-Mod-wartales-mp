@@ -51,7 +51,8 @@
 //     hidden. It watches the game PID and exits with the game on its own.
 //
 // Everything above reports to %LOCALAPPDATA%\wartales-mp\shim.log (append,
-// one open/write/close per line, never throws).
+// one open/write/close per line, never throws). The game's own output
+// ("game:" lines) is buffered and written by a background thread instead.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -71,9 +72,11 @@
 // ---------------------------------------------------------------------------
 // Diagnostics: %LOCALAPPDATA%\wartales-mp\shim.log.
 //
-// Every line is its own open/append/close, so a crash anywhere loses nothing
-// already written and no handle or lock is held between calls. Any failure is
-// swallowed: logging can never take the game down.
+// Every shim_log line is its own open/append/close, so a crash anywhere loses
+// nothing already written and no handle or lock is held between calls. Lines
+// from the game's hl_sys_print go through game_line instead (buffered; a crash
+// can lose the last ~GAME_FLUSH_MS of them). Any failure is swallowed: logging
+// can never take the game down.
 // ---------------------------------------------------------------------------
 
 typedef HANDLE(WINAPI *create_file_w_fn)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -157,6 +160,14 @@ static void log_open(void) {
 	log_ready = TRUE;
 }
 
+// log_buffer_init readies the game-line buffer (see game_line); DllMain, once.
+static CRITICAL_SECTION game_lock;
+static BOOL game_lock_ready;
+static void log_buffer_init(void) {
+	InitializeCriticalSection(&game_lock);
+	game_lock_ready = TRUE;
+}
+
 // ---------------------------------------------------------------------------
 // Forwarding: fill the generated thunk pointer table from the System32 copy.
 // ---------------------------------------------------------------------------
@@ -238,15 +249,116 @@ static int detour_host_resolve(unsigned char *host) {
 typedef void (*sys_print_fn)(unsigned char *msg);
 static sys_print_fn real_sys_print; // MinHook trampoline to the original
 
-// GAME_LINES_MAX bounds what a spamming trace can cost: shim_log opens and
-// appends the file per line.
+// The game thread never touches the file: a "game:" line is formatted into a
+// bounded in-memory buffer (a line that does not fit is counted and dropped),
+// and game_writer appends the buffer in one write every GAME_FLUSH_MS, sooner
+// once it is half full, and at process exit. GAME_LINES_MAX still bounds what
+// a spamming trace can add to the file per run.
 #define GAME_LINES_MAX 20000
+#define GAME_BUF_BYTES (64 * 1024)
+#define GAME_FLUSH_MS 500
 static volatile LONG game_lines;
+static HANDLE game_wake;                 // auto-reset: the buffer is half full
+static char game_buf[GAME_BUF_BYTES];     // pending lines, under game_lock
+static size_t game_len;                   // under game_lock
+static unsigned long game_dropped;        // lines lost to a full buffer, under game_lock
+static char game_out[GAME_BUF_BYTES];     // the writer's copy, written outside the lock
+
+// game_flush appends whatever is pending. try_only (process exit) never waits
+// for the lock: a thread killed while holding it must not hang the exit.
+static void game_flush(BOOL try_only) {
+	size_t n;
+	unsigned long dropped;
+	HANDLE f;
+	DWORD put;
+
+	if (!game_lock_ready || !log_ready)
+		return;
+	if (try_only) {
+		if (!TryEnterCriticalSection(&game_lock))
+			return;
+	} else {
+		EnterCriticalSection(&game_lock);
+	}
+	n = game_len;
+	dropped = game_dropped;
+	memcpy(game_out, game_buf, n);
+	game_len = 0;
+	game_dropped = 0;
+	LeaveCriticalSection(&game_lock);
+	if (n > 0) {
+		f = open_raw(log_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL);
+		if (f != INVALID_HANDLE_VALUE) {
+			WriteFile(f, game_out, (DWORD)n, &put, NULL);
+			CloseHandle(f);
+		}
+	}
+	if (dropped > 0)
+		shim_log("game: %lu lines dropped (log buffer full)", dropped);
+}
+
+static DWORD WINAPI game_writer(LPVOID unused) {
+	(void)unused;
+	for (;;) {
+		if (game_wake != NULL)
+			WaitForSingleObject(game_wake, GAME_FLUSH_MS);
+		else
+			Sleep(GAME_FLUSH_MS);
+		game_flush(FALSE);
+	}
+	return 0;
+}
+
+// game_line queues one formatted line; it only copies memory.
+static void game_line(const char *fmt, ...) {
+	char line[1024];
+	int n;
+	va_list ap;
+	BOOL wake;
+
+	if (!game_lock_ready || !log_ready)
+		return;
+	n = _snprintf(line, sizeof(line) - 2, "[%lu %lu %lu] ", (unsigned long)GetCurrentProcessId(),
+		(unsigned long)GetCurrentThreadId(), (unsigned long)GetTickCount());
+	if (n < 0)
+		return;
+	va_start(ap, fmt);
+	n += _vsnprintf(line + n, sizeof(line) - 2 - (size_t)n, fmt, ap);
+	va_end(ap);
+	if (n < 0 || n > (int)sizeof(line) - 2)
+		n = (int)sizeof(line) - 2;
+	line[n++] = '\r';
+	line[n++] = '\n';
+	EnterCriticalSection(&game_lock);
+	if (game_len + (size_t)n <= sizeof(game_buf)) {
+		memcpy(game_buf + game_len, line, (size_t)n);
+		game_len += (size_t)n;
+	} else {
+		game_dropped++;
+	}
+	wake = game_len >= sizeof(game_buf) / 2;
+	LeaveCriticalSection(&game_lock);
+	if (wake && game_wake != NULL)
+		SetEvent(game_wake);
+}
+
+// game_log_start runs on the worker thread once hl_sys_print is hooked.
+static void game_log_start(void) {
+	HANDLE t;
+	game_wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+	t = CreateThread(NULL, 0, game_writer, NULL, 0, NULL);
+	if (t != NULL)
+		CloseHandle(t);
+	else
+		shim_log("game: CreateThread(writer) failed (%lu), lines flushed at exit only",
+			(unsigned long)GetLastError());
+}
 
 static void detour_sys_print(unsigned char *msg) {
 	if (msg != NULL) {
 		const wchar_t *w = (const wchar_t *)msg;
-		// 300 UTF-16 units fit shim_log's 1 KB line once encoded (<= 900 bytes).
+		// 300 UTF-16 units fit a 1 KB line once encoded (<= 900 bytes).
 		size_t n = wcsnlen(w, 300);
 		while (n > 0 && (w[n - 1] == L'\n' || w[n - 1] == L'\r'))
 			n--;
@@ -257,10 +369,10 @@ static void detour_sys_print(unsigned char *msg) {
 				int m = WideCharToMultiByte(CP_UTF8, 0, w, (int)n, utf8, (int)sizeof(utf8) - 1, NULL, NULL);
 				if (m > 0) {
 					utf8[m] = 0;
-					shim_log("game: %s", utf8);
+					game_line("game: %s", utf8);
 				}
 			} else if (k == GAME_LINES_MAX + 1) {
-				shim_log("game: further output not logged (%d lines)", GAME_LINES_MAX);
+				game_line("game: further output not logged (%d lines)", GAME_LINES_MAX);
 			}
 		}
 	}
@@ -884,7 +996,8 @@ static DWORD WINAPI worker(LPVOID unused) {
 		void *p = (void *)GetProcAddress(libhl, "hl_host_resolve");
 		hook_one("libhl!hl_host_resolve", p, (void *)detour_host_resolve, (void **)&real_host_resolve);
 		p = (void *)GetProcAddress(libhl, "hl_sys_print");
-		hook_one("libhl!hl_sys_print", p, (void *)detour_sys_print, (void **)&real_sys_print);
+		if (hook_one("libhl!hl_sys_print", p, (void *)detour_sys_print, (void **)&real_sys_print))
+			game_log_start();
 	} else {
 		shim_log("hook libhl!hl_host_resolve: libhl.dll not loaded");
 	}
@@ -932,10 +1045,15 @@ static DWORD WINAPI worker(LPVOID unused) {
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 	(void)reserved;
+	if (reason == DLL_PROCESS_DETACH) {
+		game_flush(TRUE); // the last buffered game lines (writer may be gone)
+		return TRUE;
+	}
 	if (reason == DLL_PROCESS_ATTACH) {
 		HANDLE t;
 		DisableThreadLibraryCalls(inst);
 		log_open();
+		log_buffer_init();
 		shim_log("attach: winmm.dll proxy loaded");
 		bind_forwards();      // before anything can call a forwarded export
 		hook_bytecode_open(); // before the game's entry point opens hlboot.dat

@@ -13,7 +13,9 @@
 // a mode it is not in) go only to Shiro's online store.
 //
 // The pass adds `Sys.println` calls and nothing else:
-//   - shiro.online.Log.logError: the message, before the error-count cap;
+//   - shiro.online.Log.logError: the message (`Std.string` of it), once it is
+//     past the game's own online error cap and its repeat check (`lastERROR`),
+//     so a spamming error prints as rarely as the game reports it;
 //   - the barrier, one line per step:
 //       syncLeaveMode / syncEnterMode   lockSync, waitLocks.length
 //       waitForClients                  waitLocks.length, game.host.clients.length
@@ -25,7 +27,9 @@
 //       leave host faded / all clients ready / client alive / client faded
 //     Every read is guarded against null (prints -1 / false).
 // `Sys.println` ends in the libhl native `hl_sys_print`, which the winmm shim
-// copies into shim.log as "game:" lines, timestamped.
+// copies into shim.log as "game:" lines, timestamped (buffered: the game thread
+// never writes the file). A String reaches println's Dyn argument as is, the
+// way the compiler passes it; only I32/Bool values are boxed (ToDyn).
 //
 // Validated before editing; a mismatch skips the pass (logged).
 
@@ -35,7 +39,6 @@ use hlbc::types::ValBool;
 
 struct Fns {
     println: RefFun,
-    type_check: RefFun,
     std_string: RefFun,
     str_add: RefFun,
 }
@@ -74,7 +77,9 @@ struct Probe {
 
 struct Plan {
     log_error: usize,
-    str_class: (hlbc::types::RefGlobal, RefType),
+    /// Where logError prints, and the register holding its String message.
+    log_at: usize,
+    log_msg: Reg,
     fns: Fns,
     types: Types,
     probes: Vec<Probe>,
@@ -94,6 +99,15 @@ fn static_fn<'a>(code: &'a Bytecode, class: &str, name: &str) -> Result<&'a Func
         bail!("{class}.{name} is ambiguous");
     }
     Ok(f)
+}
+
+/// Name of field `field` read through a register of type `t` (object or virtual).
+fn field_name_of(code: &Bytecode, t: RefType, field: RefField) -> Option<&str> {
+    let fields = match &code.types[t.0] {
+        Type::Virtual { fields } => fields,
+        other => &other.get_type_obj()?.fields,
+    };
+    fields.get(field.0).map(|f| s(code, f.name))
 }
 
 fn index_of(code: &Bytecode, findex: RefFun) -> Result<usize> {
@@ -198,41 +212,64 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if fun_args(code, log_error_f).get(2) != Some(&dyn_t) {
         bail!("logError: message argument is not Dyn");
     }
-    if !log_error_f.ops.iter().take(32).any(
-        |op| matches!(op, Opcode::Call1 { fun, arg0, .. } if *fun == std_string && *arg0 == Reg(2)),
-    ) {
-        bail!("logError: does not stringify its message");
-    }
-    if log_error_f.ops.iter().take(8).any(
-        |op| matches!(op, Opcode::Call1 { fun, arg0, .. } if *fun == println.findex && *arg0 == Reg(2)),
-    ) {
+    let lops = &log_error_f.ops;
+    if lops
+        .iter()
+        .any(|op| matches!(op, Opcode::Call1 { fun, .. } if *fun == println.findex))
+    {
         bail!("already applied");
     }
-    // Only a String message is printed (its toString is itself): the class
-    // global of String (TypeObj.global is 1-based) and hl.BaseType.check.
-    let str_class = {
-        let g = obj(code, str_t)?.global.0;
-        let g = hlbc::types::RefGlobal(g.checked_sub(1).context("String has no class global")?);
-        let t = *code
-            .globals
-            .get(g.0)
-            .context("String class global out of range")?;
-        if !matches!(&code.types[t.0], Type::Obj(o) if s(code, o.name) == "$String") {
-            bail!("String class global is not $String");
-        }
-        (g, t)
-    };
-    let type_check = method(code, obj_type(code, "hl.BaseType")?, "check")?;
-    if type_check.t.as_fun(code).map(|t| (t.args.len(), t.ret)) != Some((2, bool_t))
-        || type_check
-            .t
-            .as_fun(code)
-            .and_then(|t| t.args.get(1).copied())
-            != Some(dyn_t)
-    {
-        bail!("hl.BaseType.check is not (type, value) -> Bool");
+    // logError returns early past the online error cap (`errorCount >=
+    // maxErrorCount`) and for a repeat of the last error (`lastERROR == msg +
+    // first stack line`), then stores `lastERROR`. The message is printed right
+    // after that store, so the game's own cap and dedup bound the output.
+    // `msg` is `Std.string(message)` (the driver-error case swaps in its own text).
+    let (msg, msg_t) = lops
+        .iter()
+        .take(32)
+        .find_map(|op| match op {
+            Opcode::Call1 { dst, fun, arg0 } if *fun == std_string && *arg0 == Reg(2) => {
+                Some((*dst, log_error_f.regs[dst.0 as usize]))
+            }
+            _ => None,
+        })
+        .context("logError: does not stringify its message")?;
+    if msg_t != str_t {
+        bail!("logError: the stringified message is not a String");
     }
-    let type_check = type_check.findex;
+    let field_named = |op: &Opcode, name: &str, set: bool| match op {
+        Opcode::Field { obj, field, .. } if !set => {
+            field_name_of(code, log_error_f.regs[obj.0 as usize], *field) == Some(name)
+        }
+        Opcode::SetField { obj, field, .. } if set => {
+            field_name_of(code, log_error_f.regs[obj.0 as usize], *field) == Some(name)
+        }
+        _ => false,
+    };
+    let stores: Vec<usize> = (0..lops.len())
+        .filter(|&i| field_named(&lops[i], "lastERROR", true))
+        .collect();
+    let [store] = stores[..] else {
+        bail!(
+            "logError: expected one `lastERROR =` store, found {}",
+            stores.len()
+        );
+    };
+    let cap = lops[..store]
+        .iter()
+        .position(|op| field_named(op, "maxErrorCount", false))
+        .context("logError: no maxErrorCount check before the dedup")?;
+    if !(0..store).any(|i| field_named(&lops[i], "lastERROR", false))
+        || !lops[cap..store]
+            .iter()
+            .any(|op| matches!(op, Opcode::Ret { .. }))
+    {
+        bail!("logError: no early return between the cap and the lastERROR store");
+    }
+    let log_at = store + 1;
+    if (0..lops.len()).any(|i| jump_targets(log_error_f, i).contains(&log_at)) {
+        bail!("logError: the op after the lastERROR store is a jump target");
+    }
 
     let ctrl_t = obj_type(code, "st.Controller")?;
     let game_t = obj_type(code, "Game")?;
@@ -400,10 +437,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
     Ok(Plan {
         log_error,
-        str_class,
+        log_at,
+        log_msg: msg,
         fns: Fns {
             println: println.findex,
-            type_check,
             std_string,
             str_add,
         },
@@ -421,45 +458,25 @@ fn plan(code: &Bytecode) -> Result<Plan> {
 fn apply(code: &mut Bytecode, p: Plan) {
     let Plan {
         log_error,
-        str_class,
+        log_at,
+        log_msg,
         fns,
         types,
         probes,
     } = p;
 
-    // logError: if (BaseType.check(String, msg)) Sys.println(msg), first.
+    // logError: Sys.println(msg) once past the error cap and the repeat check.
     let f = &mut code.functions[log_error];
-    let mut reg = |t: RefType| {
-        f.regs.push(t);
-        Reg((f.regs.len() - 1) as u32)
-    };
-    let cls = reg(str_class.1);
-    let is_str = reg(types.bool_t);
-    let v = reg(types.void_t);
+    f.regs.push(types.void_t);
+    let v = Reg((f.regs.len() - 1) as u32);
     insert_ops(
         f,
-        0,
-        vec![
-            Opcode::GetGlobal {
-                dst: cls,
-                global: str_class.0,
-            },
-            Opcode::Call2 {
-                dst: is_str,
-                fun: fns.type_check,
-                arg0: cls,
-                arg1: Reg(2),
-            },
-            Opcode::JFalse {
-                cond: is_str,
-                offset: 1,
-            },
-            Opcode::Call1 {
-                dst: v,
-                fun: fns.println,
-                arg0: Reg(2),
-            },
-        ],
+        log_at,
+        vec![Opcode::Call1 {
+            dst: v,
+            fun: fns.println,
+            arg0: log_msg,
+        }],
     );
 
     let minus_one = int_const(code, -1);
@@ -571,14 +588,13 @@ fn apply(code: &mut Bytecode, p: Plan) {
                 },
             ]);
         }
-        ops.extend([
-            Opcode::ToDyn { dst: d, src: acc },
-            Opcode::Call1 {
-                dst: v,
-                fun: fns.println,
-                arg0: d,
-            },
-        ]);
+        // A String goes to a Dyn argument as is (that is what the compiler
+        // emits); ToDyn would box the pointer and print garbage.
+        ops.push(Opcode::Call1 {
+            dst: v,
+            fun: fns.println,
+            arg0: acc,
+        });
         resolve_jumps(&mut ops, &jumps);
         insert_ops(f, pr.at, ops);
     }
@@ -613,7 +629,7 @@ mod tests {
         let p = plan(&orig).expect("plan");
         let println = p.fns.println;
         let mut at: Vec<(usize, usize)> = p.probes.iter().map(|pr| (pr.fi, pr.at)).collect();
-        at.push((p.log_error, 0));
+        at.push((p.log_error, p.log_at));
         let mut code = read(&image);
         patch_diag(&mut code);
         let mut patched = Vec::new();
@@ -685,6 +701,23 @@ mod tests {
                         "fn@{} probe jump {k}->{t}",
                         a.findex.0
                     );
+                }
+            }
+        }
+
+        // logError prints its String message right after the `lastERROR` store,
+        // i.e. past the cap and the repeat check.
+        let lb = &back.functions[p.log_error];
+        assert!(
+            matches!(lb.ops[p.log_at], Opcode::Call1 { fun, arg0, .. } if fun == println && arg0 == p.log_msg)
+        );
+        assert!(matches!(lb.ops[p.log_at - 1], Opcode::SetField { .. }));
+        // No String is boxed with ToDyn on its way to println.
+        for &(fi, _) in &at {
+            let b = &back.functions[fi];
+            for op in &b.ops {
+                if let Opcode::ToDyn { src, .. } = op {
+                    assert_ne!(b.regs[src.0 as usize], p.types.str_t, "fn@{}", b.findex.0);
                 }
             }
         }
