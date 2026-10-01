@@ -496,6 +496,14 @@ fn int_const(code: &mut Bytecode, value: i32) -> hlbc::types::RefInt {
     hlbc::types::RefInt(code.ints.len() - 1)
 }
 
+fn float_const(code: &mut Bytecode, value: f64) -> hlbc::types::RefFloat {
+    if let Some(i) = code.floats.iter().position(|&v| v == value) {
+        return hlbc::types::RefFloat(i);
+    }
+    code.floats.push(value);
+    hlbc::types::RefFloat(code.floats.len() - 1)
+}
+
 /// The virtual type whose field names are exactly `names` (sorted, as HL stores them).
 fn virtual_type(code: &Bytecode, names: &[&str]) -> Result<RefType> {
     code.types
@@ -518,6 +526,7 @@ fn resolve_jumps(ops: &mut [Opcode], targets: &[(usize, usize)]) {
         let off = target as i32 - i as i32 - 1;
         match &mut ops[i] {
             Opcode::JNull { offset, .. }
+            | Opcode::JNotNull { offset, .. }
             | Opcode::JSGte { offset, .. }
             | Opcode::JSGt { offset, .. }
             | Opcode::JEq { offset, .. }

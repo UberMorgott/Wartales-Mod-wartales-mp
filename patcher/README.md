@@ -55,7 +55,10 @@ who clicks decides: wait-all-players buttons (town/location, camp fire, rest,
 debriefs, group fight, travel post, trade route, tavern resume, ...) run on the
 first click, cast no vote on mouse-down any more (a gamepad press, which has no
 release, goes through `Button.doPadClick` straight to the click) and no longer
-show the hold-to-force bar; a leave request (`Place.setLeaveState__impl`) and a
+show the hold-to-force bar; a repeat click on the same button within 2 s
+(same player) or 5 s (another player) of the click that acted is dropped, as the
+vote used to swallow it, so a double click or two players clicking Fight/Leave
+together run the action once (later clicks act again: re-used buttons work), and none acts while the host's mode-switch barrier runs; a leave request (`Place.setLeaveState__impl`) and a
 rest request (`Controller.playerSetRestState__impl`: dropped unless `game.mode`
 is a `CampMode`, not forced while already resting) set their state's `forced`
 flag; the first player's "next" advances a dialog (`Dialog.checkAllReady` reads the

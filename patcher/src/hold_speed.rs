@@ -66,14 +66,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     Ok(Plan { fi, f64_t })
 }
 
-fn float_const(code: &mut Bytecode, value: f64) -> hlbc::types::RefFloat {
-    if let Some(i) = code.floats.iter().position(|&v| v == value) {
-        return hlbc::types::RefFloat(i);
-    }
-    code.floats.push(value);
-    hlbc::types::RefFloat(code.floats.len() - 1)
-}
-
 fn apply(code: &mut Bytecode, p: Plan) {
     let three = float_const(code, FACTOR);
     let f = &mut code.functions[p.fi];

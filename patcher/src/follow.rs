@@ -61,7 +61,7 @@
 
 use super::*;
 use crate::job_xp::{const_str, str_global};
-use hlbc::types::{RefFloat, RefGlobal, RefString, ValBool};
+use hlbc::types::{RefGlobal, RefString, ValBool};
 use std::collections::HashMap;
 
 pub(crate) const FOLLOW_ON: &str = "Follow: ON";
@@ -85,14 +85,6 @@ fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
         .iter()
         .position(|f| f.findex == findex)
         .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn float_const(code: &mut Bytecode, value: f64) -> RefFloat {
-    if let Some(i) = code.floats.iter().position(|&v| v == value) {
-        return RefFloat(i);
-    }
-    code.floats.push(value);
-    RefFloat(code.floats.len() - 1)
 }
 
 /// The unique code function `name` with exactly this signature.

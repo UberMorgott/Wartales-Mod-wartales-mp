@@ -10,15 +10,34 @@
 //
 //   G1 Button.waitAllPlayers (host click closure, Button.hx:91)
 //        if (bd.forced) { cb(); return; }  push player; if (all) { reset; cb(); }
-//      -> the `forced` branch is always taken (the JFalse gets offset 0).
-//      onPush (Button.hx:153) used to cast the vote on mouse DOWN
-//      (`interactive.onClick(e)`) and then start the hold-to-force bar. With the
-//      vote acting at once, the mouse release would run the action a second
-//      time, so onPush no longer votes (its `JNotLt` becomes `JAlways`) and the
-//      hold bar never starts (its `players + me < total` JSLt gets offset 0 and
-//      falls into `Ret`). A gamepad press has no release: Button.doPadClick
-//      called onPush alone and now calls `interactive.onClick` instead, the same
-//      entry a mouse click uses.
+//      -> the `forced` branch is always taken (the JFalse gets offset 0), behind
+//      a repeat guard: a click on the same button data within 2 s of the click
+//      that ran it (same player) or 5 s (another player) returns without cb().
+//      Vanilla swallowed those in the vote: the button acted once, when the last
+//      vote came in. Without the guard a double click, or two players clicking
+//      Fight/Leave/Continue within the round trip, ran the action twice (two
+//      startAttack calls, two leave requests into the mode-switch barrier). The
+//      record is per button data, in two new global ObjectMaps (bd -> time,
+//      bd -> player), so clicking another button in between does not reset it,
+//      and a later click still acts: a button the game re-uses while its window
+//      stays open (rest after a cancelled confirm, tutorial pages) keeps working.
+//      While the host's mode-switch barrier runs (Controller.lockSyncMode, or
+//      clients in waitLocks) every wait-all click is dropped, however late:
+//      syncLeaveMode/syncEnterMode queue a second request behind the first and
+//      run it afterwards. Known limit: a click after 2 s / 5 s while the first
+//      action waits on an open confirm acts again (a second confirm); there is
+//      no generic "action pending" state, and vanilla's own hold-to-force path
+//      let every later click act, unguarded.
+//      onPush (Button.hx:153-163), when the pushing player has not voted yet,
+//      calls `interactive.onClick(e)` with the push event: the click handler
+//      (host: Button.hx:82-90) takes it as a left click, i.e. a vote cast on
+//      mouse DOWN (it turns a push into an un-vote only in gamepad mode for a
+//      player already in the list, which that call excludes). With the vote
+//      acting at once the release would click again, so onPush no longer
+//      calls it (its `JNotLt` becomes `JAlways`) and the hold bar never starts
+//      (its `players + me < total` JSLt gets offset 0 and falls into `Ret`). A
+//      gamepad press has no release: Button.doPadClick called onPush alone and
+//      now calls `interactive.onClick` instead, the same entry a mouse click uses.
 //      Covers town/location, camp fire, rest confirm/report, debriefs, group
 //      fight, travel post, trade route, sport, stealth, tavern resume, pit,
 //      tutorial, welcome, troop choice windows.
@@ -105,9 +124,41 @@ fn field_name(code: &Bytecode, t: RefType, field: RefField) -> Option<&str> {
 
 // ---------- G1: Button.waitAllPlayers ----------
 
+/// A repeat click on the same button within this many seconds of the click that
+/// ran it is dropped: by the same player (double click, impatient re-click) ...
+const REPEAT_SAME_S: f64 = 2.0;
+/// ... or by another player (both clicked within the network round trip, or
+/// before the host's action reached their screen).
+const REPEAT_OTHER_S: f64 = 5.0;
+
 struct ButtonPlan {
     click_fi: usize,
     click_at: usize,
+    /// The click closure's `bd` (button data) register and the op loading the button from its env.
+    bd: Reg,
+    load_button: Opcode,
+    button_t: RefType,
+    game_f: RefField,
+    game_t: RefType,
+    action_player: RefFun,
+    player_t: RefType,
+    sys_time: RefFun,
+    f64_t: RefType,
+    dyn_t: RefType,
+    /// haxe.ds.ObjectMap: per-button-data records (when it last acted, for whom).
+    map_t: RefType,
+    map_new: RefFun,
+    map_get: RefFun,
+    map_set: RefFun,
+    /// Game.ctrl, Controller.lockSyncMode, Controller.waitLocks(.length).
+    ctrl_f: RefField,
+    ctrl_t: RefType,
+    lock_f: RefField,
+    locks_f: RefField,
+    locks_t: RefType,
+    len_f: RefField,
+    bool_t: RefType,
+    i32_t: RefType,
     hold_fi: usize,
     hold_at: usize,
     /// onPush's `JNotLt 0.0, delay` guarding "cast my vote now" (`interactive.onClick(e)`).
@@ -156,6 +207,72 @@ fn plan_button(code: &Bytecode) -> Result<ButtonPlan> {
             clicks.len()
         );
     };
+    // The repeat guard: the button (closure env), its game's action player and the clock.
+    let cf = &code.functions[click_fi];
+    let Opcode::Field { obj: bd, .. } = cf.ops[click_at - 1] else {
+        unreachable!()
+    };
+    let load_button = cf.ops[..click_at]
+        .iter()
+        .find(|op| matches!(op, Opcode::EnumField { dst, value: Reg(0), .. } if cf.regs[dst.0 as usize] == button_t))
+        .cloned()
+        .context("button: click closure does not load its button from the env")?;
+    let (game_f, game_t) = field(code, button_t, "game")?;
+    let action_player = method(code, game_t, "getActionPlayer")?;
+    let player_t = action_player
+        .t
+        .as_fun(code)
+        .context("getActionPlayer type")?
+        .ret;
+    if fun_args(code, action_player).len() != 1 || code.types[player_t.0].get_type_obj().is_none() {
+        bail!("button: Game.getActionPlayer is not (Game) -> player object");
+    }
+    let f64_t = prim_type(code, "F64", |t| matches!(t, Type::F64))?;
+    let sys_time = {
+        let hits: Vec<RefFun> = code
+            .natives
+            .iter()
+            .filter(|n| {
+                s(code, n.name) == "sys_time"
+                    && n.t
+                        .as_fun(code)
+                        .is_some_and(|t| t.args.is_empty() && t.ret == f64_t)
+            })
+            .map(|n| n.findex)
+            .collect();
+        let [f] = hits[..] else {
+            bail!("button: expected one native sys_time, found {}", hits.len());
+        };
+        f
+    };
+    let dyn_t = prim_type(code, "Dyn", |t| matches!(t, Type::Dyn))?;
+    let map_t = obj_type(code, "haxe.ds.ObjectMap")?;
+    let void_t = prim_type(code, "Void", |t| matches!(t, Type::Void))?;
+    let sig = |name: &str, args: &[RefType], ret: RefType| -> Result<RefFun> {
+        let f = method(code, map_t, name)?;
+        if fun_args(code, f) != args || f.t.as_fun(code).map(|t| t.ret) != Some(ret) {
+            bail!("button: ObjectMap.{name} has an unexpected signature");
+        }
+        Ok(f.findex)
+    };
+    let map_new = sig("__constructor__", &[map_t], void_t)?;
+    let map_get = sig("get", &[map_t, dyn_t], dyn_t)?;
+    let map_set = sig("set", &[map_t, dyn_t, dyn_t], void_t)?;
+    // The host's mode-switch barrier: Controller.syncLeaveMode/syncEnterMode
+    // queue a second request while `lockSyncMode` is set and run it after the
+    // first, and `waitLocks` holds the clients still to answer.
+    let (ctrl_f, ctrl_t) = field(code, game_t, "ctrl")?;
+    if obj(code, ctrl_t).map(|o| s(code, o.name)).ok() != Some("st.Controller") {
+        bail!("button: Game.ctrl is not st.Controller");
+    }
+    let bool_t = prim_type(code, "Bool", |t| matches!(t, Type::Bool))?;
+    let i32_t = prim_type(code, "I32", |t| matches!(t, Type::I32))?;
+    let (lock_f, lock_t) = field(code, ctrl_t, "lockSyncMode")?;
+    let (locks_f, locks_t) = field(code, ctrl_t, "waitLocks")?;
+    let (len_f, len_t) = field(code, locks_t, "length")?;
+    if lock_t != bool_t || len_t != i32_t {
+        bail!("button: Controller.lockSyncMode / waitLocks.length have unexpected types");
+    }
     // onPush closure: calls isWaitAllPlayers and WaitEvent.waitUntil; `JSLt +1; Ret` skips the hold start.
     let mut holds = vec![];
     for &fi in &cands {
@@ -250,6 +367,28 @@ fn plan_button(code: &Bytecode) -> Result<ButtonPlan> {
     Ok(ButtonPlan {
         click_fi,
         click_at,
+        bd,
+        load_button,
+        button_t,
+        game_f,
+        game_t,
+        action_player: action_player.findex,
+        player_t,
+        sys_time,
+        f64_t,
+        dyn_t,
+        map_t,
+        map_new,
+        map_get,
+        map_set,
+        ctrl_f,
+        ctrl_t,
+        lock_f,
+        locks_f,
+        locks_t,
+        len_f,
+        bool_t,
+        i32_t,
         hold_fi,
         hold_at,
         push_at,
@@ -259,13 +398,261 @@ fn plan_button(code: &Bytecode) -> Result<ButtonPlan> {
     })
 }
 
-fn apply_button(code: &mut Bytecode, p: &ButtonPlan) {
+/// Ops of the repeat guard inserted in front of the forced path's `cb()`:
+///
+///   p = button.game.getActionPlayer();
+///   c = game.ctrl; if (c != null && (c.lockSyncMode || c.waitLocks.length > 0)) return;
+///   now = sys_time();
+///   if (times == null) { times = new ObjectMap(); players = new ObjectMap(); }
+///   if (now - (times.get(bd) ?? 0) < (players.get(bd) == p ? SAME : OTHER)) return;
+///   times.set(bd, now); players.set(bd, p);
+///
+/// Vanilla swallowed repeat clicks in the vote (the button acted once, when the
+/// last vote arrived); with the first click acting, a double click or a second
+/// player's click would run the action again. The record is per button data
+/// (window button or shared place/camp state), so clicking another button in
+/// between does not reset it. A later click still acts, so a button the game
+/// re-uses (rest after a cancelled confirm, tutorial pages) keeps working.
+fn repeat_guard(
+    code: &mut Bytecode,
+    p: &ButtonPlan,
+    globals: [hlbc::types::RefGlobal; 2],
+) -> Vec<Opcode> {
+    let same = float_const(code, REPEAT_SAME_S);
+    let other = float_const(code, REPEAT_OTHER_S);
+    let [g_times, g_players] = globals;
     let f = &mut code.functions[p.click_fi];
+    let mut reg = |t: RefType| {
+        f.regs.push(t);
+        Reg((f.regs.len() - 1) as u32)
+    };
+    let (btn, game, player, now, times, players, key, val, dt, lim, last_player) = (
+        reg(p.button_t),
+        reg(p.game_t),
+        reg(p.player_t),
+        reg(p.f64_t),
+        reg(p.map_t),
+        reg(p.map_t),
+        reg(p.dyn_t),
+        reg(p.dyn_t),
+        reg(p.f64_t),
+        reg(p.f64_t),
+        reg(p.player_t),
+    );
+    // The forced path's own `return` (its cb() result register, Void).
+    let Opcode::Ret { ret: void } = f.ops[p.click_at + 3] else {
+        unreachable!()
+    };
+    let mut load = p.load_button.clone();
+    if let Opcode::EnumField { dst, .. } = &mut load {
+        *dst = btn;
+    }
+    let mut ops = vec![
+        load,                           // 0
+        Opcode::NullCheck { reg: btn }, // 1
+        Opcode::Field {
+            dst: game,
+            obj: btn,
+            field: p.game_f,
+        }, // 2
+        Opcode::NullCheck { reg: game }, // 3
+        Opcode::Call1 {
+            dst: player,
+            fun: p.action_player,
+            arg0: game,
+        }, // 4
+        Opcode::Call0 {
+            dst: now,
+            fun: p.sys_time,
+        }, // 5
+        Opcode::GetGlobal {
+            dst: times,
+            global: g_times,
+        }, // 6
+        Opcode::JNotNull {
+            reg: times,
+            offset: 0,
+        }, // 7 -> 14
+        Opcode::New { dst: times },     // 8
+        Opcode::Call1 {
+            dst: void,
+            fun: p.map_new,
+            arg0: times,
+        }, // 9
+        Opcode::SetGlobal {
+            global: g_times,
+            src: times,
+        }, // 10
+        Opcode::New { dst: players },   // 11
+        Opcode::Call1 {
+            dst: void,
+            fun: p.map_new,
+            arg0: players,
+        }, // 12
+        Opcode::SetGlobal {
+            global: g_players,
+            src: players,
+        }, // 13
+        Opcode::GetGlobal {
+            dst: players,
+            global: g_players,
+        }, // 14
+        // An object goes to a Dyn argument as is (what the compiler emits).
+        Opcode::Mov {
+            dst: key,
+            src: p.bd,
+        }, // 15
+        Opcode::Call2 {
+            dst: val,
+            fun: p.map_get,
+            arg0: times,
+            arg1: key,
+        }, // 16
+        Opcode::SafeCast { dst: dt, src: val }, // 17: null (never acted) -> 0
+        Opcode::Sub {
+            dst: dt,
+            a: now,
+            b: dt,
+        }, // 18
+        Opcode::Call2 {
+            dst: val,
+            fun: p.map_get,
+            arg0: players,
+            arg1: key,
+        }, // 19
+        Opcode::SafeCast {
+            dst: last_player,
+            src: val,
+        }, // 20
+        Opcode::Float {
+            dst: lim,
+            ptr: same,
+        }, // 21
+        Opcode::JEq {
+            a: player,
+            b: last_player,
+            offset: 0,
+        }, // 22 -> 24
+        Opcode::Float {
+            dst: lim,
+            ptr: other,
+        }, // 23
+        Opcode::JSGte {
+            a: dt,
+            b: lim,
+            offset: 0,
+        }, // 24 -> FIRE
+        Opcode::Ret { ret: void },              // 25 repeat: dropped
+        Opcode::ToDyn { dst: val, src: now },   // 26 FIRE
+        Opcode::Call3 {
+            dst: void,
+            fun: p.map_set,
+            arg0: times,
+            arg1: key,
+            arg2: val,
+        }, // 27
+        Opcode::Mov {
+            dst: val,
+            src: player,
+        }, // 28
+        Opcode::Call3 {
+            dst: void,
+            fun: p.map_set,
+            arg0: players,
+            arg1: key,
+            arg2: val,
+        }, // 29
+    ];
+    // Ops 5..16: while the host's mode-switch barrier runs, every click is
+    // dropped (a second leave/enter request would be queued behind the first and
+    // run after it, whenever it arrives); then the timing check (ops 16..).
+    let (ctrl, lock, locks, len, zero) = {
+        let f = &mut code.functions[p.click_fi];
+        let mut reg = |t: RefType| {
+            f.regs.push(t);
+            Reg((f.regs.len() - 1) as u32)
+        };
+        (
+            reg(p.ctrl_t),
+            reg(p.bool_t),
+            reg(p.locks_t),
+            reg(p.i32_t),
+            reg(p.i32_t),
+        )
+    };
+    let zero_c = int_const(code, 0);
+    let barrier = vec![
+        Opcode::Field {
+            dst: ctrl,
+            obj: game,
+            field: p.ctrl_f,
+        }, // 5
+        Opcode::JNull {
+            reg: ctrl,
+            offset: 0,
+        }, // 6 -> 16
+        Opcode::Field {
+            dst: lock,
+            obj: ctrl,
+            field: p.lock_f,
+        }, // 7
+        Opcode::JFalse {
+            cond: lock,
+            offset: 0,
+        }, // 8 -> 10
+        Opcode::Ret { ret: void }, // 9 a mode switch is running
+        Opcode::Field {
+            dst: locks,
+            obj: ctrl,
+            field: p.locks_f,
+        }, // 10
+        Opcode::JNull {
+            reg: locks,
+            offset: 0,
+        }, // 11 -> 16
+        Opcode::Field {
+            dst: len,
+            obj: locks,
+            field: p.len_f,
+        }, // 12
+        Opcode::Int {
+            dst: zero,
+            ptr: zero_c,
+        }, // 13
+        Opcode::JSGte {
+            a: zero,
+            b: len,
+            offset: 0,
+        }, // 14 -> 16 (no client is locked)
+        Opcode::Ret { ret: void }, // 15 clients are still in the barrier
+    ];
+    let k = barrier.len();
+    ops.splice(5..5, barrier);
+    let shift = |i: usize| if i >= 5 { i + k } else { i };
+    let mut jumps: Vec<(usize, usize)> = [(7, 14), (22, 24), (24, 26)]
+        .iter()
+        .map(|&(a, b)| (shift(a), shift(b)))
+        .collect();
+    jumps.extend([(6, 16), (8, 10), (11, 16), (14, 16)]);
+    resolve_jumps(&mut ops, &jumps);
+    ops
+}
+
+fn apply_button(code: &mut Bytecode, p: &ButtonPlan) {
+    let globals = [p.map_t, p.map_t].map(|t| {
+        code.globals.push(t);
+        hlbc::types::RefGlobal(code.globals.len() - 1)
+    });
+    let guard = repeat_guard(code, p, globals);
+    let n = guard.len();
+    let f = &mut code.functions[p.click_fi];
+    insert_ops(f, p.click_at + 1, guard);
+    // The forced test falls through into the guard (insert_ops moved its target past it).
     if let Opcode::JFalse { offset, .. } = &mut f.ops[p.click_at] {
         *offset = 0;
     }
     eprintln!(
-        "patched coop gate button-click fn@{} op {}: every click takes the forced path",
+        "patched coop gate button-click fn@{} op {}: every click takes the forced path, a {n}-op guard drops repeats",
         f.findex.0, p.click_at
     );
     let f = &mut code.functions[p.hold_fi];
@@ -647,9 +1034,14 @@ mod tests {
 
     /// `b` is `a` with `n` ops inserted at `at`: every original jump keeps its target.
     fn shifted(a: &Function, b: &Function, at: usize, n: usize) {
+        shifted_except(a, b, at, n, usize::MAX);
+    }
+
+    /// `shifted`, except for the jump at original op `skip`, which was retargeted.
+    fn shifted_except(a: &Function, b: &Function, at: usize, n: usize, skip: usize) {
         assert_eq!(b.ops.len(), a.ops.len() + n);
         let map = |t: usize| if t < at { t } else { t + n };
-        for i in 0..a.ops.len() {
+        for i in (0..a.ops.len()).filter(|&i| i != skip) {
             let tb: Vec<usize> = jump_targets(a, i).into_iter().map(map).collect();
             assert_eq!(jump_targets(b, map(i)), tb, "fn@{} op {i}", a.findex.0);
         }
@@ -693,7 +1085,10 @@ mod tests {
         assert_eq!(back.functions.len(), orig.functions.len());
         assert_eq!(back.types, orig.types);
         assert_eq!(back.strings, orig.strings);
-        assert_eq!(back.globals, orig.globals);
+        // Two new globals (the repeat guard's maps), appended.
+        let ng = orig.globals.len();
+        assert_eq!(&back.globals[..ng], &orig.globals[..]);
+        assert_eq!(&back.globals[ng..], &[bp.map_t, bp.map_t]);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same =
                 ops(&a.ops) == ops(&b.ops) && a.regs == b.regs && a.debug_info == b.debug_info;
@@ -705,13 +1100,53 @@ mod tests {
             );
         }
 
-        // G1 click: the forced test falls through, nothing moved.
-        let c = &back.functions[bp.click_fi];
-        assert!(matches!(
-            c.ops[bp.click_at],
-            Opcode::JFalse { offset: 0, .. }
-        ));
-        assert_eq!(c.ops.len(), orig.functions[bp.click_fi].ops.len());
+        // G1 click: the forced test falls into the 41-op guard (mode-switch
+        // barrier, then the per-button timing), which returns (dropped) or falls
+        // through to the original `cb(); return`.
+        let (oc, c) = (&orig.functions[bp.click_fi], &back.functions[bp.click_fi]);
+        let (at, n) = (bp.click_at, 41);
+        assert!(matches!(c.ops[at], Opcode::JFalse { offset: 0, .. }));
+        shifted_except(oc, c, at + 1, n, at);
+        assert_eq!(&c.regs[..oc.regs.len()], &oc.regs[..]);
+        let g = &c.ops[at + 1..at + 1 + n];
+        assert!(matches!(g[5], Opcode::Field { field, .. } if field == bp.ctrl_f));
+        assert!(matches!(g[7], Opcode::Field { field, .. } if field == bp.lock_f));
+        assert!(matches!(g[10], Opcode::Field { field, .. } if field == bp.locks_f));
+        for i in [9, 15, 36] {
+            assert!(matches!(g[i], Opcode::Ret { .. }), "guard op {i}");
+        }
+        assert!(matches!(g[16], Opcode::Call0 { fun, .. } if fun == bp.sys_time));
+        assert!(matches!(g[17], Opcode::GetGlobal { global, .. } if global.0 == ng));
+        assert!(matches!(g[24], Opcode::SetGlobal { global, .. } if global.0 == ng + 1));
+        assert!(matches!(g[26], Opcode::Mov { src, .. } if src == bp.bd));
+        for i in [27, 30] {
+            assert!(matches!(g[i], Opcode::Call2 { fun, .. } if fun == bp.map_get));
+        }
+        for i in [38, 40] {
+            assert!(matches!(g[i], Opcode::Call3 { fun, .. } if fun == bp.map_set));
+        }
+        let base = at + 1;
+        for (from, to) in [
+            (6, 16),
+            (8, 10),
+            (11, 16),
+            (14, 16),
+            (18, 25),
+            (33, 35),
+            (35, 37),
+        ] {
+            assert_eq!(
+                jump_targets(c, base + from),
+                vec![base + to],
+                "guard op {from}"
+            );
+        }
+        assert!(matches!(c.ops[base + n], Opcode::NullCheck { .. }));
+        assert!(matches!(c.ops[base + n + 1], Opcode::CallClosure { .. }));
+        assert!(matches!(c.ops[base + n + 2], Opcode::Ret { .. }));
+        for (v, want) in [(REPEAT_SAME_S, 32), (REPEAT_OTHER_S, 34)] {
+            assert!(matches!(g[want], Opcode::Float { ptr, .. } if back.floats[ptr.0] == v));
+        }
         // G1 push: the vote-on-push test always jumps over the block, the hold
         // start falls into Ret, nothing moved; doPadClick reads onClick instead of onPush.
         let (ha, hb) = (&orig.functions[bp.hold_fi], &back.functions[bp.hold_fi]);
