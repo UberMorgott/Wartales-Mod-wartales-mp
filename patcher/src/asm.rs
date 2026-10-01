@@ -232,7 +232,11 @@ pub(crate) mod testutil {
             let op = &f.ops[i];
             let ok = match op {
                 Opcode::Field { dst, obj, field } => {
-                    assignable(code, field_type(code, rt(obj), *field), rt(dst))
+                    let ft = field_type(code, rt(obj), *field);
+                    assignable(code, ft, rt(dst))
+                        // virtual fields are read with a dynamic cast to the register type
+                        || (matches!(code.types[rt(obj).0], Type::Virtual { .. })
+                            && matches!(code.types[ft.0], Type::Dyn))
                 }
                 Opcode::GetThis { dst, field } => {
                     assignable(code, field_type(code, f.regs[0], *field), rt(dst))

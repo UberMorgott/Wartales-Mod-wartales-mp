@@ -12,7 +12,20 @@
 //           from Texts.tips.inventory_sort), applied to the chest through the
 //           host-authoritative st.Inventory.netSortBy RPC, the call the camp
 //           chest window (ui.win.CampChest) uses for the same chest.
+//   stack - quick stack: every stack of the player's inventory whose item kind
+//           the chest already holds moves to the chest (icon "CampChestButton",
+//           tooltip Texts campChest.moveTo_chest).
+//   take  - take similar: every chest stack whose kind the player's inventory
+//           already holds moves to it (icon "LootAll", tooltip moveTo_inventory).
 //
+// Moves are the vanilla slot operation MoveTo(target, count), run the way the
+// slot UI runs it (ui.comp.Slot handler): locally on an inventory this machine
+// has authority over (its own inventory; everything on the host), else as the
+// st.Inventory.networkOperation RPC, so the host consumes the chest stack and
+// adds it to the player's inventory in one step. Item conservation is the
+// vanilla one; a stack index that went stale (another player moved the chest
+// in the meantime) moves whatever stack the host has at that index, as a
+// vanilla drag would. Equipped items are not inventory content and never move.
 // GameInventory's constructor gets, before its Ret:
 //
 //   var cp = this.chestInventory?.dom; if (cp == null) skip;
@@ -95,6 +108,198 @@ struct Plan {
     sfx_confirm: RefGlobal,
     flow_g: RefGlobal,
     sort_icon_g: RefGlobal,
+    mv: Move,
+}
+
+/// Quick stack / quick take: vanilla slot moves (SlotOperation.MoveTo).
+struct Move {
+    game_me: (RefField, RefType),
+    player_inv: RefField,
+    inv_t: RefType,
+    content: (RefField, RefType),
+    proxy_array: RefField,
+    arr_obj_t: RefType,
+    arr_len: RefField,
+    arr_raw: (RefField, RefType),
+    slot_t: RefType,
+    slot_k: (RefField, RefType),
+    get_count: RefFun,
+    item_kind: RefField,
+    count: RefFun,
+    null_i32: RefType,
+    has_authority: RefFun,
+    local_op: RefFun,
+    net_op: RefFun,
+    op_t: RefType,
+    move_to: hlbc::types::RefEnumConstruct,
+    /// Texts access for the tooltips, as CampChest.init reads them.
+    texts_g: RefGlobal,
+    texts_data: (RefField, RefType),
+    texts_group: hlbc::types::RefString,
+    texts_vt: RefType,
+    camp_chest: (RefField, RefType),
+    to_chest: RefField,
+    to_inv: RefField,
+    set_tip: RefFun,
+    title_tip: RefField,
+    stack_icon_g: RefGlobal,
+}
+
+fn plan_move(code: &Bytecode, t: &Types, game_t: RefType, icon_t: RefType) -> Result<Move> {
+    let game_me = field(code, game_t, "me")?;
+    let (player_inv, inv_t) = field(code, game_me.1, "inventory")?;
+    if s(code, obj(code, inv_t)?.name) != "st.Inventory" {
+        bail!("BasePlayer.inventory is not st.Inventory");
+    }
+    let content = field(code, inv_t, "content")?;
+    let (proxy_array, pa_t) = field(code, content.1, "array")?;
+    if pa_t != t.arr_dyn {
+        bail!("content.array is not ArrayDyn");
+    }
+    let arr_obj_t = obj_type(code, "hl.types.ArrayObj")?;
+    let (arr_len, len_t) = field(code, arr_obj_t, "length")?;
+    if len_t != t.i32_ {
+        bail!("ArrayObj.length is not I32");
+    }
+    let arr_raw = field(code, arr_obj_t, "array")?;
+    // slot = virtual {chk, count, k}; get_count(slot) -> Int
+    let gc = code
+        .functions
+        .iter()
+        .find(|f| {
+            s(code, f.name) == "get_count"
+                && f.t.as_fun(code).is_some_and(|ft| {
+                    ft.args.len() == 1
+                        && ft.ret == t.i32_
+                        && matches!(&code.types[ft.args[0].0], Type::Virtual { fields }
+                            if fields.iter().map(|x| s(code, x.name)).collect::<Vec<_>>() == ["chk", "count", "k"])
+                })
+        })
+        .context("SlotItem.get_count not found")?;
+    let slot_t = gc.t.as_fun(code).unwrap().args[0];
+    let Type::Virtual { fields } = &code.types[slot_t.0] else {
+        unreachable!()
+    };
+    if s(code, fields[2].name) != "k" {
+        bail!("slot virtual has no k");
+    }
+    // `k` is Dyn in the virtual; vanilla reads it straight into an st.Item register.
+    let slot_k = (RefField(2), obj_type(code, "st.Item")?);
+    let item_kind = field(code, slot_k.1, "kind")?;
+    if item_kind.1 != t.str_ {
+        bail!("Item.kind is not String");
+    }
+    let count_f = proto_fn(code, inv_t, "count")?;
+    let ct = count_f.t.as_fun(code).unwrap();
+    if ct.args.len() != 4 || ct.args[1] != t.str_ || ct.args[3] != t.ref_bool || ct.ret != t.i32_ {
+        bail!("Inventory.count is not (String, Null<Int>, Ref<Bool>) -> Int");
+    }
+    let null_i32 = ct.args[2];
+    let has_authority = proto_fn(code, inv_t, "hasAuthority")?;
+    let local_op = proto_fn(code, inv_t, "_networkOperation")?;
+    let net_op = proto_fn(code, inv_t, "networkOperation")?;
+    let lt = local_op.t.as_fun(code).unwrap();
+    let nt = net_op.t.as_fun(code).unwrap();
+    if lt.args.len() != 4
+        || nt.args.len() != 5
+        || lt.args[..4] != nt.args[..4]
+        || lt.args[1] != t.i32_
+    {
+        bail!("Inventory network operation signatures changed");
+    }
+    let op_t = lt.args[2];
+    let Type::Enum { constructs, .. } = &code.types[op_t.0] else {
+        bail!("slot operation is not an enum");
+    };
+    let mi = constructs
+        .iter()
+        .position(|c| s(code, c.name) == "MoveTo")
+        .context("SlotOperation.MoveTo not found")?;
+    if constructs[mi].params != [inv_t, t.i32_] {
+        bail!("SlotOperation.MoveTo is not (Inventory, Int)");
+    }
+    // Tooltip texts: CampChest.init reads Texts.DATA.<group>.campChest.moveTo_chest.
+    let cc_t = obj_type(code, "ui.win.CampChest")?;
+    let init = method(code, cc_t, "init")?;
+    let at = init
+        .ops
+        .iter()
+        .enumerate()
+        .find_map(|(i, o)| match o {
+            Opcode::Field { obj, field: fl, .. }
+                if field_name(code, init.regs[obj.0 as usize], *fl) == Some("moveTo_chest") =>
+            {
+                Some(i)
+            }
+            _ => None,
+        })
+        .context("CampChest.init: moveTo_chest not read")?;
+    let window: Vec<&Opcode> = init.ops[at.saturating_sub(10)..at]
+        .iter()
+        .filter(|o| !matches!(o, Opcode::NullCheck { .. }))
+        .collect();
+    let [.., Opcode::GetGlobal {
+        global: texts_g, ..
+    }, Opcode::Field {
+        dst: d1,
+        field: data_f,
+        ..
+    }, Opcode::DynGet { field: group, .. }, Opcode::ToVirtual { dst: vt_r, .. }, Opcode::Field {
+        dst: cc_r,
+        field: cc_f,
+        ..
+    }] = window[..]
+    else {
+        bail!("CampChest.init: unexpected Texts access shape");
+    };
+    let texts_data = (*data_f, init.regs[d1.0 as usize]);
+    let texts_vt = init.regs[vt_r.0 as usize];
+    let camp_chest = (*cc_f, init.regs[cc_r.0 as usize]);
+    let to_chest = field_of_virtual(code, camp_chest.1, "moveTo_chest")?.0;
+    let to_inv = field_of_virtual(code, camp_chest.1, "moveTo_inventory")?.0;
+    let elem_t = obj_type(code, "ui.comp.Element")?;
+    let set_tip = method(code, elem_t, "set_tipText")?.findex;
+    let (title_tip, tt_t) = field(code, icon_t, "titleTip")?;
+    if tt_t != t.bool_ {
+        bail!("Icon.titleTip is not Bool");
+    }
+    Ok(Move {
+        game_me,
+        player_inv,
+        inv_t,
+        content,
+        proxy_array,
+        arr_obj_t,
+        arr_len,
+        arr_raw,
+        slot_t,
+        slot_k,
+        get_count: gc.findex,
+        item_kind: item_kind.0,
+        count: count_f.findex,
+        null_i32,
+        has_authority: has_authority.findex,
+        local_op: local_op.findex,
+        net_op: net_op.findex,
+        op_t,
+        move_to: hlbc::types::RefEnumConstruct(mi),
+        texts_g: *texts_g,
+        texts_data,
+        texts_group: *group,
+        texts_vt,
+        camp_chest,
+        to_chest,
+        to_inv,
+        set_tip,
+        title_tip,
+        stack_icon_g: RefGlobal(0),
+    })
+}
+
+/// The function bound to method `name` in class `t`'s own prototype.
+fn proto_fn<'a>(code: &'a Bytecode, t: RefType, name: &str) -> Result<&'a Function> {
+    let f = proto(code, t, name)?;
+    Ok(&code.functions[fun_index(code, f)?])
 }
 
 fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
@@ -406,7 +611,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("Tool.inventory is not st.Inventory");
     }
     let chest_s = existing_str_global(code, str_t, "Chest")?;
-    let net_sort_f = method(code, inv_t, "netSortBy")?;
+    let net_sort_f = proto_fn(code, inv_t, "netSortBy")?;
     let ns = net_sort_f.t.as_fun(code).unwrap().clone();
     if ns.args.len() != 3 || !matches!(code.types[ns.args[1].0], Type::Enum { .. }) {
         bail!("netSortBy is not (Inventory, SortKind, cb)");
@@ -441,8 +646,12 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("ctor: sortButton component is not \"icon\"");
     }
     let sort_icon_g = existing_str_global(code, str_t, "SortButton")?;
+    let t = Types { ref_bool, ..t };
+    let mut mv = plan_move(code, &t, game_t, icon_t)?;
+    mv.stack_icon_g = existing_str_global(code, str_t, "CampChestButton")?;
     Ok(Plan {
-        t: Types { ref_bool, ..t },
+        t,
+        mv,
         dbg_file,
         ctor_fi,
         chest_inv,
@@ -838,6 +1047,289 @@ fn add_sort_menu(code: &mut Bytecode, p: &Plan, pick: RefFun) -> Result<RefFun> 
     push_fn(code, vec![p.icon_t], p.t.void, r.0, ops, p.dbg_file)
 }
 
+/// `quickMove(src, dst, filter)`: every stack of `src` whose kind `filter` already
+/// holds moves to `dst` with the vanilla slot operation `MoveTo(dst, count)`,
+/// run like the slot UI runs it: locally where this machine has authority over
+/// `src` (own inventory; everything on the host), else as the
+/// `networkOperation` RPC (host consumes `src` and adds to `dst` in one step).
+///
+/// ```text
+/// var a = src.content.array; var n = a.length;
+/// for (i in 0...n) {
+///   var s = a[i]; if (s == null || s.k == null || s.k.kind == null) continue;
+///   if (filter.count(s.k.kind, null, null) <= 0) continue;
+///   var c = get_count(s); if (c <= 0) continue;
+///   var op = MoveTo(dst, c);
+///   if (src.hasAuthority()) src._networkOperation(i, op, false) else src.networkOperation(i, op, false, null);
+/// }
+/// ```
+fn add_quick_move(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
+    let m = &p.mv;
+    let mut r = Regs(vec![m.inv_t, m.inv_t, m.inv_t]);
+    let (src, dst, filter) = (Reg(0), Reg(1), Reg(2));
+    let content = r.r(m.content.1);
+    let ad = r.r(p.t.arr_dyn);
+    let arr = r.r(m.arr_obj_t);
+    let n = r.r(p.t.i32_);
+    let i = r.r(p.t.i32_);
+    let raw = r.r(m.arr_raw.1);
+    let d = r.r(p.t.dyn_);
+    let slot = r.r(m.slot_t);
+    let item = r.r(m.slot_k.1);
+    let kind = r.r(p.t.str_);
+    let q = r.r(m.null_i32);
+    let rb = r.r(p.t.ref_bool);
+    let k = r.r(p.t.i32_);
+    let zero = r.r(p.t.i32_);
+    let cnt = r.r(p.t.i32_);
+    let op = r.r(m.op_t);
+    let auth = r.r(p.t.bool_);
+    let f = r.r(p.t.bool_);
+    let cb = r.r(p.bool_cb_t);
+    let v = r.r(p.t.void);
+    let zc = int_const(code, 0);
+    let mut a = Asm::new();
+    a.op(Opcode::Field {
+        dst: content,
+        obj: src,
+        field: m.content.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: content,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Field {
+        dst: ad,
+        obj: content,
+        field: m.proxy_array,
+    });
+    a.op(Opcode::SafeCast { dst: arr, src: ad });
+    a.jmp(
+        Opcode::JNull {
+            reg: arr,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Field {
+        dst: n,
+        obj: arr,
+        field: m.arr_len,
+    });
+    a.op(Opcode::Int { dst: zero, ptr: zc });
+    a.op(Opcode::Int { dst: i, ptr: zc });
+    a.loop_head("loop");
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: n,
+            offset: 0,
+        },
+        "end",
+    );
+    // the array may have been shortened by an earlier move: re-check the bound
+    a.op(Opcode::Field {
+        dst: k,
+        obj: arr,
+        field: m.arr_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: k,
+            offset: 0,
+        },
+        "next",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: arr,
+        field: m.arr_raw.0,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: i,
+    });
+    a.jmp(Opcode::JNull { reg: d, offset: 0 }, "next");
+    a.op(Opcode::ToVirtual { dst: slot, src: d });
+    a.op(Opcode::Field {
+        dst: item,
+        obj: slot,
+        field: m.slot_k.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: item,
+            offset: 0,
+        },
+        "next",
+    );
+    a.op(Opcode::Field {
+        dst: kind,
+        obj: item,
+        field: m.item_kind,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: kind,
+            offset: 0,
+        },
+        "next",
+    );
+    a.op(Opcode::Null { dst: q });
+    a.op(Opcode::Null { dst: rb });
+    a.op(Opcode::Call4 {
+        dst: k,
+        fun: m.count,
+        arg0: filter,
+        arg1: kind,
+        arg2: q,
+        arg3: rb,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: zero,
+            b: k,
+            offset: 0,
+        },
+        "next",
+    );
+    a.op(Opcode::Call1 {
+        dst: cnt,
+        fun: m.get_count,
+        arg0: slot,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: zero,
+            b: cnt,
+            offset: 0,
+        },
+        "next",
+    );
+    a.op(Opcode::MakeEnum {
+        dst: op,
+        construct: m.move_to,
+        args: vec![dst, cnt],
+    });
+    a.op(Opcode::Bool {
+        dst: f,
+        value: hlbc::types::ValBool(false),
+    });
+    a.op(Opcode::Call1 {
+        dst: auth,
+        fun: m.has_authority,
+        arg0: src,
+    });
+    a.jmp(
+        Opcode::JFalse {
+            cond: auth,
+            offset: 0,
+        },
+        "rpc",
+    );
+    a.op(Opcode::Call4 {
+        dst: auth,
+        fun: m.local_op,
+        arg0: src,
+        arg1: i,
+        arg2: op,
+        arg3: f,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "next");
+    a.label("rpc");
+    a.op(Opcode::Null { dst: cb });
+    a.op(Opcode::CallN {
+        dst: v,
+        fun: m.net_op,
+        args: vec![src, i, op, f, cb],
+    });
+    a.label("next");
+    a.op(Opcode::Incr { dst: i });
+    a.jmp(Opcode::JAlways { offset: 0 }, "loop");
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(
+        code,
+        vec![m.inv_t, m.inv_t, m.inv_t],
+        p.t.void,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
+}
+
+/// `quickStack(icon)` / `quickTake(icon)`: quickMove between the local player's
+/// inventory and the shared chest, then the sort-confirm sound.
+fn add_quick_side(code: &mut Bytecode, p: &Plan, quick_move: RefFun, take: bool) -> Result<RefFun> {
+    let mut r = Regs(vec![p.icon_t]);
+    let gc = r.r(p.game_cls_t);
+    let game = r.r(p.game_t);
+    let st = r.r(p.game_state.1);
+    let camp = r.r(p.get_camp.1);
+    let name = r.r(p.t.str_);
+    let rb = r.r(p.t.ref_bool);
+    let tool = r.r(p.get_tool.1);
+    let chest = r.r(p.tool_inv.1);
+    let me = r.r(p.mv.game_me.1);
+    let mine = r.r(p.mv.inv_t);
+    let ui = r.r(p.game_ui.1);
+    let d = r.r(p.t.dyn_);
+    let v = r.r(p.t.void);
+    let mut a = Asm::new();
+    chest_lookup(&mut a, p, gc, game, st, camp, name, rb, tool, chest);
+    a.op(Opcode::Field {
+        dst: me,
+        obj: game,
+        field: p.mv.game_me.0,
+    });
+    a.jmp(Opcode::JNull { reg: me, offset: 0 }, "end");
+    a.op(Opcode::Field {
+        dst: mine,
+        obj: me,
+        field: p.mv.player_inv,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: mine,
+            offset: 0,
+        },
+        "end",
+    );
+    let (src, dst) = if take { (chest, mine) } else { (mine, chest) };
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: quick_move,
+        arg0: src,
+        arg1: dst,
+        arg2: dst,
+    });
+    a.op(Opcode::Field {
+        dst: ui,
+        obj: game,
+        field: p.game_ui.0,
+    });
+    a.jmp(Opcode::JNull { reg: ui, offset: 0 }, "end");
+    a.op(Opcode::GetGlobal {
+        dst: name,
+        global: p.sfx_confirm,
+    });
+    a.op(Opcode::Null { dst: d });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: p.sfx,
+        arg0: ui,
+        arg1: name,
+        arg2: d,
+    });
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.icon_t], p.t.void, r.0, a.finish(), p.dbg_file)
+}
 /// Registers the constructor block needs, appended to the constructor.
 struct CtorRegs {
     ci: Reg,
@@ -858,6 +1350,10 @@ struct CtorRegs {
     o: Reg,
     icon: Reg,
     cl: Reg,
+    texts: Reg,
+    data: Reg,
+    vt: Reg,
+    cc: Reg,
 }
 
 /// `createNew(comp, parent, [arg?], {attrs})` into `dst` (domkit.Properties).
@@ -965,7 +1461,8 @@ impl IconBlock {
     }
 }
 
-/// An icon `id` in `row` whose click runs `handler(icon)`.
+/// An icon `id` in `row` whose click runs `handler(icon)`; `tip` replaces the
+/// icon's own cdb title with `Texts...campChest.<tip>`.
 fn emit_icon(
     a: &mut Asm,
     code: &mut Bytecode,
@@ -973,6 +1470,7 @@ fn emit_icon(
     r: &CtorRegs,
     id: RefGlobal,
     handler: RefFun,
+    tip: Option<(RefField, &'static str)>,
 ) {
     emit_create(
         a,
@@ -1004,11 +1502,84 @@ fn emit_icon(
         field: p.blk.onclick,
         src: r.cl,
     });
+    let Some((tip, skip)) = tip else {
+        return;
+    };
+    let m = &p.mv;
+    a.op(Opcode::GetGlobal {
+        dst: r.texts,
+        global: m.texts_g,
+    });
+    a.op(Opcode::Field {
+        dst: r.data,
+        obj: r.texts,
+        field: m.texts_data.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: r.data,
+            offset: 0,
+        },
+        skip,
+    );
+    a.op(Opcode::DynGet {
+        dst: r.data,
+        obj: r.data,
+        field: m.texts_group,
+    });
+    a.op(Opcode::ToVirtual {
+        dst: r.vt,
+        src: r.data,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: r.vt,
+            offset: 0,
+        },
+        skip,
+    );
+    a.op(Opcode::Field {
+        dst: r.cc,
+        obj: r.vt,
+        field: m.camp_chest.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: r.cc,
+            offset: 0,
+        },
+        skip,
+    );
+    a.op(Opcode::Field {
+        dst: r.sv,
+        obj: r.cc,
+        field: tip,
+    });
+    a.op(Opcode::Call2 {
+        dst: r.sv,
+        fun: m.set_tip,
+        arg0: r.icon,
+        arg1: r.sv,
+    });
+    a.op(Opcode::Bool {
+        dst: r.b,
+        value: hlbc::types::ValBool(false),
+    });
+    a.op(Opcode::SetField {
+        obj: r.icon,
+        field: m.title_tip,
+        src: r.b,
+    });
+    a.label(skip);
 }
 
 fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
     let pick = add_sort_pick(code, &p)?;
     let menu = add_sort_menu(code, &p, pick)?;
+    let quick_move = add_quick_move(code, &p)?;
+    let stack = add_quick_side(code, &p, quick_move, false)?;
+    let take = add_quick_side(code, &p, quick_move, true)?;
+    let take_icon_g = job_xp::str_global(code, p.t.str_, "LootAll");
 
     let type_t = prim_type(code, "Type", |t| matches!(t, Type::Type))?;
     let h2d_obj = obj_type(code, "h2d.Object")?;
@@ -1032,6 +1603,10 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
         o: regs.r(h2d_obj),
         icon: regs.r(p.icon_t),
         cl: regs.r(p.blk.closure_t),
+        texts: regs.r(code.globals[p.mv.texts_g.0]),
+        data: regs.r(p.mv.texts_data.1),
+        vt: regs.r(p.mv.texts_vt),
+        cc: regs.r(p.mv.camp_chest.1),
     };
     code.functions[p.ctor_fi].regs = regs.0;
     let mut a = Asm::new();
@@ -1075,7 +1650,25 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
             ("content-valign", "middle"),
         ],
     );
-    emit_icon(&mut a, code, &p, &r, p.sort_icon_g, menu);
+    emit_icon(&mut a, code, &p, &r, p.sort_icon_g, menu, None);
+    emit_icon(
+        &mut a,
+        code,
+        &p,
+        &r,
+        p.mv.stack_icon_g,
+        stack,
+        Some((p.mv.to_chest, "tip_stack")),
+    );
+    emit_icon(
+        &mut a,
+        code,
+        &p,
+        &r,
+        take_icon_g,
+        take,
+        Some((p.mv.to_inv, "tip_take")),
+    );
     a.label("end");
     // `end` is the constructor's own Ret, which follows the inserted block.
     a.op(Opcode::Label);
@@ -1085,8 +1678,8 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
     let at = f.ops.len() - 1;
     insert_ops(f, at, ops);
     eprintln!(
-        "patched chest buttons fn@{}: chest sort icon -> fn@{} (pick fn@{})",
-        f.findex.0, menu.0, pick.0
+        "patched chest buttons fn@{}: chest sort fn@{} (pick fn@{}), quick stack fn@{}, quick take fn@{} (move fn@{})",
+        f.findex.0, menu.0, pick.0, stack.0, take.0, quick_move.0
     );
     Ok(())
 }

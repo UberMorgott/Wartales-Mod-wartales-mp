@@ -153,8 +153,13 @@ inventory side panel (`GameInventory.chestInventory`) gets a row of icons at
 its top left. Sort: the player panel's sort menu (icon `SortButton`, entries
 `Texts.tips.inventory_sort`) applied to the camp chest through the
 host-authoritative `st.Inventory.netSortBy` RPC, the call the camp chest window
-uses. Built in `GameInventory`'s constructor with the same domkit calls as the
-player panel's buttons; skipped (logged) on mismatch.
+uses. Quick stack (chest icon, tooltip "Place item in chest"): every stack of
+the player's inventory whose item kind the chest already holds moves there;
+take similar (`LootAll` icon, "Place item in inventory"): the reverse. Both
+use the vanilla slot move `SlotOperation.MoveTo` like the slot UI: local on an
+inventory the machine has authority over, else the `networkOperation` RPC (the
+host consumes and adds in one step). Built in `GameInventory`'s constructor with
+the same domkit calls as the player panel's buttons; skipped (logged) on mismatch.
 
 ## Install
 
