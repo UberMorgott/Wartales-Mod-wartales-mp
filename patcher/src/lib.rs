@@ -28,7 +28,8 @@
 // barrier.rs), and so an exception in a game network handler is logged instead of ending
 // the co-op session (see net_guard.rs), and so a
 // tooltip's column of keyword helpers wraps into more columns instead of running off screen and
-// lists a shared helper once (see tip_overflow.rs).
+// lists a shared helper once (see tip_overflow.rs), and so the customize screen logs its 2D
+// hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs).
 
 mod asm;
 mod barrier;
@@ -49,6 +50,7 @@ mod mod_version;
 mod net_guard;
 mod party_inventory;
 mod skill_cost;
+mod slot4_diag;
 mod tip_overflow;
 
 use anyhow::{bail, Context, Result};
@@ -75,6 +77,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     job_confirm::patch_job_confirm(&mut code);
     barrier::patch_barrier(&mut code);
     diag::patch_diag(&mut code);
+    slot4_diag::patch_slot4_diag(&mut code);
     follow::patch_follow(&mut code);
     skill_cost::patch_skill_cost(&mut code);
     dlc_check::patch_dlc_check(&mut code);
