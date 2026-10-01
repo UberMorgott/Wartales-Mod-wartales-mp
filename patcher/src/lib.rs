@@ -23,9 +23,12 @@
 // draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
 // loot screen has its Take all button in co-op too (see loot_all.rs), and so the join gate shows
 // wartales-mp's "mod files differ from the host" text (see mod_version.rs), and so a co-op
-// leave from a place is never blocked by another player's business (see force_leave.rs).
+// leave from a place is never blocked by another player's business (see force_leave.rs), and
+// so a co-op mode switch never waits forever for a client that left or stopped answering (see
+// barrier.rs).
 
 mod asm;
+mod barrier;
 mod career_plan;
 mod chest_buttons;
 mod coop_gates;
@@ -65,6 +68,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     hold_speed::patch_hold_speed(&mut code);
     job_xp::patch_job_xp(&mut code);
     job_confirm::patch_job_confirm(&mut code);
+    barrier::patch_barrier(&mut code);
     diag::patch_diag(&mut code);
     follow::patch_follow(&mut code);
     skill_cost::patch_skill_cost(&mut code);

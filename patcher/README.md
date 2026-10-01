@@ -133,6 +133,27 @@ shim copies the game's stdout (`hl_sys_print`) into `shim.log` as `game:`
 lines (buffered in memory, written by a background thread every 500 ms), so a stuck black screen shows which step never came. Skipped (logged) on
 mismatch.
 
+**Co-op barrier never hangs** (`src/barrier.rs`): every mode switch (town,
+tavern, place, battle start) waits on the host for each client's
+`onClientReady` (`Controller.waitLocks`), with no timeout and no cleanup, so a
+client that reconnected (its old `NetworkClient` stays in `waitLocks`) or got
+stuck before answering left every screen black. Host only, three hooks:
+`waitForClients` records the phase start; `Controller.update` runs a tick that
+(1) drops `waitLocks` entries no longer in `host.clients`, (2) after 30 s
+without an answer asks each late client to rejoin: the vanilla
+`Controller.reload` RPC (what a host save load sends every client), flushed to
+that client alone (`flushProps` + `flushSend` first, then `targetClient`), so
+its game reloads, reconnects and full-syncs the state the host moved on to,
+getting its own `ent.Player` (and units) back through the vanilla Join
+handler's `set_ownerObject`; a kicked client still connected 30 s later is
+`stop()`ped; (3) runs the parked callbacks exactly like `onClientReady__impl`'s
+tail (copied op for op). The host's Join handler parks a Join that arrives
+during a switch (`lockSyncMode`, a non-empty wait/callback/queue list, or a
+phase begun less than 3 s ago) and the tick replays it when the switch ends (a
+switch still running 90 s later disconnects the parked client instead):
+a client full-synced mid-switch would miss the switch's earlier RPCs. Lines in
+`shim.log`: `mp: barrier: ...`. Skipped (logged) on mismatch.
+
 **Co-op auto-follow** (`src/follow.rs`): in co-op an open window does not pause
 the world map, so `World.update` gets a new `followUpdate` right before
 `updateSprint()`. While the local player has a window open

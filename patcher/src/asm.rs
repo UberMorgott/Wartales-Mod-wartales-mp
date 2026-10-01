@@ -64,7 +64,8 @@ impl Asm {
                 | Opcode::JUGte { offset, .. }
                 | Opcode::JEq { offset, .. }
                 | Opcode::JNotEq { offset, .. }
-                | Opcode::JAlways { offset } => *offset = off,
+                | Opcode::JAlways { offset }
+                | Opcode::Trap { offset, .. } => *offset = off,
                 o => panic!("not a jump: {o:?}"),
             }
             if off < 0 {
