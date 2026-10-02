@@ -26,6 +26,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - The in-game DLC check never marks a player who owns a DLC as missing it (which locked DLC content for the whole party); a real mismatch is written to the log as a warning.
 - Fixes the post-battle screen rebuilding itself every frame in co-op when the remedy count and the injured units disagreed.
 - The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.
+- A failed activity of a client (a lost fish or a broken lockpick on Extreme, or a failed activity that injures) no longer freezes fishing or the activity with a "Not allowed" error: the unit's injury is applied by the host and synced to everyone.
 
 ### Co-op play
 

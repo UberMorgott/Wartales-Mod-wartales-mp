@@ -39,9 +39,12 @@
 // hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs), and so the end of every activity /
 // mini-game (ruins puzzles, lock picking, fishing, gambling) and every refused co-op RPC is printed
 // for the shim log (see activity_diag.rs), and so a co-op client closes its own modal window (the unit sheet)
-// by clicking outside it, as the host does (see window_close.rs).
+// by clicking outside it, as the host does (see window_close.rs), and so a co-op client's failed
+// activity (fishing, lock picking, any activity end) injures its unit through the host instead of
+// throwing "Not allowed" and freezing the activity (see activity_injury.rs).
 
 mod activity_diag;
+mod activity_injury;
 mod asm;
 mod barrier;
 mod camp_talk;
@@ -121,6 +124,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     censer_tip::patch_censer_tip(&mut code);
     ping_cell::patch_ping_cell(&mut code);
     timeline_hud::patch_timeline_hud(&mut code);
+    activity_injury::patch_activity_injury(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
