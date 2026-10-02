@@ -8,17 +8,52 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 
 ## What it does
 
+Everything below is in the one **winmm.dll**. The game patches are applied in memory when the game starts; the game files on disk are not changed. Each patch first checks that the game code looks as expected: on a different game build that patch silently stays off and everything else keeps working.
+
+### Network and lobby
+
 - Disables the old Steam networking protocol that caused connection problems in many countries. It uses modern Steam networking (SDR) instead.
 - Removes the dependency on the developers' servers for creating and finding lobbies. Adds a direct connection to the host without intermediary servers when the host's network allows it.
 - Changes how the game's existing join codes work: friends now connect directly to the host, bypassing the developers' servers.
 - Keeps familiar Steam invitations. A Steam lobby is created automatically with the in-game room.
 - Fixes identified reconnection errors and a crash caused by waiting in the lobby.
+- Mod-file check on join: a player whose mod files (winmm.dll, and res1.pak if any) differ from the host's is refused at the join with a clear message instead of crashing later in the game.
+
+### Co-op stability
+
+- The mode-switch wait (leaving or entering a town, the tavern or a place, starting a battle) no longer leaves every screen black forever: the host drops a player who has not answered after 30 seconds and reloads them into the running game; a player who joins during the switch is let in after it.
+- An error in the game's handling of a network message is logged instead of ending the whole co-op session.
+- The in-game DLC check never marks a player who owns a DLC as missing it (which locked DLC content for the whole party); a real mismatch is written to the log as a warning.
+- Fixes the post-battle screen rebuilding itself every frame in co-op when the remedy count and the injured units disagreed.
+
+### Co-op play
+
+- No more "waiting for the other players" after the world is loaded: the first player's click decides, as holding the button used to. A burst of clicks runs the action once.
+- Leaving a town, the tavern, a place or the owned tavern is never blocked by another player's business: their inspect windows and unstarted crafts are closed, and the shared dialog is ended. Started crafts and activities are waited for.
+- Caravan follow on the world map: press **F** to make your caravan follow the player who last moved. It also follows on its own while you have a window open. Your own click cancels it.
+- Party-wide inventory: dialog, crafting, repair and healing costs are paid from your inventory, the chests and then the other players' inventories, and the counts on screen include the other players' items. The injury heal panel lists remedies the other players carry.
+- Shared chest panel: sort, quick stack (move your items the chest already holds) and take similar buttons.
+- **Take all** button on the post-battle loot screen, and a take-all icon on searched barrels, crates and chests and on dialog item grids.
+- Career Plan fix: a client could see "+2" on level-up and get only "+1". The host now grants the extra point on top of its own current offer, ignores a grant when the unit has no aptitude point left, and drops a stale second request.
 - Lets you start even if a player has no human character assigned. For example, four players can use a modded starting party of three humans and one animal.
-- Adds hover tooltips to the items shown in the new-game starting-troop preview (bundled `wartales-tips` patch). If the game build differs, this part silently stays off and everything else keeps working.
-- Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do. Always on; part of the same bundled patch, so it stays off together with the tooltips on another game build.
-- Co-op fix for the Career Plan extra attribute point: a client could see "+2" on level-up and get only "+1". The host now grants the extra point on top of its own current offer, and ignores a grant when the unit has no aptitude point left. Needs every player on the same wartales-mp build.
+
+### Gameplay and interface
+
+- Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do.
+- Switching a unit's profession keeps the experience earned in the old one, and applies at once without the confirm window.
+- Hold-to-confirm rings fill three times faster.
+- Skill tooltips show the Valor point cost outside battle for every unit, including the new-game screens.
+- Tooltip keyword panels ("Poison", "Vigilance", ...) wrap into columns instead of running off the screen, and are not shown twice.
 - Starting troops larger than the new-game customize screen (it has five spots): instead of crashing ("Missing prefab Camera06"), the extra animals are left off the screen and belong to the host; humans always get a spot. Troops of five or fewer look exactly as before.
 
+### Start-screen tooltips
+
+- Hover tooltips on the items shown in the new-game starting-troop preview.
+- Class tooltips on the unit lines of the start choices.
+
+### Diagnostics
+
+- Writes game errors, co-op mode-switch steps, forced leaves and DLC warnings to **shim.log**, to help with bug reports. This only adds log lines.
 ## Install
 
 1. Download **winmm.dll** from **Assets** in the newest release. You do not need the **Source code** archives.
@@ -27,7 +62,7 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 4. Copy **winmm.dll** into that folder, next to **Wartales.exe**. Replace the old mod DLL when updating.
 5. Launch the game through Steam as usual.
 
-Install the mod on every player's machine. Use **v0.1.5 or newer** for join-code format compatibility.
+Install the mod on every player's machine. **All players need the same version**: a guest whose mod files differ from the host's cannot join.
 
 ## Play with a friend
 
