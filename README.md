@@ -30,6 +30,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 - No more "waiting for the other players" after the world is loaded: the first player's click decides, as holding the button used to. A burst of clicks runs the action once.
 - Leaving a town, the tavern, a place or the owned tavern is never blocked by another player's business: their inspect windows and unstarted crafts are closed, and the shared dialog is ended. Started crafts and activities are waited for.
+- A player reading a recruit's (or any NPC's) info no longer stops the others from talking to a different NPC. The same NPC, chests, crafts and activities still wait, and so does every NPC while a dialog is open.
 - Caravan follow on the world map: press **F** to make your caravan follow the player who last moved. It also follows on its own while you have a window open. Your own click cancels it.
 - Party-wide inventory: dialog, crafting, repair and healing costs are paid from your inventory, the chests and then the other players' inventories, and the counts on screen include the other players' items. The injury heal panel lists remedies the other players carry.
 - Shared chest panel: sort, quick stack (move your items the chest already holds) and take similar buttons.

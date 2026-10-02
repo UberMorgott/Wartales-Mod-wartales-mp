@@ -23,7 +23,8 @@
 // draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
 // loot screen has its Take all button in co-op too (see loot_all.rs), and so the join gate shows
 // wartales-mp's "mod files differ from the host" text (see mod_version.rs), and so a co-op
-// leave from a place is never blocked by another player's business (see force_leave.rs), and
+// leave from a place is never blocked by another player's business (see force_leave.rs), and so a
+// player inspecting an NPC no longer stops the others talking to another NPC (see npc_talk.rs), and
 // so a co-op mode switch never waits forever for a client that left or stopped answering (see
 // barrier.rs), and so an exception in a game network handler is logged instead of ending
 // the co-op session (see net_guard.rs), and so a
@@ -49,6 +50,7 @@ mod job_xp;
 mod loot_all;
 mod mod_version;
 mod net_guard;
+mod npc_talk;
 mod party_inventory;
 mod skill_cost;
 mod slot4_diag;
@@ -74,6 +76,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     customize_slots::patch_customize_slots(&mut code);
     coop_gates::patch_coop_gates(&mut code);
     force_leave::patch_force_leave(&mut code);
+    npc_talk::patch_npc_talk(&mut code);
     hold_speed::patch_hold_speed(&mut code);
     job_xp::patch_job_xp(&mut code);
     job_confirm::patch_job_confirm(&mut code);
