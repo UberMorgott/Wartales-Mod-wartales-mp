@@ -33,7 +33,8 @@
 // lists a shared helper once (see tip_overflow.rs), and so a censer's item tooltip without a unit no
 // longer throws every frame and stalls the inventory grid (see censer_tip.rs), and so a co-op ping lands where
 // the pinging player's cursor is and, in battle, makes the pinged cell blink orange for everyone (see
-// ping_cell.rs), and so the customize screen logs its 2D
+// ping_cell.rs), and so in battle the timeline's first diamond shows the acting player unit's portrait under its
+// player's nickname (see timeline_hud.rs), and so the customize screen logs its 2D
 // hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs).
 
 mod asm;
@@ -63,6 +64,7 @@ mod skill_cost;
 mod slot4_diag;
 mod take_all;
 mod tavern_resume;
+mod timeline_hud;
 mod tip_overflow;
 
 use anyhow::{bail, Context, Result};
@@ -109,6 +111,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     tip_overflow::patch_tip_overflow(&mut code);
     censer_tip::patch_censer_tip(&mut code);
     ping_cell::patch_ping_cell(&mut code);
+    timeline_hud::patch_timeline_hud(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

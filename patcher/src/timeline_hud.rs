@@ -1,0 +1,1231 @@
+// Copyright (c) 2026 Morgott. Licensed under CC BY-NC 4.0.
+//
+// Co-op battle HUD: while a player unit acts, the first timeline diamond
+// (bottom left) shows that unit's portrait instead of the crossed swords, and the
+// nickname of the player who controls it sits above the diamond, in that
+// player's colour. Display only: nothing is sent over the network.
+//
+// The diamond is `battle.ui.win.TimelineEvent` (Timeline.hx). Its element is
+// `TimelineElement.Player(p)` during the player side's turn: the constructor
+// draws `getIcon("TimelineIcon")` (the swords) into the `event` bitmap and, unlike
+// the unit kinds (AI, PlayerUnit, ...), removes `maskBitmap` instead of masking
+// `event` with it:
+//
+//   switch (elt) { case AI, Event, AreaEffect, PlayerUnit: masked = true;
+//                  case Player, EndRound: masked = false; }
+//   if (masked) event.filter = new h2d.filter.Mask(maskBitmap);
+//   else maskBitmap.remove();
+//
+// Two edits and one new function:
+//
+// 1. Constructor: `Player` takes the masked branch (one Switch offset), so a
+//    Player diamond keeps its (absolutely positioned, hidden by the Mask's Hide
+//    filter) mask and a portrait drawn into `event` is cut to the diamond exactly
+//    like the AI / PlayerUnit portraits (same `.event` box from style.css).
+// 2. `TimelineEvent.sync` calls `timelineHud(this)` right after the super sync.
+// 3. `timelineHud(ev)`, Player diamonds only, inside try/catch:
+//
+//      if (ev.mpHudLabel == null) {          // once per diamond
+//          if (ev.event.filter != null) ev.event.filter.enable = false;  // swords unmasked, as vanilla
+//          ev.mpHudLabel = new h2d.HtmlText(BaseUI.loadFont("default"), ev);
+//          ev.getProperties(label).isAbsolute = true;
+//          label.dropShadow = { dx: 1, dy: 1, color: 0, alpha: 0.8 };
+//      }
+//      u = state.startedPlaying, kept only when it is on the player side and
+//          ev is the Timeline's first diamond (eventsElts[0]); else null
+//      if (u == ev.mpHudUnit) return;        // act only on change
+//      ev.mpHudUnit = u;
+//      if (u == null) { tile = get_api().getIcon("TimelineIcon"); text = ""; mask = false; }
+//      else { tile = u.data.getIcon();       // the AI / PlayerUnit portrait
+//             text = isMulti && u.data.owner != null ? u.data.owner.getName() : "";
+//             mask = true; }                 // getName: nickname in <font color=player colour>
+//      ev.event.tile = tile; ev.event.filter.enable = mask;
+//      label.text = text; label.x = (ev.outerWidth - label.textWidth) / 2; label.y = -label.textHeight;
+//
+//    `mpHudUnit` / `mpHudLabel` are two fields appended to TimelineEvent (it
+//    has no subclass, so no field index moves).
+//
+// Validated before editing; a mismatch skips the pass (logged).
+
+use super::*;
+use crate::asm::{push_fn, string_ref, Asm, Regs};
+use hlbc::types::{ObjField, RefGlobal, ValBool};
+
+const UNIT_FIELD: &str = "mpHudUnit";
+const LABEL_FIELD: &str = "mpHudLabel";
+
+struct Plan {
+    ctor_fi: usize,
+    /// The constructor's `Switch` choosing between masking `event` and removing `maskBitmap`.
+    mask_switch: usize,
+    sync_fi: usize,
+    /// `sync` op 0's void destination (the super sync result).
+    sync_void: Reg,
+    ev_t: RefType,
+    void_: RefType,
+    bool_: RefType,
+    i32_: RefType,
+    f64_: RefType,
+    dyn_t: RefType,
+    str_t: RefType,
+    elt_t: RefType,
+    unit_t: RefType,
+    html_t: RefType,
+    bitmap_t: RefType,
+    filter_t: RefType,
+    font_t: RefType,
+    fprops_t: RefType,
+    shadow_t: RefType,
+    battle_t: RefType,
+    state_t: RefType,
+    player_t: RefType,
+    side_t: RefType,
+    obj_t: RefType,
+    tl_t: RefType,
+    arr_t: RefType,
+    raw_t: RefType,
+    tile_t: RefType,
+    api_t: RefType,
+    sunit_t: RefType,
+    bp_t: RefType,
+    game_t: RefType,
+    ev_elt: RefField,
+    ev_battle: RefField,
+    ev_event: RefField,
+    ev_game: RefField,
+    o_parent: RefField,
+    o_filter: RefField,
+    b_state: RefField,
+    s_started: RefField,
+    s_side: RefField,
+    u_owner: RefField,
+    u_data: RefField,
+    p_side: RefField,
+    su_owner: RefField,
+    tl_events: RefField,
+    a_len: RefField,
+    a_raw: RefField,
+    t_shadow: RefField,
+    sh_alpha: RefField,
+    sh_color: RefField,
+    sh_dx: RefField,
+    sh_dy: RefField,
+    tl_cls: RefGlobal,
+    tl_cls_t: RefType,
+    base_check: RefFun,
+    set_enable: RefFun,
+    load_font: RefFun,
+    html_ctor: RefFun,
+    html_set_text: RefFun,
+    get_props: RefFun,
+    set_absolute: RefFun,
+    set_tile: RefFun,
+    get_api: RefFun,
+    api_get_icon: RefFun,
+    unit_get_icon: RefFun,
+    is_multi: RefFun,
+    bp_get_name: RefFun,
+    outer_width: RefFun,
+    text_width: RefFun,
+    text_height: RefFun,
+    set_x: RefFun,
+    set_y: RefFun,
+    dbg_file: usize,
+}
+
+fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
+    code.functions
+        .iter()
+        .position(|f| f.findex == findex)
+        .with_context(|| format!("function @{} not found", findex.0))
+}
+
+fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
+    let fun = &code.functions[fun_index(code, f)?];
+    let t = fun.t.as_fun(code).context("not a function type")?;
+    Ok((t.args.clone(), t.ret))
+}
+
+/// The only function `name` with exactly this signature (statics included).
+fn by_sig(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result<RefFun> {
+    let hits: Vec<RefFun> = code
+        .functions
+        .iter()
+        .filter(|f| {
+            s(code, f.name) == name
+                && f.t
+                    .as_fun(code)
+                    .is_some_and(|t| t.args == args && t.ret == ret)
+        })
+        .map(|f| f.findex)
+        .collect();
+    let [f] = hits[..] else {
+        bail!(
+            "{name}: expected one function with the expected signature, found {}",
+            hits.len()
+        );
+    };
+    Ok(f)
+}
+
+/// The class global of `name` (HL stores it 1-based) and its type `pkg.$Cls`.
+fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
+    let o = obj(code, obj_type(code, name)?)?;
+    let g = RefGlobal(
+        o.global
+            .0
+            .checked_sub(1)
+            .with_context(|| format!("{name}: no class global"))?,
+    );
+    let t = *code
+        .globals
+        .get(g.0)
+        .with_context(|| format!("{name}: class global out of range"))?;
+    let (pkg, cls) = name.rsplit_once('.').unwrap_or(("", name));
+    let want = format!("{pkg}.${cls}");
+    if obj(code, t).ok().map(|o| s(code, o.name)) != Some(want.as_str()) {
+        bail!("{name}: class global is not {want}");
+    }
+    Ok((g, t))
+}
+
+fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
+    let mut cur = Some(t);
+    while let Some(c) = cur {
+        if c == of {
+            return Ok(true);
+        }
+        cur = obj(code, c)?.super_;
+    }
+    Ok(false)
+}
+
+fn virtual_field(code: &Bytecode, t: RefType, name: &str, want: RefType) -> Result<RefField> {
+    let Type::Virtual { fields } = &code.types[t.0] else {
+        bail!("type {} is not a virtual", t.0);
+    };
+    let i = fields
+        .iter()
+        .position(|f| s(code, f.name) == name && f.t == want)
+        .with_context(|| format!("virtual field {name} not found"))?;
+    Ok(RefField(i))
+}
+
+/// The constructor's `Switch (elt) { ... }` that picks `masked = true / false`,
+/// followed by `if (masked) event.filter = new h2d.filter.Mask(maskBitmap)`.
+/// Returns its op index; the Player case must still go to `masked = false`.
+fn find_mask_switch(ctor: &Function, mask_t: RefType) -> Result<usize> {
+    let o = &ctor.ops;
+    let at = |i: usize, off: i32| (i as i64 + 1 + off as i64) as usize;
+    let mut hits = vec![];
+    for (i, op) in o.iter().enumerate() {
+        let Opcode::Switch { offsets, end, .. } = op else {
+            continue;
+        };
+        if offsets.len() != 6 {
+            continue;
+        }
+        let join = at(i, *end);
+        let (Some(Opcode::Bool { dst: b0, value: v0 }), Some(Opcode::Bool { dst: b1, value: v1 })) =
+            (o.get(at(i, offsets[0])), o.get(at(i, offsets[1])))
+        else {
+            continue;
+        };
+        let masked_test = matches!(o.get(join), Some(Opcode::JFalse { cond, .. }) if cond == b0);
+        let builds_mask = o.get(join..join + 4).is_some_and(|w| {
+            w.iter()
+                .any(|x| matches!(x, Opcode::New { dst } if ctor.regs[dst.0 as usize] == mask_t))
+        });
+        if b0 == b1 && masked_test && builds_mask {
+            hits.push((i, v0.0, v1.0));
+        }
+    }
+    let [(i, player_masked, ai_masked)] = hits[..] else {
+        bail!(
+            "TimelineEvent constructor: expected one mask switch, found {}",
+            hits.len()
+        );
+    };
+    if player_masked || !ai_masked {
+        bail!("TimelineEvent constructor: the Player case is already masked");
+    }
+    Ok(i)
+}
+
+fn plan(code: &Bytecode) -> Result<Plan> {
+    let void_ = prim_type(code, "void", |t| matches!(t, Type::Void))?;
+    let bool_ = prim_type(code, "bool", |t| matches!(t, Type::Bool))?;
+    let i32_ = prim_type(code, "i32", |t| matches!(t, Type::I32))?;
+    let f64_ = prim_type(code, "f64", |t| matches!(t, Type::F64))?;
+    let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
+    let ev_t = obj_type(code, "battle.ui.win.TimelineEvent")?;
+    let tl_t = obj_type(code, "battle.ui.win.Timeline")?;
+    let unit_t = obj_type(code, "battle.Unit")?;
+    let state_t = obj_type(code, "battle.State")?;
+    let player_t = obj_type(code, "battle.Player")?;
+    let sunit_t = obj_type(code, "st.Unit")?;
+    let bp_t = obj_type(code, "ent.BasePlayer")?;
+    let game_t = obj_type(code, "Game")?;
+    let api_t = obj_type(code, "ui.BaseUIApi")?;
+    let obj_t = obj_type(code, "h2d.Object")?;
+    let flow_t = obj_type(code, "h2d.Flow")?;
+    let text_t = obj_type(code, "h2d.Text")?;
+    let html_t = obj_type(code, "h2d.HtmlText")?;
+    let font_t = obj_type(code, "h2d.Font")?;
+    let fprops_t = obj_type(code, "h2d.FlowProperties")?;
+    let filter_t = obj_type(code, "h2d.filter.Filter")?;
+    let mask_t = obj_type(code, "h2d.filter.Mask")?;
+    let arr_t = obj_type(code, "hl.types.ArrayObj")?;
+    let str_t = obj_type(code, "String")?;
+    if !is_sub(code, ev_t, flow_t)?
+        || !is_sub(code, html_t, text_t)?
+        || !is_sub(code, flow_t, obj_t)?
+    {
+        bail!("unexpected TimelineEvent / HtmlText hierarchy");
+    }
+    if !is_sub(code, mask_t, filter_t)? {
+        bail!("h2d.filter.Mask is not a Filter");
+    }
+    // Appending fields is only safe when no subclass inherits the layout.
+    if code
+        .types
+        .iter()
+        .any(|t| matches!(t, Type::Obj(o) if o.super_ == Some(ev_t)))
+    {
+        bail!("TimelineEvent has a subclass");
+    }
+    let ev_o = obj(code, ev_t)?;
+    if ev_o
+        .fields
+        .iter()
+        .any(|f| [UNIT_FIELD, LABEL_FIELD].contains(&s(code, f.name)))
+    {
+        bail!("TimelineEvent already has the HUD fields");
+    }
+
+    let (ev_elt, elt_t) = field(code, ev_t, "elt")?;
+    if !matches!(&code.types[elt_t.0], Type::Enum { constructs, .. }
+        if constructs.first().is_some_and(|c| s(code, c.name) == "Player" && c.params == [player_t]))
+    {
+        bail!("TimelineElement construct 0 is not Player(battle.Player)");
+    }
+    let (ev_battle, battle_t) = field(code, ev_t, "battle")?;
+    let (ev_event, bitmap_t) = field(code, ev_t, "event")?;
+    let (_, mask_bmp_t) = field(code, ev_t, "maskBitmap")?;
+    if mask_bmp_t != bitmap_t || s(code, obj(code, bitmap_t)?.name) != "h2d.Bitmap" {
+        bail!("TimelineEvent.event is not an h2d.Bitmap");
+    }
+    let (ev_game, eg_t) = field(code, ev_t, "game")?;
+    let (o_parent, op_t) = field(code, obj_t, "parent")?;
+    let (o_filter, of_t) = field(code, obj_t, "filter")?;
+    let (b_state, bs_t) = field(code, battle_t, "state")?;
+    let (s_started, ss_t) = field(code, state_t, "startedPlaying")?;
+    let (s_side, side_t) = field(code, state_t, "playerSide")?;
+    let (u_owner, uo_t) = field(code, unit_t, "owner")?;
+    let (u_data, ud_t) = field(code, unit_t, "data")?;
+    let (p_side, ps_t) = field(code, player_t, "side")?;
+    let (su_owner, suo_t) = field(code, sunit_t, "owner")?;
+    let (tl_events, te_t) = field(code, tl_t, "eventsElts")?;
+    let (a_len, al_t) = field(code, arr_t, "length")?;
+    let (a_raw, raw_t) = field(code, arr_t, "array")?;
+    let (t_shadow, shadow_t) = field(code, text_t, "dropShadow")?;
+    if eg_t != game_t
+        || op_t != obj_t
+        || of_t != filter_t
+        || bs_t != state_t
+        || ss_t != unit_t
+        || uo_t != player_t
+        || ud_t != sunit_t
+        || ps_t != side_t
+        || suo_t != bp_t
+        || te_t != arr_t
+        || al_t != i32_
+    {
+        bail!("unexpected field types on the timeline / unit / player path");
+    }
+    let sh_alpha = virtual_field(code, shadow_t, "alpha", f64_)?;
+    let sh_color = virtual_field(code, shadow_t, "color", i32_)?;
+    let sh_dx = virtual_field(code, shadow_t, "dx", f64_)?;
+    let sh_dy = virtual_field(code, shadow_t, "dy", f64_)?;
+
+    let m = |o: RefType, name: &str, args: &[RefType], ret: RefType| -> Result<RefFun> {
+        let f = method(code, o, name)?.findex;
+        if sig(code, f)? != (args.to_vec(), ret) {
+            bail!("unexpected {name} signature");
+        }
+        Ok(f)
+    };
+    let tile_t = obj_type(code, "h2d.Tile")?;
+    let set_enable = m(filter_t, "set_enable", &[filter_t, bool_], bool_)?;
+    let html_ctor = m(html_t, "__constructor__", &[html_t, font_t, obj_t], void_)?;
+    let html_set_text = m(html_t, "set_text", &[html_t, str_t], str_t)?;
+    let get_props = m(flow_t, "getProperties", &[flow_t, obj_t], fprops_t)?;
+    let set_absolute = m(fprops_t, "set_isAbsolute", &[fprops_t, bool_], bool_)?;
+    let set_tile = m(bitmap_t, "set_tile", &[bitmap_t, tile_t], tile_t)?;
+    let api_get_icon = m(api_t, "getIcon", &[api_t, str_t], tile_t)?;
+    let unit_get_icon = m(sunit_t, "getIcon", &[sunit_t], tile_t)?;
+    let is_multi = m(game_t, "get_isMulti", &[game_t], bool_)?;
+    let bp_get_name = m(bp_t, "getName", &[bp_t], str_t)?;
+    let outer_width = m(flow_t, "get_outerWidth", &[flow_t], i32_)?;
+    let text_width = m(text_t, "get_textWidth", &[text_t], f64_)?;
+    let text_height = m(text_t, "get_textHeight", &[text_t], f64_)?;
+    let set_x = m(obj_t, "set_x", &[obj_t, f64_], f64_)?;
+    let set_y = m(obj_t, "set_y", &[obj_t, f64_], f64_)?;
+    let load_font = by_sig(code, "loadFont", &[str_t], font_t)?;
+    let get_api = by_sig(code, "get_api", &[], api_t)?;
+    let base_t = obj_type(code, "hl.BaseType")?;
+    let check = method(code, base_t, "check")?;
+    if fun_args(code, check).len() != 2 || check.t.as_fun(code).map(|f| f.ret) != Some(bool_) {
+        bail!("hl.BaseType.check is not (BaseType, v) -> Bool");
+    }
+    let base_check = check.findex;
+    let (tl_cls, tl_cls_t) = class_global(code, "battle.ui.win.Timeline")?;
+
+    // Constructor: the Player case of the mask switch.
+    let ctor = method(code, ev_t, "__constructor__")?;
+    let ctor_fi = fun_index(code, ctor.findex)?;
+    let mask_switch = find_mask_switch(ctor, mask_t)?;
+    if !ctor
+        .ops
+        .iter()
+        .any(|o| matches!(o, Opcode::Call2 { fun, .. } if *fun == api_get_icon))
+    {
+        bail!("TimelineEvent constructor draws no getIcon tile");
+    }
+    if !ctor
+        .ops
+        .iter()
+        .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == unit_get_icon))
+    {
+        bail!("TimelineEvent constructor draws no unit portrait");
+    }
+
+    // sync: `Call2 v = Element.sync(this, ctx); GetThis elt = this.elt; ...`.
+    let elem_t = obj_type(code, "ui.comp.Element")?;
+    let super_sync = proto(code, elem_t, "sync")?;
+    let sync = code
+        .functions
+        .iter()
+        .find(|f| f.findex == proto(code, ev_t, "sync").unwrap_or(RefFun(usize::MAX)))
+        .context("TimelineEvent.sync not found")?;
+    let sync_fi = fun_index(code, sync.findex)?;
+    let sync_void = match (&sync.ops.first(), &sync.ops.get(1)) {
+        (
+            Some(Opcode::Call2 {
+                dst,
+                fun,
+                arg0: Reg(0),
+                arg1: Reg(1),
+            }),
+            Some(Opcode::GetThis { field, .. }),
+        ) if *fun == super_sync && *field == ev_elt && sync.regs[dst.0 as usize] == void_ => *dst,
+        _ => bail!("TimelineEvent.sync does not start with `super.sync(ctx); this.elt`"),
+    };
+
+    Ok(Plan {
+        ctor_fi,
+        mask_switch,
+        sync_fi,
+        sync_void,
+        ev_t,
+        void_,
+        bool_,
+        i32_,
+        f64_,
+        dyn_t,
+        str_t,
+        elt_t,
+        unit_t,
+        html_t,
+        bitmap_t,
+        filter_t,
+        font_t,
+        fprops_t,
+        shadow_t,
+        battle_t,
+        state_t,
+        player_t,
+        side_t,
+        obj_t,
+        tl_t,
+        arr_t,
+        raw_t,
+        tile_t,
+        api_t,
+        sunit_t,
+        bp_t,
+        game_t,
+        ev_elt,
+        ev_battle,
+        ev_event,
+        ev_game,
+        o_parent,
+        o_filter,
+        b_state,
+        s_started,
+        s_side,
+        u_owner,
+        u_data,
+        p_side,
+        su_owner,
+        tl_events,
+        a_len,
+        a_raw,
+        t_shadow,
+        sh_alpha,
+        sh_color,
+        sh_dx,
+        sh_dy,
+        tl_cls,
+        tl_cls_t,
+        base_check,
+        set_enable,
+        load_font,
+        html_ctor,
+        html_set_text,
+        get_props,
+        set_absolute,
+        set_tile,
+        get_api,
+        api_get_icon,
+        unit_get_icon,
+        is_multi,
+        bp_get_name,
+        outer_width,
+        text_width,
+        text_height,
+        set_x,
+        set_y,
+        dbg_file: debug_file(code, "src/battle/ui/win/Timeline.hx")?,
+    })
+}
+
+/// `timelineHud(ev)` (see the header). `f_unit` / `f_label` are the appended fields.
+fn add_hud(code: &mut Bytecode, p: &Plan, f_unit: RefField, f_label: RefField) -> Result<RefFun> {
+    let i0 = int_const(code, 0);
+    let one = float_const(code, 1.0);
+    let shadow_alpha = float_const(code, 0.8);
+    let half = float_const(code, 0.5);
+    let s_default = string_ref(code, "default");
+    let s_icon = string_ref(code, "TimelineIcon");
+    let s_empty = string_ref(code, "");
+
+    let mut r = Regs(vec![p.ev_t]);
+    let ev = Reg(0);
+    let (v, b, zero, idx, elt, exc) = (
+        r.r(p.void_),
+        r.r(p.bool_),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.elt_t),
+        r.r(p.dyn_t),
+    );
+    let (lbl, bmp, filt, name, font, props, sh, fl, ci) = (
+        r.r(p.html_t),
+        r.r(p.bitmap_t),
+        r.r(p.filter_t),
+        r.r(p.str_t),
+        r.r(p.font_t),
+        r.r(p.fprops_t),
+        r.r(p.shadow_t),
+        r.r(p.f64_),
+        r.r(p.i32_),
+    );
+    let (u, cand, cur, bat, st, owner, s1, s2) = (
+        r.r(p.unit_t),
+        r.r(p.unit_t),
+        r.r(p.unit_t),
+        r.r(p.battle_t),
+        r.r(p.state_t),
+        r.r(p.player_t),
+        r.r(p.side_t),
+        r.r(p.side_t),
+    );
+    let (par, tlc, tl, arr, n, raw, d, first) = (
+        r.r(p.obj_t),
+        r.r(p.tl_cls_t),
+        r.r(p.tl_t),
+        r.r(p.arr_t),
+        r.r(p.i32_),
+        r.r(p.raw_t),
+        r.r(p.dyn_t),
+        r.r(p.ev_t),
+    );
+    let (icon, tile, api, sdata, bp, game, w, tw, th, hf) = (
+        r.r(p.str_t),
+        r.r(p.tile_t),
+        r.r(p.api_t),
+        r.r(p.sunit_t),
+        r.r(p.bp_t),
+        r.r(p.game_t),
+        r.r(p.f64_),
+        r.r(p.f64_),
+        r.r(p.f64_),
+        r.r(p.f64_),
+    );
+    let wi = r.r(p.i32_);
+
+    let mut a = Asm::new();
+    // Player diamonds only.
+    a.op(Opcode::GetThis {
+        dst: elt,
+        field: p.ev_elt,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: elt,
+            offset: 0,
+        },
+        "ret",
+    );
+    a.op(Opcode::EnumIndex {
+        dst: idx,
+        value: elt,
+    });
+    a.op(Opcode::Int { dst: zero, ptr: i0 });
+    a.jmp(
+        Opcode::JNotEq {
+            a: idx,
+            b: zero,
+            offset: 0,
+        },
+        "ret",
+    );
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
+
+    // Once per diamond: swords unmasked as in vanilla, the label created empty.
+    a.op(Opcode::GetThis {
+        dst: lbl,
+        field: f_label,
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: lbl,
+            offset: 0,
+        },
+        "ready",
+    );
+    a.op(Opcode::GetThis {
+        dst: bmp,
+        field: p.ev_event,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: bmp,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Field {
+        dst: filt,
+        obj: bmp,
+        field: p.o_filter,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: filt,
+            offset: 0,
+        },
+        "mk",
+    );
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.set_enable,
+        arg0: filt,
+        arg1: b,
+    });
+    a.label("mk");
+    a.op(Opcode::String {
+        dst: name,
+        ptr: s_default,
+    });
+    a.op(Opcode::Call1 {
+        dst: font,
+        fun: p.load_font,
+        arg0: name,
+    });
+    a.op(Opcode::New { dst: lbl });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: p.html_ctor,
+        arg0: lbl,
+        arg1: font,
+        arg2: ev,
+    });
+    a.op(Opcode::Call2 {
+        dst: props,
+        fun: p.get_props,
+        arg0: ev,
+        arg1: lbl,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.set_absolute,
+        arg0: props,
+        arg1: b,
+    });
+    a.op(Opcode::New { dst: sh });
+    a.op(Opcode::Float { dst: fl, ptr: one });
+    a.op(Opcode::SetField {
+        obj: sh,
+        field: p.sh_dx,
+        src: fl,
+    });
+    a.op(Opcode::SetField {
+        obj: sh,
+        field: p.sh_dy,
+        src: fl,
+    });
+    a.op(Opcode::Int { dst: ci, ptr: i0 });
+    a.op(Opcode::SetField {
+        obj: sh,
+        field: p.sh_color,
+        src: ci,
+    });
+    a.op(Opcode::Float {
+        dst: fl,
+        ptr: shadow_alpha,
+    });
+    a.op(Opcode::SetField {
+        obj: sh,
+        field: p.sh_alpha,
+        src: fl,
+    });
+    a.op(Opcode::SetField {
+        obj: lbl,
+        field: p.t_shadow,
+        src: sh,
+    });
+    a.op(Opcode::SetThis {
+        field: f_label,
+        src: lbl,
+    });
+
+    // u = the acting player-side unit, on the Timeline's first diamond only.
+    a.label("ready");
+    a.op(Opcode::Null { dst: u });
+    a.op(Opcode::GetThis {
+        dst: bat,
+        field: p.ev_battle,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: bat,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: st,
+        obj: bat,
+        field: p.b_state,
+    });
+    a.jmp(Opcode::JNull { reg: st, offset: 0 }, "decide");
+    a.op(Opcode::Field {
+        dst: cand,
+        obj: st,
+        field: p.s_started,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: cand,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: owner,
+        obj: cand,
+        field: p.u_owner,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: owner,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: s1,
+        obj: owner,
+        field: p.p_side,
+    });
+    a.op(Opcode::Field {
+        dst: s2,
+        obj: st,
+        field: p.s_side,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: s1,
+            b: s2,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: par,
+        obj: ev,
+        field: p.o_parent,
+    });
+    a.loop_head("up");
+    a.jmp(
+        Opcode::JNull {
+            reg: par,
+            offset: 0,
+        },
+        "found",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: tlc,
+        global: p.tl_cls,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: tlc,
+        arg1: par,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "next");
+    a.jmp(Opcode::JAlways { offset: 0 }, "found");
+    a.label("next");
+    a.op(Opcode::Field {
+        dst: par,
+        obj: par,
+        field: p.o_parent,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "up");
+    // `while (par != null) { if (Std.isOfType(par, Timeline)) break; par = par.parent; }`
+    a.label("found");
+    a.jmp(
+        Opcode::JNull {
+            reg: par,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::UnsafeCast { dst: tl, src: par });
+    a.op(Opcode::Field {
+        dst: arr,
+        obj: tl,
+        field: p.tl_events,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: arr,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: n,
+        obj: arr,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: zero,
+            b: n,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: arr,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: zero,
+    });
+    a.op(Opcode::UnsafeCast { dst: first, src: d });
+    a.jmp(
+        Opcode::JNotEq {
+            a: first,
+            b: ev,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Mov { dst: u, src: cand });
+
+    // Act only on change.
+    a.label("decide");
+    a.op(Opcode::GetThis {
+        dst: cur,
+        field: f_unit,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: cur,
+            b: u,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::SetThis {
+        field: f_unit,
+        src: u,
+    });
+    a.op(Opcode::GetThis {
+        dst: bmp,
+        field: p.ev_event,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: bmp,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Field {
+        dst: filt,
+        obj: bmp,
+        field: p.o_filter,
+    });
+    a.op(Opcode::String {
+        dst: name,
+        ptr: s_empty,
+    });
+    a.jmp(Opcode::JNotNull { reg: u, offset: 0 }, "portrait");
+    a.op(Opcode::Call0 {
+        dst: api,
+        fun: p.get_api,
+    });
+    a.op(Opcode::String {
+        dst: icon,
+        ptr: s_icon,
+    });
+    a.op(Opcode::Call2 {
+        dst: tile,
+        fun: p.api_get_icon,
+        arg0: api,
+        arg1: icon,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "apply");
+    a.label("portrait");
+    a.op(Opcode::Field {
+        dst: sdata,
+        obj: u,
+        field: p.u_data,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: sdata,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Call1 {
+        dst: tile,
+        fun: p.unit_get_icon,
+        arg0: sdata,
+    });
+    a.op(Opcode::Field {
+        dst: bp,
+        obj: sdata,
+        field: p.su_owner,
+    });
+    a.jmp(Opcode::JNull { reg: bp, offset: 0 }, "named");
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: p.ev_game,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "named",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_multi,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "named");
+    a.op(Opcode::Call1 {
+        dst: name,
+        fun: p.bp_get_name,
+        arg0: bp,
+    });
+    a.label("named");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+
+    // Swap the image, mask it for a portrait only, set and centre the label.
+    a.label("apply");
+    a.op(Opcode::Call2 {
+        dst: tile,
+        fun: p.set_tile,
+        arg0: bmp,
+        arg1: tile,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: filt,
+            offset: 0,
+        },
+        "text",
+    );
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.set_enable,
+        arg0: filt,
+        arg1: b,
+    });
+    a.label("text");
+    a.op(Opcode::GetThis {
+        dst: lbl,
+        field: f_label,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: lbl,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Call2 {
+        dst: name,
+        fun: p.html_set_text,
+        arg0: lbl,
+        arg1: name,
+    });
+    a.op(Opcode::Call1 {
+        dst: wi,
+        fun: p.outer_width,
+        arg0: ev,
+    });
+    a.op(Opcode::ToSFloat { dst: w, src: wi });
+    a.op(Opcode::Call1 {
+        dst: tw,
+        fun: p.text_width,
+        arg0: lbl,
+    });
+    a.op(Opcode::Sub {
+        dst: w,
+        a: w,
+        b: tw,
+    });
+    a.op(Opcode::Float { dst: hf, ptr: half });
+    a.op(Opcode::Mul {
+        dst: w,
+        a: w,
+        b: hf,
+    });
+    a.op(Opcode::Call2 {
+        dst: w,
+        fun: p.set_x,
+        arg0: lbl,
+        arg1: w,
+    });
+    a.op(Opcode::Call1 {
+        dst: th,
+        fun: p.text_height,
+        arg0: lbl,
+    });
+    a.op(Opcode::Neg { dst: th, src: th });
+    a.op(Opcode::Call2 {
+        dst: th,
+        fun: p.set_y,
+        arg0: lbl,
+        arg1: th,
+    });
+    a.label("untrap");
+    a.op(Opcode::EndTrap { exc });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: v });
+    a.label("catch");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.ev_t], p.void_, r.0, a.finish(), p.dbg_file)
+}
+
+fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
+    // The two fields go last on TimelineEvent: their indices follow every inherited one.
+    let base = obj(code, p.ev_t)?.fields.len();
+    let (f_unit, f_label) = (RefField(base), RefField(base + 1));
+    let hud = add_hud(code, p, f_unit, f_label)?;
+    let n_unit = string_ref(code, UNIT_FIELD);
+    let n_label = string_ref(code, LABEL_FIELD);
+    let Type::Obj(o) = &mut code.types[p.ev_t.0] else {
+        unreachable!()
+    };
+    for (name, t) in [(n_unit, p.unit_t), (n_label, p.html_t)] {
+        o.own_fields.push(ObjField { name, t });
+        o.fields.push(ObjField { name, t });
+    }
+
+    // Constructor: Player takes the masked branch (the AI case's target).
+    let c = &mut code.functions[p.ctor_fi];
+    let Opcode::Switch { offsets, .. } = &mut c.ops[p.mask_switch] else {
+        unreachable!()
+    };
+    offsets[0] = offsets[1];
+    let ctor = c.findex;
+
+    let f = &mut code.functions[p.sync_fi];
+    insert_ops(
+        f,
+        1,
+        vec![Opcode::Call1 {
+            dst: p.sync_void,
+            fun: hud,
+            arg0: Reg(0),
+        }],
+    );
+    eprintln!(
+        "patched timeline hud: TimelineEvent ctor fn@{} op {} masks Player, sync fn@{} calls timelineHud fn@{}",
+        ctor.0, p.mask_switch, f.findex.0, hud.0
+    );
+    Ok(())
+}
+
+/// Shows the acting player unit's portrait and its player's nickname on the
+/// battle timeline's first diamond, or leaves `code` untouched and logs why.
+pub(crate) fn patch_timeline_hud(code: &mut Bytecode) {
+    let snap = crate::asm::Snap::take(code);
+    let r = plan(code).and_then(|p| apply(code, &p));
+    if let Err(e) = r {
+        snap.restore(code);
+        eprintln!("timeline hud skipped: {e:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asm::testutil::*;
+
+    /// The constructor changes one Switch offset, sync gains one call, two
+    /// fields and one well-typed function are appended; a second pass is a no-op.
+    #[test]
+    fn patches_installed_game() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let p = plan(&orig).expect("plan");
+        let mut code = read(&image);
+        patch_timeline_hud(&mut code);
+        let patched = write(&code);
+        let back = read(&patched);
+
+        assert_eq!(back.functions.len(), orig.functions.len() + 1);
+        for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
+            let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
+            assert_eq!(
+                same,
+                i != p.ctor_fi && i != p.sync_fi,
+                "function #{i} (fn@{})",
+                a.findex.0
+            );
+        }
+        let hud = back.functions.last().expect("new fn");
+
+        // Constructor: only the Player offset of the mask switch.
+        let (a, b) = (&orig.functions[p.ctor_fi], &back.functions[p.ctor_fi]);
+        assert_eq!(a.regs, b.regs);
+        for i in 0..a.ops.len() {
+            if i == p.mask_switch {
+                let (
+                    Opcode::Switch {
+                        offsets: oa,
+                        end: ea,
+                        ..
+                    },
+                    Opcode::Switch {
+                        offsets: ob,
+                        end: eb,
+                        ..
+                    },
+                ) = (&a.ops[i], &b.ops[i])
+                else {
+                    panic!("not a switch");
+                };
+                assert_eq!(ea, eb);
+                assert_eq!(ob[0], oa[1]);
+                assert_eq!(ob[1..], oa[1..]);
+            } else {
+                assert_eq!(
+                    format!("{:?}", b.ops[i]),
+                    format!("{:?}", a.ops[i]),
+                    "op {i}"
+                );
+            }
+        }
+
+        // sync: one call inserted after the super sync.
+        let (a, b) = (&orig.functions[p.sync_fi], &back.functions[p.sync_fi]);
+        shifted(a, b, 1, 1);
+        assert!(matches!(b.ops[1], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == hud.findex));
+        check_types(&back, b, 1..2);
+        check_flow(b);
+
+        // Fields: appended, typed, used by the new function only.
+        let ev = back.types[p.ev_t.0].get_type_obj().expect("ev");
+        let ov = orig.types[p.ev_t.0].get_type_obj().expect("ev");
+        assert_eq!(ev.own_fields.len(), ov.own_fields.len() + 2);
+        let names: Vec<&str> = ev.own_fields[ov.own_fields.len()..]
+            .iter()
+            .map(|f| back.strings[f.name.0].as_str())
+            .collect();
+        assert_eq!(names, [UNIT_FIELD, LABEL_FIELD]);
+        assert_eq!(field(&back, p.ev_t, UNIT_FIELD).unwrap().1, p.unit_t);
+        assert_eq!(field(&back, p.ev_t, LABEL_FIELD).unwrap().1, p.html_t);
+
+        check_types(&back, hud, 0..hud.ops.len());
+        check_flow(hud);
+
+        let mut again = read(&patched);
+        assert!(plan(&again).is_err());
+        patch_timeline_hud(&mut again);
+        assert!(write(&again) == patched);
+    }
+
+    /// A constructor whose Player case is not the unmasked branch, or a sync
+    /// that does not start with the super sync, is refused and left as it was.
+    #[test]
+    fn refuses_unexpected_shapes() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let p = plan(&read(&image)).expect("plan");
+
+        let mut code = read(&image);
+        let Opcode::Switch { offsets, .. } = &mut code.functions[p.ctor_fi].ops[p.mask_switch]
+        else {
+            panic!("not a switch");
+        };
+        offsets[0] = offsets[1];
+        let before = write(&code);
+        assert!(plan(&code).is_err());
+        patch_timeline_hud(&mut code);
+        assert!(write(&code) == before);
+
+        let mut code = read(&image);
+        code.functions[p.sync_fi].ops[1] = Opcode::Nop;
+        let before = write(&code);
+        assert!(plan(&code).is_err());
+        patch_timeline_hud(&mut code);
+        assert!(write(&code) == before);
+    }
+}
