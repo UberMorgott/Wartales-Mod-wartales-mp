@@ -290,6 +290,15 @@ before it threw is kept. Not covered, still vanilla: argument decoding,
 property sync, object registration, full sync, RPC result callbacks, protocol
 errors. Skipped (logged) on mismatch.
 
+**Client window close** (`src/window_close.rs`): the modal backdrop click
+(`Window.setModal`'s windowRoot onClick, Window.hx:295-300) closes a window on
+a click outside it, but on a client it always called `triggerClose()`, the RPC
+stub of a host-replicated window, which returns at once for a window that only
+exists on that machine (`__host == null`: UnitInfo and every window a client
+opens for itself). The client's call now gets `if (__host == null) close()` in
+front, as Escape already does (Game.hx:1725-1727); shared windows keep the RPC.
+Skipped (logged) on mismatch.
+
 ## Install
 
 Two ways, pick one:

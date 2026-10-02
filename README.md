@@ -49,6 +49,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do.
 - Switching a unit's profession keeps the experience earned in the old one, and applies at once without the confirm window.
 - Hold-to-confirm rings fill three times faster.
+- In co-op a client closes its own window (unit sheet and other windows it opened itself) by clicking outside it, as the host always could; before, that click did nothing on a client.
 - Skill tooltips show the Valor point cost outside battle for every unit, including the new-game screens.
 - Tooltip keyword panels ("Poison", "Vigilance", ...) wrap into columns instead of running off the screen, and are not shown twice.
 - A censer that grants Purge (Remastered) shows its tooltip in chests, shops and other inventories again; before, its tooltip failed every frame, which froze the moved item between cells and dropped the FPS.

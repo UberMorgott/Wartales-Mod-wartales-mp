@@ -38,7 +38,8 @@
 // (see timeline_hud.rs, timeline_list.rs), and so the customize screen logs its 2D
 // hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs), and so the end of every activity /
 // mini-game (ruins puzzles, lock picking, fishing, gambling) and every refused co-op RPC is printed
-// for the shim log (see activity_diag.rs).
+// for the shim log (see activity_diag.rs), and so a co-op client closes its own modal window (the unit sheet)
+// by clicking outside it, as the host does (see window_close.rs).
 
 mod activity_diag;
 mod asm;
@@ -70,6 +71,7 @@ mod take_all;
 mod tavern_resume;
 mod timeline_hud;
 mod tip_overflow;
+mod window_close;
 
 use anyhow::{bail, Context, Result};
 use hlbc::opcodes::Opcode;
@@ -109,6 +111,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     party_inventory::patch_party_recipes(&mut code);
     loot_all::patch_loot_all(&mut code);
     debrief_cure::patch_debrief_cure(&mut code);
+    window_close::patch_window_close(&mut code);
     take_all::patch_take_all(&mut code);
     tavern_resume::patch_tavern_resume(&mut code);
     mod_version::patch_mod_version(&mut code);
