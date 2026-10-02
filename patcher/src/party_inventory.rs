@@ -43,6 +43,14 @@
 // already pays with useList(checkChest = true). Grimoire learn costs stay own-only:
 // the host pays them per entry with tryUse on the acting player's inventory.
 //
+// Activities (patch_party_activities): fishing hooks and lockpicks were counted,
+// required and consumed from the acting player's own inventory only. Their counters
+// and gates now use countWithChest / hasItemWithChest, and the consuming call goes to
+// partyTryUse / partyUse (same signatures as PlayerInventory.tryUse / use): the
+// vanilla call when the own inventory holds enough, else a one-entry
+// useList(inv, [{item, count}], checkChest = true, cb) — host: partyPrepare + vanilla
+// (own -> chest -> boat -> other players); client: vanilla RPCs it to the host.
+//
 // Validated before editing; a mismatch skips the pass (logged).
 
 use super::asm::*;
@@ -185,12 +193,21 @@ fn find_use_list<'a>(code: &'a Bytecode, t: &T, inv_t: RefType) -> Result<&'a Fu
 }
 
 fn plan_consume(code: &Bytecode, t: &T) -> Result<Consume> {
+    let m = consume_refs(code, t)?;
+    if matches!(
+        code.functions[m.use_list_fi].ops.first(),
+        Some(Opcode::JFalse { cond: Reg(2), .. })
+    ) {
+        bail!("already applied");
+    }
+    Ok(m)
+}
+
+/// useList and the types / functions its host path uses (patched or not).
+fn consume_refs(code: &Bytecode, t: &T) -> Result<Consume> {
     let inv_t = obj_type(code, "st.Inventory")?;
     let ul = find_use_list(code, t, inv_t)?;
     let use_list_fi = fun_index(code, ul.findex)?;
-    if matches!(ul.ops.first(), Some(Opcode::JFalse { cond: Reg(2), .. })) {
-        bail!("already applied");
-    }
     let list_t = ul.regs[1];
     // The host path: count(this, item, quality, null) per entry, chest via getTool("Chest").
     let mut entry_t = None;
@@ -1901,6 +1918,371 @@ pub(crate) fn patch_party_recipes(code: &mut Bytecode) {
         Err(e) => eprintln!("party recipes skipped: {e:#}"),
     }
 }
+
+/// PlayerInventory statics used by the activity pass, matched by name and signature.
+struct InvFns {
+    count: RefFun,
+    count_wc: RefFun,
+    has: RefFun,
+    has_wc: RefFun,
+    try_use: RefFun,
+    use_: RefFun,
+    cb_t: RefType,
+}
+
+/// The one function named `name` with exactly these argument types.
+fn static_fn(code: &Bytecode, name: &str, args: &[RefType]) -> Result<RefFun> {
+    let hits: Vec<RefFun> = code
+        .functions
+        .iter()
+        .filter(|f| {
+            s(code, f.name) == name && f.t.as_fun(code).is_some_and(|ft| ft.args[..] == args[..])
+        })
+        .map(|f| f.findex)
+        .collect();
+    match hits[..] {
+        [f] => Ok(f),
+        _ => bail!("expected one {name}{args:?}, found {}", hits.len()),
+    }
+}
+
+fn inv_fns(code: &Bytecode, t: &T, m: &Consume) -> Result<InvFns> {
+    let cb_t = fun_t(code, code.functions[m.use_list_fi].findex)?.args[3];
+    let (inv, st) = (m.inv_t, t.str_);
+    Ok(InvFns {
+        count: static_fn(code, "count", &[inv, st])?,
+        count_wc: static_fn(code, "countWithChest", &[inv, st])?,
+        has: static_fn(code, "hasItem", &[inv, st, m.ref_i32, m.null_i32])?,
+        has_wc: static_fn(code, "hasItemWithChest", &[inv, st, m.ref_i32, m.null_i32])?,
+        try_use: static_fn(code, "tryUse", &[inv, st, m.ref_i32, cb_t])?,
+        use_: static_fn(code, "use", &[inv, st, t.bool_, m.ref_i32])?,
+        cb_t,
+    })
+}
+
+/// Op indices of `f`'s direct calls to `target`.
+fn calls_to(f: &Function, target: RefFun) -> Vec<usize> {
+    f.ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| matches!(call_target(op), Some((g, _)) if g == target))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// `(fi, at)` of the single call of `class.name` to `own`; with no such call and a
+/// call to `party` instead, the pass was already applied.
+fn one_call(
+    code: &Bytecode,
+    class: &str,
+    name: &str,
+    own: RefFun,
+    party: RefFun,
+) -> Result<(usize, usize)> {
+    let f = method(code, obj_type(code, class)?, name)?;
+    let fi = fun_index(code, f.findex)?;
+    match calls_to(f, own)[..] {
+        [at] => Ok((fi, at)),
+        [] if !calls_to(f, party).is_empty() => bail!("{class}.{name}: already applied"),
+        ref v => bail!("{class}.{name}: {} calls to fn@{} (want 1)", v.len(), own.0),
+    }
+}
+
+/// Calls of `f` to `target` whose item argument (`item_arg`) was just loaded from
+/// the string global `g` (a `GetGlobal` into that register at most 4 ops before).
+fn calls_with_item(f: &Function, target: RefFun, item_arg: usize, g: RefGlobal) -> Vec<usize> {
+    calls_to(f, target)
+        .into_iter()
+        .filter(|&at| {
+            let Some((_, args)) = call_target(&f.ops[at]) else {
+                return false;
+            };
+            let r = args[item_arg];
+            f.ops[at.saturating_sub(4)..at]
+                .iter()
+                .rev()
+                .find_map(|op| match op {
+                    Opcode::GetGlobal { dst, global } if *dst == r => Some(*global == g),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// The planned activity edits: `(fi, at, new callee)` swaps, and the `tryUse` / `use`
+/// sites that get partyTryUse / partyUse (appended when applying).
+struct Acts {
+    swaps: Vec<(usize, usize, RefFun)>,
+    try_use: (usize, usize),
+    use_: (usize, usize),
+}
+
+fn plan_activities(code: &Bytecode, t: &T, f: &InvFns) -> Result<Acts> {
+    const FISH: &str = "ui.win.FishingAction";
+    const PICK: &str = "ui.win.LockPick";
+    let mut swaps = vec![
+        // fishing: hook counter, cast gate, hook kind choice
+        one_call(code, FISH, "updateCounters", f.count, f.count_wc).map(|x| (x, f.count_wc))?,
+        one_call(code, FISH, "canFishing", f.has, f.has_wc).map(|x| (x, f.has_wc))?,
+        one_call(code, FISH, "setFishhook", f.has, f.has_wc).map(|x| (x, f.has_wc))?,
+        // lock picking: lockpick counter, the count deciding use / last-pick break
+        one_call(code, PICK, "updateLockPickCount", f.count, f.count_wc)
+            .map(|x| (x, f.count_wc))?,
+        one_call(code, PICK, "startState", f.count, f.count_wc).map(|x| (x, f.count_wc))?,
+    ]
+    .into_iter()
+    .map(|((fi, at), g)| (fi, at, g))
+    .collect::<Vec<_>>();
+    let try_use = one_call(code, FISH, "startState", f.try_use, f.try_use)?;
+    let use_ = one_call(code, PICK, "startState", f.use_, f.use_)?;
+    let lp = string_global(code, t.str_, "LockPick")?;
+    // Chest.tryUnlock's lockpick closure: "no lockpick -> sound, stop" tests
+    let tu = method(code, obj_type(code, "ent.p.Chest")?, "tryUnlock")?;
+    let mut picks = vec![];
+    for op in &tu.ops {
+        if let Opcode::InstanceClosure { fun, .. } | Opcode::StaticClosure { fun, .. } = op {
+            let ci = fun_index(code, *fun)?;
+            let c = &code.functions[ci];
+            let own = calls_with_item(c, f.has, 1, lp);
+            if !own.is_empty() {
+                picks.push((ci, own));
+            } else if !calls_with_item(c, f.has_wc, 1, lp).is_empty() {
+                bail!("Chest.tryUnlock: already applied");
+            }
+        }
+    }
+    let [(ci, ref own)] = picks[..] else {
+        bail!(
+            "Chest.tryUnlock: {} lockpick closures (want 1)",
+            picks.len()
+        );
+    };
+    if own.len() != 2 {
+        bail!("Chest.tryUnlock: {} lockpick tests (want 2)", own.len());
+    }
+    swaps.extend(own.iter().map(|&at| (ci, at, f.has_wc)));
+    // crime cave HUD lockpick counter
+    let cc = method(code, obj_type(code, "world.CrimeCaveContent")?, "update")?;
+    let ci = fun_index(code, cc.findex)?;
+    match calls_with_item(cc, f.count, 1, lp)[..] {
+        [at] => swaps.push((ci, at, f.count_wc)),
+        ref v => bail!(
+            "CrimeCaveContent.update: {} lockpick counts (want 1)",
+            v.len()
+        ),
+    }
+    Ok(Acts {
+        swaps,
+        try_use,
+        use_,
+    })
+}
+
+/// `partyTryUse(inv, item, count, cb)` (PlayerInventory.tryUse's signature) or
+/// `partyUse(inv, item, stolenFirst, count)` (PlayerInventory.use's): the vanilla
+/// call when `inv` alone holds `count` (default 1), else
+/// `useList(inv, [{item, count, quality: null}], true, cb or noop)`, which pays
+/// own -> chest -> boat -> other players (partyPrepare) on the host, or RPCs it
+/// there from a client.
+fn add_party_use(
+    code: &mut Bytecode,
+    t: &T,
+    m: &Consume,
+    f: &InvFns,
+    with_cb: bool,
+    noop: RefFun,
+) -> Result<RefFun> {
+    let args = if with_cb {
+        vec![m.inv_t, t.str_, m.ref_i32, f.cb_t]
+    } else {
+        vec![m.inv_t, t.str_, t.bool_, m.ref_i32]
+    };
+    let cnt = Reg(if with_cb { 2 } else { 3 });
+    let mut g = Regs(args.clone());
+    let n = g.r(t.i32_);
+    let own = g.r(t.i32_);
+    let v = g.r(t.void);
+    let ty = g.r(m.type_t);
+    let arr = g.r(m.arr_t);
+    let list = g.r(m.list_t);
+    let e = g.r(m.entry_t);
+    let q = g.r(m.null_i32);
+    let k = g.r(t.i32_);
+    let b = g.r(t.bool_);
+    let cb = if with_cb { Reg(3) } else { g.r(f.cb_t) };
+    let one = int_const(code, 1);
+    let zero = int_const(code, 0);
+    let use_list = code.functions[m.use_list_fi].findex;
+    let mut a = Asm::new();
+    a.jmp(
+        Opcode::JNotNull {
+            reg: cnt,
+            offset: 0,
+        },
+        "deref",
+    );
+    a.op(Opcode::Int { dst: n, ptr: one });
+    a.jmp(Opcode::JAlways { offset: 0 }, "have");
+    a.label("deref");
+    a.op(Opcode::Unref { dst: n, src: cnt });
+    a.label("have");
+    a.op(Opcode::Call2 {
+        dst: own,
+        fun: f.count,
+        arg0: Reg(0),
+        arg1: Reg(1),
+    });
+    a.jmp(
+        Opcode::JSLt {
+            a: own,
+            b: n,
+            offset: 0,
+        },
+        "party",
+    );
+    a.op(Opcode::Call4 {
+        dst: v,
+        fun: if with_cb { f.try_use } else { f.use_ },
+        arg0: Reg(0),
+        arg1: Reg(1),
+        arg2: Reg(2),
+        arg3: Reg(3),
+    });
+    a.op(Opcode::Ret { ret: v });
+    a.label("party");
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: m.entry_t,
+    });
+    a.op(Opcode::Int { dst: k, ptr: zero });
+    a.op(Opcode::Call2 {
+        dst: arr,
+        fun: m.alloc,
+        arg0: ty,
+        arg1: k,
+    });
+    a.op(Opcode::Call1 {
+        dst: list,
+        fun: m.wrap,
+        arg0: arr,
+    });
+    a.op(Opcode::New { dst: e });
+    a.op(Opcode::SetField {
+        obj: e,
+        field: m.entry_item,
+        src: Reg(1),
+    });
+    a.op(Opcode::SetField {
+        obj: e,
+        field: m.entry_count,
+        src: n,
+    });
+    a.op(Opcode::Null { dst: q });
+    a.op(Opcode::SetField {
+        obj: e,
+        field: m.entry_quality,
+        src: q,
+    });
+    a.op(Opcode::Call2 {
+        dst: k,
+        fun: m.push,
+        arg0: list,
+        arg1: e,
+    });
+    if !with_cb {
+        a.op(Opcode::StaticClosure { dst: cb, fun: noop });
+    }
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Call4 {
+        dst: v,
+        fun: use_list,
+        arg0: Reg(0),
+        arg1: list,
+        arg2: b,
+        arg3: cb,
+    });
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, args, t.void, g.0, a.finish(), m.dbg_file)
+}
+
+/// `(Bool) -> Void` that does nothing (useList's callback for partyUse).
+fn add_noop_cb(code: &mut Bytecode, t: &T, f: &InvFns, dbg_file: usize) -> Result<RefFun> {
+    let ret = Reg(1);
+    let noop = push_fn(
+        code,
+        vec![t.bool_],
+        t.void,
+        vec![t.bool_, t.void],
+        vec![Opcode::Ret { ret }],
+        dbg_file,
+    )?;
+    // closures must carry the callback's own function type
+    let fi = fun_index(code, noop)?;
+    code.functions[fi].t = f.cb_t;
+    code.types.pop();
+    Ok(noop)
+}
+
+/// Fishing hooks and lockpicks are counted, required and consumed from the party
+/// (own inventory + camp chest + boat chest + the other players), like the with-chest
+/// costs above. Fishing: the hook counter (`updateCounters`), the cast gate
+/// (`canFishing`) and the hook kind (`setFishhook`) use countWithChest /
+/// hasItemWithChest; the host's hook wear-out `tryUse` becomes partyTryUse. Lock
+/// picking: the "pick the lock" gate in Chest.tryUnlock, the lockpick counters
+/// (LockPick, crime cave HUD) and the count deciding the use use the party; the
+/// per-attempt `use` becomes partyUse. Own inventory first (vanilla call), the rest
+/// through useList(checkChest = true) + partyPrepare. Skipped (logged) on mismatch.
+pub(crate) fn patch_party_activities(code: &mut Bytecode) {
+    let plan = || -> Result<(T, Consume, InvFns, Acts)> {
+        let t = types(code)?;
+        let m = consume_refs(code, &t)?;
+        let f = inv_fns(code, &t, &m)?;
+        let acts = plan_activities(code, &t, &f)?;
+        Ok((t, m, f, acts))
+    };
+    let (t, m, f, acts) = match plan() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("party activities skipped: {e:#}");
+            return;
+        }
+    };
+    let snap = Snap::take(code);
+    let added = (|| -> Result<(RefFun, RefFun)> {
+        let noop = add_noop_cb(code, &t, &f, m.dbg_file)?;
+        let tu = add_party_use(code, &t, &m, &f, true, noop)?;
+        let us = add_party_use(code, &t, &m, &f, false, noop)?;
+        Ok((tu, us))
+    })();
+    let (tu, us) = match added {
+        Ok(x) => x,
+        Err(e) => {
+            snap.restore(code);
+            eprintln!("party activities skipped: {e:#}");
+            return;
+        }
+    };
+    let edits = acts.swaps.iter().copied().chain([
+        (acts.try_use.0, acts.try_use.1, tu),
+        (acts.use_.0, acts.use_.1, us),
+    ]);
+    for (fi, at, g) in edits {
+        match &mut code.functions[fi].ops[at] {
+            Opcode::Call2 { fun, .. } | Opcode::Call4 { fun, .. } => *fun = g,
+            _ => unreachable!("planned call site"),
+        }
+    }
+    eprintln!(
+        "patched party activities: fishing hooks and lockpicks counted and used from the party ({} call sites, partyTryUse fn@{} partyUse fn@{})",
+        acts.swaps.len() + 2,
+        tu.0,
+        us.0
+    );
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2107,5 +2489,75 @@ mod tests {
         assert!(plan_recipe_has(&again).is_err());
         patch_party_recipes(&mut again);
         assert!(write(&again) == patched);
+    }
+
+    /// Activities: only the planned call sites change (same-signature callees), three
+    /// well-typed functions are appended (noop, partyTryUse, partyUse), the image
+    /// round-trips, a second pass changes nothing; also after the useList prologue.
+    #[test]
+    fn patches_activities() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let t = types(&orig).expect("types");
+        let m = consume_refs(&orig, &t).expect("refs");
+        let f = inv_fns(&orig, &t, &m).expect("inv fns");
+        let acts = plan_activities(&orig, &t, &f).expect("plan");
+        assert_eq!(acts.swaps.len(), 8);
+        let mut planned: Vec<(usize, usize)> = acts
+            .swaps
+            .iter()
+            .map(|(fi, at, _)| (*fi, *at))
+            .chain([acts.try_use, acts.use_])
+            .collect();
+        planned.sort();
+        let mut code = read(&image);
+        patch_party_activities(&mut code);
+        let patched = write(&code);
+        let back = read(&patched);
+        let nf = orig.functions.len();
+        assert_eq!(back.functions.len(), nf + 3);
+        assert_eq!(back.types[..orig.types.len()], orig.types[..]);
+        let mut changed = vec![];
+        for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
+            assert_eq!(a.regs, b.regs);
+            assert_eq!(a.ops.len(), b.ops.len());
+            for (k, (x, y)) in a.ops.iter().zip(&b.ops).enumerate() {
+                if format!("{x:?}") != format!("{y:?}") {
+                    changed.push((i, k));
+                }
+            }
+            if planned.iter().any(|(fi, _)| *fi == i) {
+                check_types(&back, b, 0..b.ops.len());
+            }
+        }
+        assert_eq!(changed, planned);
+        let (tu, us) = (back.functions[nf + 1].findex, back.functions[nf + 2].findex);
+        let at = |(fi, k): (usize, usize)| call_target(&back.functions[fi].ops[k]).unwrap().0;
+        assert_eq!(at(acts.try_use), tu);
+        assert_eq!(at(acts.use_), us);
+        assert_eq!(fun_t(&back, tu).unwrap(), fun_t(&orig, f.try_use).unwrap());
+        assert_eq!(fun_t(&back, us).unwrap(), fun_t(&orig, f.use_).unwrap());
+        assert_eq!(back.functions[nf].t, f.cb_t);
+        for g in &back.functions[nf..] {
+            check_types(&back, g, 0..g.ops.len());
+            check_flow(g);
+        }
+        let mut again = read(&patched);
+        assert!(plan_activities(&again, &t, &f).is_err());
+        patch_party_activities(&mut again);
+        assert!(write(&again) == patched);
+
+        // after the consume pass (useList prologue): same plan, same edits
+        let mut code = read(&image);
+        patch_party_inventory(&mut code);
+        let m2 = consume_refs(&code, &t).expect("refs after consume");
+        let f2 = inv_fns(&code, &t, &m2).expect("inv fns after consume");
+        let acts2 = plan_activities(&code, &t, &f2).expect("plan after consume");
+        assert_eq!(acts2.swaps, acts.swaps);
+        patch_party_activities(&mut code);
+        let _ = read(&write(&code));
     }
 }

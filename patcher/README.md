@@ -270,6 +270,13 @@ with `checkChest`, which those callers never pass; their own-inventory
 `hasItem` call now goes to `hasItemWithChest` too (display only: crafting
 already pays with `useList(checkChest)`). Grimoire learn costs stay own-only
 (the host pays them with `tryUse` on the acting player's inventory).
+Activities: fishing hooks (`FishingAction`: counter, cast gate, hook kind) and
+lockpicks (`Chest.tryUnlock`'s pick gate, `LockPick` and crime cave counters,
+the count before each attempt) count with `countWithChest` / `hasItemWithChest`;
+the host's hook wear-out `tryUse` and the per-attempt lockpick `use` go to
+`partyTryUse` / `partyUse`: the vanilla call when the own inventory holds
+enough, else a one-entry `useList(checkChest = true)` (host: `partyPrepare`,
+client: vanilla's RPC to the host). No new RPC or synced field.
 
 **Network handler guard** (`src/net_guard.rs`): in vanilla an exception thrown
 while a machine handles network data unwinds through the relay service; on the

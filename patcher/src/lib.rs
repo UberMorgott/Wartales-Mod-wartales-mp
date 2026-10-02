@@ -20,7 +20,7 @@
 // printing a warning instead (see dlc_check.rs), and so the co-op shared chest panel
 // gets sort / quick stack / take similar buttons (see chest_buttons.rs), and so
 // item costs paid "with the chest" (crafting, repairs, dialogs, injury remedies, recipe
-// ingredient rows) also draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
+// ingredient rows, fishing hooks, lockpicks) also draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
 // loot screen has its Take all button in co-op too (see loot_all.rs), and so the join gate shows
 // wartales-mp's "mod files differ from the host" text (see mod_version.rs), and so a co-op
 // leave from a place or the camp is never blocked by another player's business (see force_leave.rs), and so a
@@ -109,6 +109,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     party_inventory::patch_party_counts(&mut code);
     party_inventory::patch_party_lists(&mut code);
     party_inventory::patch_party_recipes(&mut code);
+    party_inventory::patch_party_activities(&mut code);
     loot_all::patch_loot_all(&mut code);
     debrief_cure::patch_debrief_cure(&mut code);
     window_close::patch_window_close(&mut code);
