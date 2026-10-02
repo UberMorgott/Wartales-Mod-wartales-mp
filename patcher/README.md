@@ -246,6 +246,12 @@ The matching displays (`hasItemWithChest` / `countWithChest`: crafting recipes
 and craftable amounts, brewing, repair/heal/alter/boat costs) count the other
 players too (GlobalInventory flags `1|2|256` -> `1|2|4|256`); they already
 counted the global inventory, the chest and the boat chest on board.
+Recipe ingredient rows (`ItemsRecipe`: Grimoire recipe cells and their learn
+tooltip, the recipe in item tooltips) called `hasItemWithChest` only when built
+with `checkChest`, which those callers never pass; their own-inventory
+`hasItem` call now goes to `hasItemWithChest` too (display only: crafting
+already pays with `useList(checkChest)`). Grimoire learn costs stay own-only
+(the host pays them with `tryUse` on the acting player's inventory).
 
 **Network handler guard** (`src/net_guard.rs`): in vanilla an exception thrown
 while a machine handles network data unwinds through the relay service; on the

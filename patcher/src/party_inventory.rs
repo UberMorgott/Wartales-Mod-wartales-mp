@@ -38,6 +38,10 @@
 // tooltip's "remedy available" test (inlined GlobalInventory iterations, flags
 // player|chest) and with-chest cost buttons (Button.syncText, Debrief) do too
 // (patch_party_lists). The heal itself pays with useList(checkChest = true).
+// Recipe ingredient rows (ItemsRecipe: Grimoire cells, item tooltips) test with
+// hasItemWithChest instead of the own inventory (patch_party_recipes); crafting
+// already pays with useList(checkChest = true). Grimoire learn costs stay own-only:
+// the host pays them per entry with tryUse on the acting player's inventory.
 //
 // Validated before editing; a mismatch skips the pass (logged).
 
@@ -1840,6 +1844,63 @@ pub(crate) fn patch_party_lists(code: &mut Bytecode) {
         Err(e) => eprintln!("party lists skipped: {e:#}"),
     }
 }
+
+/// `(fi, at, with_chest)`: the own-inventory `PlayerInventory.hasItem` call in
+/// `ItemsRecipe.hasItem`'s `checkChest = false` branch, and the `hasItemWithChest`
+/// (same signature) to call instead.
+fn plan_recipe_has(code: &Bytecode) -> Result<(usize, usize, RefFun)> {
+    let wc: Vec<&Function> = code
+        .functions
+        .iter()
+        .filter(|f| s(code, f.name) == "hasItemWithChest")
+        .collect();
+    let [wc] = wc[..] else {
+        bail!("expected one hasItemWithChest, found {}", wc.len());
+    };
+    let wc_t = fun_t(code, wc.findex)?;
+    let f = method(code, obj_type(code, "ui.win.ItemsRecipe")?, "hasItem")?;
+    let fi = fun_index(code, f.findex)?;
+    let mut own = vec![];
+    let mut chest = 0;
+    for (i, op) in f.ops.iter().enumerate() {
+        let Opcode::Call4 { fun, .. } = op else {
+            continue;
+        };
+        if *fun == wc.findex {
+            chest += 1;
+        } else if fname(code, *fun) == "hasItem" && fun_t(code, *fun)? == wc_t {
+            own.push(i);
+        }
+    }
+    match (&own[..], chest) {
+        ([at], 1) => Ok((fi, *at, wc.findex)),
+        ([], 2) => bail!("ItemsRecipe.hasItem: already applied"),
+        _ => bail!(
+            "ItemsRecipe.hasItem: {} own / {chest} with-chest calls (want 1 / 1)",
+            own.len()
+        ),
+    }
+}
+
+/// Recipe ingredient rows (`ItemsRecipe`: Grimoire recipe cells and their learn
+/// tooltip, item tooltips' recipe) mark an ingredient missing from the player's own
+/// inventory only; they now count like `hasItemWithChest` (global + every player +
+/// chest + boat), matching what crafting pays with (useList checkChest + partyPrepare).
+/// Display only. Skipped (logged) on mismatch.
+pub(crate) fn patch_party_recipes(code: &mut Bytecode) {
+    match plan_recipe_has(code) {
+        Ok((fi, at, with_chest)) => {
+            if let Opcode::Call4 { fun, .. } = &mut code.functions[fi].ops[at] {
+                *fun = with_chest;
+            }
+            eprintln!(
+                "patched party recipes fn@{}: recipe ingredient rows include chest and the other players",
+                code.functions[fi].findex.0
+            );
+        }
+        Err(e) => eprintln!("party recipes skipped: {e:#}"),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2011,6 +2072,40 @@ mod tests {
         assert!(plan_iter_flags(&again, "ui.win.InjuryHealPanel", "init").is_err());
         assert!(plan_button_flags(&again).is_err());
         patch_party_lists(&mut again);
+        assert!(write(&again) == patched);
+    }
+
+    /// ItemsRecipe.hasItem: only its own-inventory hasItem call becomes
+    /// hasItemWithChest; idempotent.
+    #[test]
+    fn patches_recipes() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let (fi, at, wc) = plan_recipe_has(&orig).expect("plan");
+        let mut code = read(&image);
+        patch_party_recipes(&mut code);
+        let patched = write(&code);
+        let back = read(&patched);
+        assert_eq!(back.functions.len(), orig.functions.len());
+        let mut changed = vec![];
+        for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
+            assert_eq!(a.regs, b.regs);
+            assert_eq!(a.ops.len(), b.ops.len());
+            for (k, (x, y)) in a.ops.iter().zip(&b.ops).enumerate() {
+                if format!("{x:?}") != format!("{y:?}") {
+                    changed.push((i, k));
+                }
+            }
+        }
+        assert_eq!(changed, [(fi, at)]);
+        assert!(matches!(back.functions[fi].ops[at], Opcode::Call4 { fun, .. } if fun == wc));
+        check_types(&back, &back.functions[fi], 0..back.functions[fi].ops.len());
+        let mut again = read(&patched);
+        assert!(plan_recipe_has(&again).is_err());
+        patch_party_recipes(&mut again);
         assert!(write(&again) == patched);
     }
 }
