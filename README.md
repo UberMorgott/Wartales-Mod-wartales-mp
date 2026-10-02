@@ -25,6 +25,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - An error in the game's handling of a network message is logged instead of ending the whole co-op session.
 - The in-game DLC check never marks a player who owns a DLC as missing it (which locked DLC content for the whole party); a real mismatch is written to the log as a warning.
 - Fixes the post-battle screen rebuilding itself every frame in co-op when the remedy count and the injured units disagreed.
+- The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.
 
 ### Co-op play
 

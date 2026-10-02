@@ -57,6 +57,7 @@ mod party_inventory;
 mod skill_cost;
 mod slot4_diag;
 mod take_all;
+mod tavern_resume;
 mod tip_overflow;
 
 use anyhow::{bail, Context, Result};
@@ -95,6 +96,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loot_all::patch_loot_all(&mut code);
     debrief_cure::patch_debrief_cure(&mut code);
     take_all::patch_take_all(&mut code);
+    tavern_resume::patch_tavern_resume(&mut code);
     mod_version::patch_mod_version(&mut code);
     net_guard::patch_net_guard(&mut code);
     tip_overflow::patch_tip_overflow(&mut code);
