@@ -112,7 +112,7 @@ fn field_name_of(code: &Bytecode, t: RefType, field: RefField) -> Option<&str> {
     fields.get(field.0).map(|f| s(code, f.name))
 }
 
-fn index_of(code: &Bytecode, findex: RefFun) -> Result<usize> {
+pub(crate) fn index_of(code: &Bytecode, findex: RefFun) -> Result<usize> {
     code.functions
         .iter()
         .position(|f| f.findex == findex)
@@ -120,7 +120,7 @@ fn index_of(code: &Bytecode, findex: RefFun) -> Result<usize> {
 }
 
 /// Callee and argument registers of a direct call.
-fn call_of(op: &Opcode) -> Option<(RefFun, Vec<Reg>)> {
+pub(crate) fn call_of(op: &Opcode) -> Option<(RefFun, Vec<Reg>)> {
     Some(match op {
         Opcode::Call0 { fun, .. } => (*fun, vec![]),
         Opcode::Call1 { fun, arg0, .. } => (*fun, vec![*arg0]),
@@ -147,14 +147,14 @@ fn call_of(op: &Opcode) -> Option<(RefFun, Vec<Reg>)> {
     })
 }
 
-fn calls(f: &Function, fun: RefFun) -> bool {
+pub(crate) fn calls(f: &Function, fun: RefFun) -> bool {
     f.ops
         .iter()
         .any(|op| call_of(op).is_some_and(|(g, _)| g == fun))
 }
 
 /// The closure function that `f` (at `fi`) passes to its only call of `callee`.
-fn closure_passed_to(code: &Bytecode, fi: usize, callee: RefFun) -> Result<usize> {
+pub(crate) fn closure_passed_to(code: &Bytecode, fi: usize, callee: RefFun) -> Result<usize> {
     let f = &code.functions[fi];
     let mut sites = f.ops.iter().enumerate().filter_map(|(j, op)| {
         call_of(op)

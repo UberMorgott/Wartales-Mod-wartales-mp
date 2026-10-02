@@ -36,8 +36,11 @@
 // ping_cell.rs), and so in battle the timeline's first diamond shows the acting player unit's portrait under its
 // player's nickname, with a co-op player status list (acting / done / waiting) above and left of it
 // (see timeline_hud.rs, timeline_list.rs), and so the customize screen logs its 2D
-// hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs).
+// hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs), and so the end of every activity /
+// mini-game (ruins puzzles, lock picking, fishing, gambling) and every refused co-op RPC is printed
+// for the shim log (see activity_diag.rs).
 
+mod activity_diag;
 mod asm;
 mod barrier;
 mod camp_talk;
@@ -94,6 +97,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     job_confirm::patch_job_confirm(&mut code);
     barrier::patch_barrier(&mut code);
     diag::patch_diag(&mut code);
+    activity_diag::patch_activity_diag(&mut code);
     slot4_diag::patch_slot4_diag(&mut code);
     follow::patch_follow(&mut code);
     skill_cost::patch_skill_cost(&mut code);

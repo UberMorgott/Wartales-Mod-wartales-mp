@@ -62,6 +62,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 ### Diagnostics
 
 - Writes game errors, co-op mode-switch steps, forced leaves and DLC warnings to **shim.log**, to help with bug reports. This only adds log lines.
+- Writes the end steps of every activity and mini-game (ruins puzzles, lock picking, fishing, dice) and every refused co-op network call to **shim.log**, to find where a mini-game freezes. This only adds log lines.
 ## Install
 
 1. Download **winmm.dll** from **Assets** in the newest release. You do not need the **Source code** archives.
