@@ -21,10 +21,12 @@
 //       waitForClients                  waitLocks.length, game.host.clients.length
 //       onClientReady (host, after the removal)   waitLocks / callbacks left
 //       onServerReady (client, after the removal) waitLocks / callbacks left
-//       doLeaveMode (client)            what waitAlive waits on: game.lockAlives,
+//       doLeaveMode / doEnterMode (client)  what waitAlive waits on: game.lockAlives,
 //                                       game.fading, fadeParams / onBreak set,
 //                                       waitGameAlive.length
 //       leave host faded / all clients ready / client alive / client faded
+//       enter client alive / enter client faded (a client that never answers an
+//       enter shows where it stopped: parked in waitAlive, or its fade never ended)
 //     Every read is guarded against null (prints -1 / false).
 // `Sys.println` ends in the libhl native `hl_sys_print`, which the winmm shim
 // copies into shim.log as "game:" lines, timestamped (buffered: the game thread
@@ -355,6 +357,31 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     {
         bail!("leave sequence closures do not match");
     }
+    // The client side of an enter: doEnterMode -> client alive (waitAlive) ->
+    // client faded (onClientReady).
+    let do_enter = m("doEnterMode__impl")?;
+    let enter_alive = closure_passed_to(code, do_enter, wait_alive)?;
+    let enter_faded = closure_passed_to(code, enter_alive, fade_in)?;
+    if !calls(f(enter_faded), on_client_ready) {
+        bail!("enter sequence closures do not match");
+    }
+    let alive_parts = || {
+        vec![
+            game_bool(" lockAlives=", lock_alives),
+            game_bool(" fading=", fading),
+            Part {
+                label: " fadeParams=",
+                path: vec![(game_f, game_t), (fade_params, fp_t)],
+                leaf: Leaf::Set,
+            },
+            Part {
+                label: " onBreak=",
+                path: vec![(game_f, game_t), (fade_params, fp_t)],
+                leaf: Leaf::FieldSet(on_break, on_break_t),
+            },
+            arr_len(" pending=", alive_q),
+        ]
+    };
 
     let tag_only = |fi: usize, tag: &'static str| Probe {
         fi,
@@ -404,26 +431,20 @@ fn plan(code: &Bytecode) -> Result<Plan> {
             fi: do_leave,
             at: 0,
             tag: "mp: doLeaveMode",
-            parts: vec![
-                game_bool(" lockAlives=", lock_alives),
-                game_bool(" fading=", fading),
-                Part {
-                    label: " fadeParams=",
-                    path: vec![(game_f, game_t), (fade_params, fp_t)],
-                    leaf: Leaf::Set,
-                },
-                Part {
-                    label: " onBreak=",
-                    path: vec![(game_f, game_t), (fade_params, fp_t)],
-                    leaf: Leaf::FieldSet(on_break, on_break_t),
-                },
-                arr_len(" pending=", alive_q),
-            ],
+            parts: alive_parts(),
+        },
+        Probe {
+            fi: do_enter,
+            at: 0,
+            tag: "mp: doEnterMode",
+            parts: alive_parts(),
         },
         tag_only(host_faded, "mp: leave host faded"),
         tag_only(all_ready, "mp: leave all clients ready"),
         tag_only(client_alive, "mp: leave client alive"),
         tag_only(client_faded, "mp: leave client faded"),
+        tag_only(enter_alive, "mp: enter client alive"),
+        tag_only(enter_faded, "mp: enter client faded"),
     ];
     for p in &probes {
         let g = f(p.fi);

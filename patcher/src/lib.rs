@@ -25,6 +25,7 @@
 // wartales-mp's "mod files differ from the host" text (see mod_version.rs), and so a co-op
 // leave from a place is never blocked by another player's business (see force_leave.rs), and so a
 // player inspecting an NPC no longer stops the others talking to another NPC (see npc_talk.rs), and
+// so a camp talk from the reserve list or a portrait waits until no player is busy (see camp_talk.rs), and
 // so a co-op mode switch never waits forever for a client that left or stopped answering (see
 // barrier.rs), and so an exception in a game network handler is logged instead of ending
 // the co-op session (see net_guard.rs), and so a
@@ -35,6 +36,7 @@
 
 mod asm;
 mod barrier;
+mod camp_talk;
 mod career_plan;
 mod censer_tip;
 mod chest_buttons;
@@ -80,6 +82,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     coop_gates::patch_coop_gates(&mut code);
     force_leave::patch_force_leave(&mut code);
     npc_talk::patch_npc_talk(&mut code);
+    camp_talk::patch_camp_talk(&mut code);
     hold_speed::patch_hold_speed(&mut code);
     job_xp::patch_job_xp(&mut code);
     job_confirm::patch_job_confirm(&mut code);

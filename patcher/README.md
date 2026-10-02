@@ -138,9 +138,9 @@ client refusing a mode it is not in) is printed once it passes the game's own
 online error cap and repeat check (`lastERROR`), and the co-op mode-switch barrier prints its steps (`mp:
 syncLeaveMode` / `syncEnterMode lockSync= waitLocks=`, `waitForClients
 waitLocks= clients=`, `onClientReady` / `onServerReady left= callbacks=`,
-`doLeaveMode lockAlives= fading= fadeParams= onBreak= pending=` (what
+`doLeaveMode` / `doEnterMode lockAlives= fading= fadeParams= onBreak= pending=` (what
 `waitAlive` waits on), `leave host faded`, `leave all clients ready`, `leave
-client alive`, `leave client faded`); every read is null-guarded. The
+client alive`, `leave client faded`, `enter client alive`, `enter client faded`); every read is null-guarded. The
 shim copies the game's stdout (`hl_sys_print`) into `shim.log` as `game:`
 lines (buffered in memory, written by a background thread every 500 ms), so a stuck black screen shows which step never came. Skipped (logged) on
 mismatch.
