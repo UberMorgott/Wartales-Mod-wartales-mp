@@ -29,12 +29,14 @@
 // barrier.rs), and so an exception in a game network handler is logged instead of ending
 // the co-op session (see net_guard.rs), and so a
 // tooltip's column of keyword helpers wraps into more columns instead of running off screen and
-// lists a shared helper once (see tip_overflow.rs), and so the customize screen logs its 2D
+// lists a shared helper once (see tip_overflow.rs), and so a censer's item tooltip without a unit no
+// longer throws every frame and stalls the inventory grid (see censer_tip.rs), and so the customize screen logs its 2D
 // hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs).
 
 mod asm;
 mod barrier;
 mod career_plan;
+mod censer_tip;
 mod chest_buttons;
 mod coop_gates;
 mod customize_slots;
@@ -96,6 +98,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     mod_version::patch_mod_version(&mut code);
     net_guard::patch_net_guard(&mut code);
     tip_overflow::patch_tip_overflow(&mut code);
+    censer_tip::patch_censer_tip(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

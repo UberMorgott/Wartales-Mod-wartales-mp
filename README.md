@@ -45,6 +45,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Hold-to-confirm rings fill three times faster.
 - Skill tooltips show the Valor point cost outside battle for every unit, including the new-game screens.
 - Tooltip keyword panels ("Poison", "Vigilance", ...) wrap into columns instead of running off the screen, and are not shown twice.
+- A censer that grants Purge (Remastered) shows its tooltip in chests, shops and other inventories again; before, its tooltip failed every frame, which froze the moved item between cells and dropped the FPS.
 - Starting troops larger than the new-game customize screen (it has five spots): instead of crashing ("Missing prefab Camera06"), the extra animals are left off the screen and belong to the host; humans always get a spot. Troops of five or fewer look exactly as before.
 
 ### Start-screen tooltips
