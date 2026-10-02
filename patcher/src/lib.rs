@@ -23,7 +23,7 @@
 // ingredient rows) also draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
 // loot screen has its Take all button in co-op too (see loot_all.rs), and so the join gate shows
 // wartales-mp's "mod files differ from the host" text (see mod_version.rs), and so a co-op
-// leave from a place is never blocked by another player's business (see force_leave.rs), and so a
+// leave from a place or the camp is never blocked by another player's business (see force_leave.rs), and so a
 // player inspecting an NPC no longer stops the others talking to another NPC (see npc_talk.rs), and
 // so a camp talk from the reserve list or a portrait waits until no player is busy (see camp_talk.rs), and
 // so a co-op mode switch never waits forever for a client that left or stopped answering (see

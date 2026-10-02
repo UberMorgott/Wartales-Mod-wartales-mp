@@ -110,7 +110,25 @@ and a running mode switch, then leaves through the vanilla `syncLeaveMode`.
 shim.log shows `mp: tryClose refused: <why>`, `mp: leave pending: <why|go>`,
 `mp: tavern leave pending: <why|go>` (on change, with the busy player's
 `lockedWith`), `mp: leave closes <window>` and `mp: leave ends dialog`.
-Skipped (logged) on mismatch; the tavern part alone when only it mismatches.
+The camp (`CampMode` -> world map): `Controller.toggleCamp__impl` (Camp
+button / Escape, RPC to the host) no longer drops a request that
+`GameUI.toggleCamp` would refuse on a busy player (`anyPlayerLocked(true)`),
+fade, alive lock, a running mode switch or a modal window on the host: it
+stays pending (host global), and `CampMode.update` retries it every frame
+until the vanilla body runs (a running rest still refuses, as before). While
+a player is locked, the host calls, at most once a second, the vanilla
+host-to-all RPC `Tool.closeActionWindow` for every player `lockedWith` a camp
+tool; its `__impl` (otherwise only reached from `GridData.removeTool__impl`)
+now, in co-op, closes top-down that player's lock-holding windows with the
+same guards (the camp tool windows `StrategyTable`, `CampChest`,
+`BannerCamp`, `ConverterTool`, `LecternTool`, `Lute`, `Stake` join the list:
+no modal window over them; a `Craft` only before its activity starts), each
+through its own `close()` -> `onClose`, which clears `lockedWith`. Strategy
+toggles apply on click, so closing the strategy table leaves nothing half
+done. Camp dialogs are shared DialogOut modes, not camp windows. shim.log
+shows `mp: camp leave pending: <why|go>` and `mp: camp leave closes <window>`.
+Skipped (logged) on mismatch; the tavern part or the camp part alone when only
+it mismatches.
 **Hold speed** (`src/hold_speed.rs`): `BaseUI.holdAction`, the one function
 behind every press-and-hold ring, divides its duration by 3 at entry
 (NPC/entity trigger 0.45 s -> 0.15 s, gamepad place exit and skill-bar arrow

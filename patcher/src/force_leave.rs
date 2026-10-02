@@ -86,13 +86,52 @@
 //      stale flag from a save or an earlier visit is cleared) every machine
 //      closes its own lock-holding window as F2; the host re-checks tlWhy each
 //      frame and calls askLeave__impl once nothing refuses.
+//   C  Leaving the camp (world.camp.CampMode -> world map). Vanilla, the Camp
+//      button / Escape sends Controller.toggleCamp (RPC) and the host's
+//      toggleCamp__impl -> GameUI.toggleCamp returns silently while any player is
+//      lockedWith something (`anyPlayerLocked(true)`: a camp tool window opened by
+//      CampEntryEntity.onAction such as the commander's StrategyTable, the camp
+//      chest, the banner editor, a craft), a fade / alive lock / mode switch runs,
+//      or the host has a modal window open; nothing retries. Camp dialogs are
+//      DialogOut place modes, shared by every player (not a camp window).
+//      Controller.toggleCamp__impl gets `if (cpAsk(this)) return;` in front:
+//        cpAsk (host, multi, game.mode is a CampMode): why = cpWhy(game, mode):
+//        a rest running -> 0 (the vanilla body refuses, as before); a player
+//        lockedWith; fade; alive lock; mode-switch barrier; a modal window in
+//        the host's GameUI.getAllWindows (the vanilla canLeaveCamp test). 0 ->
+//        clear pending, the vanilla body runs (confession, syncLeaveMode: every
+//        machine switches together through the normal barrier); else pending
+//        (global = this CampMode), log on change, and for a lock call
+//        cpAsks(game), at most every ASK_EVERY s: for every player lockedWith an
+//        st.item.Tool (every camp tool lock), `tool.closeActionWindow()`. That
+//        is a vanilla Tool RPC (host -> every machine); the game calls it only
+//        from GridData.removeTool__impl (a tool taken off the camp grid).
+//      Tool.closeActionWindow__impl gets `if (cpClose(this)) return;`: in
+//      multi, on the machine whose `me.lockedWith` is this tool, it closes
+//      top-down (at most 4, while still locked with it) the lock-holding
+//      windows flClosable finds (LOCK_WINDOWS + the camp tool windows of
+//      CAMP_WINDOWS, same guards: no modal window over it, a Craft only before
+//      its activity starts), never during a fade, with the class's own close()
+//      (Window.onRemove -> the onClose onAction installed, which clears
+//      lockedWith; what the window's X / Escape does). Vanilla's body (close
+//      whatever window is current, unguarded) runs in single player only, so
+//      in co-op a removed tool also leaves a started craft or a window under a
+//      modal confirm open.
+//      StrategyTable applies each strategy toggle at once (Simulation
+//      add/removeStrategy), so closing it leaves no half-made selection.
+//      CampMode.update, host, `cpUpdate(mode)`: a pending request of another
+//      mode is dropped; for this mode it calls toggleCamp__impl again every
+//      frame (cpAsk re-checks), so the leave happens once nothing refuses.
+//      Started crafts / activities (their window is not closable) and a host
+//      modal window keep the wait; the shared dialog is a mode of its own.
 //   F3 Diagnostics (shim.log "game: mp: ..." lines): tryClose prints the reason
 //      it refuses ("mp: tryClose refused: <why>"), the pending leave prints each
 //      change of what it waits on ("mp: leave pending: <why|go>", "mp: tavern
 //      leave pending: <why|go>"), every window it closes ("mp: leave closes
 //      <type>") and every dialog it ends ("mp: leave ends dialog");
 //      PlaceView.leave prints a refusal while the game is paused (at most every
-//      5 s).
+//      5 s). The camp leave prints "mp: camp leave pending: <why|go>" (on
+//      change) and "mp: camp leave closes <type>" on the machine that closes.
 //
 // Coordination: the G1 repeat guard still runs the Leave button once per click
 // burst and drops clicks while the mode-switch barrier runs; the pending leave
@@ -100,7 +139,8 @@
 // pass is world-map only.
 //
 // Validated before editing; a mismatch skips the pass (logged). The tavern part
-// (T) is validated on its own and skipped alone on a mismatch.
+// (T) and the camp part (C) are validated on their own and skipped alone on a
+// mismatch.
 
 use super::*;
 use crate::asm::{push_fn, Asm, Regs};
@@ -113,11 +153,15 @@ const CLOSES: &str = "mp: leave closes ";
 const PAUSED: &str = "mp: leave refused: paused";
 const ENDS: &str = "mp: leave ends dialog";
 const TPENDING: &str = "mp: tavern leave pending: ";
+const CPENDING: &str = "mp: camp leave pending: ";
+const CCLOSES: &str = "mp: camp leave closes ";
 /// Seconds between two "paused" refusal lines.
 const PAUSED_EVERY: f64 = 5.0;
+/// Seconds between two rounds of camp close requests (Tool.closeActionWindow RPCs).
+const ASK_EVERY: f64 = 1.0;
 
-/// Reason codes of `flWhy` / `flDialog` / `tlWhy` (0 = nothing refuses) and their log text.
-const REASONS: [&str; 14] = [
+/// Reason codes of `flWhy` / `flDialog` / `tlWhy` / `cpWhy` (0 = nothing refuses) and their log text.
+const REASONS: [&str; 15] = [
     "go",
     "lockLeave",
     "player busy",
@@ -132,6 +176,7 @@ const REASONS: [&str; 14] = [
     "dialog can't be left",
     "dialog busy",
     "alive lock",
+    "window open",
 ];
 const R_LOCKED: usize = 2;
 const R_FADE: usize = 5;
@@ -141,6 +186,7 @@ const R_PAUSED: usize = 10;
 const R_NO_LEAVE: usize = 11;
 const R_DLG_BUSY: usize = 12;
 const R_ALIVE: usize = 13;
+const R_WINDOW: usize = 14;
 
 /// Window classes whose `close()` is the vanilla cancel of a `lockedWith`, and the
 /// extra test before the pending leave closes one: 0 none; 1 no modal window is
@@ -156,9 +202,27 @@ const LOCK_WINDOWS: [(&str, i32); 8] = [
     ("ui.win.Alter", 2),
     ("ui.win.Dismantle", 1),
 ];
-const SKIP: [[&str; 8]; 2] = [
-    ["s00", "s01", "s02", "s03", "s04", "s05", "s06", "s07"],
-    ["s10", "s11", "s12", "s13", "s14", "s15", "s16", "s17"],
+/// Camp tool windows (Tool.getToolAction), each opened by CampEntryEntity.onAction
+/// with `me.lockedWith = tool` and an onClose that clears it; guard 1. Added to
+/// the LOCK_WINDOWS list only when the camp part is planned.
+const CAMP_WINDOWS: [&str; 7] = [
+    "ui.win.StrategyTable",
+    "ui.win.CampChest",
+    "ui.win.BannerCamp",
+    "ui.win.ConverterTool",
+    "ui.win.LecternTool",
+    "ui.win.Lute",
+    "ui.win.Stake",
+];
+const SKIP: [[&str; 16]; 2] = [
+    [
+        "s00", "s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s0a", "s0b", "s0c",
+        "s0d", "s0e", "s0f",
+    ],
+    [
+        "s10", "s11", "s12", "s13", "s14", "s15", "s16", "s17", "s18", "s19", "s1a", "s1b", "s1c",
+        "s1d", "s1e", "s1f",
+    ],
 ];
 
 type F = (RefField, RefType);
@@ -211,6 +275,28 @@ struct Tav {
     ask_fi: usize,
     close_fi: usize,
     upd_fi: usize,
+    dbg_file: usize,
+}
+
+/// The camp part.
+struct Camp {
+    cm_t: RefType,
+    cm_cls: (RefGlobal, RefType),
+    cm_game: RefField,
+    cm_rest: F,
+    tool_t: RefType,
+    tool_cls: (RefGlobal, RefType),
+    tool_game: RefField,
+    /// Tool.closeActionWindow, the RPC wrapper.
+    close_rpc: RefFun,
+    ctrl_game: RefField,
+    is_locked: RefFun,
+    all_windows: RefFun,
+    /// Controller.toggleCamp__impl (the retry calls it).
+    toggle: RefFun,
+    ask_fi: usize,
+    upd_fi: usize,
+    close_fi: usize,
     dbg_file: usize,
 }
 
@@ -285,6 +371,7 @@ struct Plan {
     content_at: usize,
     dbg_file: usize,
     tav: Option<Tav>,
+    camp: Option<Camp>,
 }
 
 fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
@@ -739,12 +826,203 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         content_fi,
         content_at,
         tav: None,
+        camp: None,
     };
     match plan_tavern(code, &p, place_t) {
         Ok(tv) => p.tav = Some(tv),
         Err(e) => eprintln!("force leave: owned tavern part skipped: {e:#}"),
     }
+    match plan_camp(code, &p) {
+        Ok((c, locks)) => {
+            p.locks.extend(locks);
+            p.camp = Some(c);
+        }
+        Err(e) => eprintln!("force leave: camp part skipped: {e:#}"),
+    }
     Ok(p)
+}
+
+/// Functions that call `want` directly.
+fn callers(code: &Bytecode, want: RefFun) -> Vec<RefFun> {
+    code.functions
+        .iter()
+        .filter(|f| {
+            f.ops.iter().any(|op| match op {
+                Opcode::Call0 { fun, .. }
+                | Opcode::Call1 { fun, .. }
+                | Opcode::Call2 { fun, .. }
+                | Opcode::Call3 { fun, .. }
+                | Opcode::Call4 { fun, .. }
+                | Opcode::CallN { fun, .. } => *fun == want,
+                _ => false,
+            })
+        })
+        .map(|f| f.findex)
+        .collect()
+}
+
+/// The camp sites: Controller.toggleCamp__impl, GameUI.toggleCamp (checked
+/// only), CampMode.update, Tool.closeActionWindow(__impl), and the camp tool
+/// windows for flClosable.
+fn plan_camp(code: &Bytecode, p: &Plan) -> Result<(Camp, Vec<Lock>)> {
+    let t = &p.t;
+    let ctrl_t = p.g_ctrl.1;
+    let ui_t = p.g_ui.1;
+    let typed = |o: RefType, name: &str, want: RefType| -> Result<RefField> {
+        let (f, ft) = field(code, o, name)?;
+        if ft != want {
+            bail!("field {name} has an unexpected type");
+        }
+        Ok(f)
+    };
+    let m =
+        |o: RefType, name: &str, want_args: &[RefType], want_ret: RefType| -> Result<&Function> {
+            let f = method(code, o, name)?;
+            if sig(code, f.findex)? != (want_args.to_vec(), want_ret) {
+                bail!("unexpected {name} signature");
+            }
+            Ok(f)
+        };
+    let calls = |f: &Function, want: RefFun| {
+        f.ops.iter().position(|op| match op {
+            Opcode::Call0 { fun, .. }
+            | Opcode::Call1 { fun, .. }
+            | Opcode::Call2 { fun, .. }
+            | Opcode::Call3 { fun, .. }
+            | Opcode::Call4 { fun, .. }
+            | Opcode::CallN { fun, .. } => *fun == want,
+            _ => false,
+        })
+    };
+
+    let cm_t = obj_type(code, "world.camp.CampMode")?;
+    if !is_sub(code, cm_t, p.g_mode.1)? {
+        bail!("CampMode is not a GameMode");
+    }
+    let cm_cls = class_global(code, "world.camp.CampMode")?;
+    let cm_game = typed(cm_t, "game", p.game_t)?;
+    let cm_rest = field(code, cm_t, "rest")?;
+    if obj(code, cm_rest.1).is_err() && !matches!(code.types[cm_rest.1 .0], Type::Virtual { .. }) {
+        bail!("CampMode.rest is not an object");
+    }
+    let tool_t = obj_type(code, "st.item.Tool")?;
+    if !is_sub(code, tool_t, p.bp_locked.1)? {
+        bail!("st.item.Tool is not a lockedWith type");
+    }
+    let tool_cls = class_global(code, "st.item.Tool")?;
+    let tool_game = typed(tool_t, "game", p.game_t)?;
+
+    // Tool.closeActionWindow__impl: `if (game.me.lockedWith == this) { w =
+    // game.mode.getCurrentWindow(); if (w != null) w.close(); game.mode.setWindow(null); }`,
+    // reached only through its RPC wrapper / RPC dispatch, which nothing calls.
+    let imp = m(tool_t, "closeActionWindow__impl", &[tool_t], t.void)?;
+    let rpc = m(tool_t, "closeActionWindow", &[tool_t], t.void)?;
+    if calls(rpc, imp.findex).is_none() {
+        bail!("Tool.closeActionWindow does not call its __impl");
+    }
+    let reads_lock = imp.ops.iter().any(|op| {
+        matches!(op, Opcode::Field { obj, field, .. }
+            if *field == p.bp_locked.0 && imp.regs[obj.0 as usize] == p.g_me.1)
+    });
+    let tests_this = imp
+        .ops
+        .iter()
+        .any(|op| matches!(op, Opcode::JNotEq { a, b, .. } if *a == Reg(0) || *b == Reg(0)));
+    let closes = imp
+        .ops
+        .iter()
+        .any(|op| matches!(op, Opcode::CallMethod { field, .. } if *field == p.w_close));
+    if !reads_lock || !tests_this || !closes || !no_jump_to(imp, 0) {
+        bail!("Tool.closeActionWindow__impl has an unexpected shape");
+    }
+    let rpc_dispatch = proto(code, tool_t, "networkRPC")?;
+    let imp_callers = callers(code, imp.findex);
+    if imp_callers
+        .iter()
+        .any(|&f| f != rpc.findex && f != rpc_dispatch)
+    {
+        bail!("Tool.closeActionWindow__impl has unexpected callers: {imp_callers:?}");
+    }
+    // The game's only caller: GridData.removeTool__impl (a tool taken off the
+    // camp grid closes its user's window).
+    let grid_t = obj_type(code, "st.player.GridData")?;
+    let remove = method(code, grid_t, "removeTool__impl")?.findex;
+    let rpc_callers = callers(code, rpc.findex);
+    if rpc_callers != [remove] {
+        bail!("Tool.closeActionWindow has unexpected callers: {rpc_callers:?}");
+    }
+
+    // Controller.toggleCamp__impl: `if (isLocked() || waitLocks.length > 0)
+    // return; game.ui.toggleCamp();`
+    let ctrl_game = typed(ctrl_t, "game", p.game_t)?;
+    let is_locked = m(ctrl_t, "isLocked", &[ctrl_t], t.bool_)?.findex;
+    let ask = m(ctrl_t, "toggleCamp__impl", &[ctrl_t], t.void)?;
+    let gtc = m(ui_t, "toggleCamp", &[ui_t], t.void)?;
+    if calls(ask, is_locked).is_none() || calls(ask, gtc.findex).is_none() || !no_jump_to(ask, 0) {
+        bail!("Controller.toggleCamp__impl has an unexpected shape");
+    }
+    // GameUI.toggleCamp: the lock test, the CampMode test, the rest / modal
+    // window test (getAllWindows), then syncLeaveMode, in this order.
+    let all_windows = m(ui_t, "getAllWindows", &[ui_t], p.arr_t)?.findex;
+    let sync = method(code, ctrl_t, "syncLeaveMode")?.findex;
+    let order = [
+        calls(gtc, p.any_locked.0),
+        gtc.ops
+            .iter()
+            .position(|op| matches!(op, Opcode::GetGlobal { global, .. } if *global == cm_cls.0)),
+        gtc.ops.iter().position(
+            |op| matches!(op, Opcode::Field { obj, field, .. } if *field == cm_rest.0 && gtc.regs[obj.0 as usize] == cm_t),
+        ),
+        calls(gtc, all_windows),
+        calls(gtc, sync),
+    ];
+    if order.iter().any(Option::is_none) || !order.windows(2).all(|w| w[0] < w[1]) {
+        bail!("GameUI.toggleCamp: tests not found in the expected order: {order:?}");
+    }
+    let upd = m(cm_t, "update", &[cm_t, t.f64_], t.void)?;
+    if !no_jump_to(upd, 0) {
+        bail!("CampMode.update: a jump targets op 0");
+    }
+
+    let mut locks = vec![];
+    for name in CAMP_WINDOWS {
+        let ct = obj_type(code, name)?;
+        if !is_sub(code, ct, p.win_t)? {
+            bail!("{name} is not a ui.Window");
+        }
+        let (g, gt) = class_global(code, name)?;
+        locks.push(Lock {
+            g,
+            gt,
+            ct,
+            guard: 1,
+            act: None,
+        });
+    }
+    if p.locks.len() + locks.len() > SKIP[0].len() {
+        bail!("too many lock window classes");
+    }
+    Ok((
+        Camp {
+            cm_t,
+            cm_cls,
+            cm_game,
+            cm_rest,
+            tool_t,
+            tool_cls,
+            tool_game,
+            close_rpc: rpc.findex,
+            ctrl_game,
+            is_locked,
+            all_windows,
+            toggle: ask.findex,
+            ask_fi: fun_index(code, ask.findex)?,
+            upd_fi: fun_index(code, upd.findex)?,
+            close_fi: fun_index(code, imp.findex)?,
+            dbg_file: debug_file(code, "src/world/camp/CampMode.hx")?,
+        },
+        locks,
+    ))
 }
 
 /// Name of field `f` of object type `t`, if `t` is an object.
@@ -1266,8 +1544,8 @@ fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     )
 }
 
-const TEXT_LABELS: [&str; 14] = [
-    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10", "t11", "t12", "t13",
+const TEXT_LABELS: [&str; 15] = [
+    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10", "t11", "t12", "t13", "t14",
 ];
 
 /// `flLog(game, prefix, why)`: println(prefix + text(why)); for "player busy"
@@ -3063,6 +3341,750 @@ fn add_tl_close(code: &mut Bytecode, p: &Plan, tv: &Tav) -> Result<RefFun> {
     push_fn(code, vec![ctrl_t], t.bool_, r.0, a.finish(), tv.dbg_file)
 }
 
+// ---------- camp ----------
+
+/// Host globals of the camp part.
+struct CGlobals {
+    /// The CampMode whose leave is pending (null = none).
+    mode: RefGlobal,
+    /// Last logged camp pending reason + 1 (0 = none yet).
+    last: RefGlobal,
+    /// sys_time of the last round of close requests.
+    ask_at: RefGlobal,
+}
+
+/// `cpWhy(game, camp) -> I32`: 0 when the vanilla body should run (nothing
+/// refuses, or a rest runs, which the vanilla body refuses on its own);
+/// otherwise what the camp leave waits on.
+fn add_cp_why(code: &mut Bytecode, p: &Plan, c: &Camp, dyn_t: RefType) -> Result<RefFun> {
+    let ints = reason_ints(code);
+    let inone = int_const(code, p.modal_none);
+    let t = &p.t;
+    let mut r = Regs(vec![p.game_t, c.cm_t]);
+    let (rest, b, rf, k, ctrl, wl, n, zero, none) = (
+        r.r(c.cm_rest.1),
+        r.r(t.bool_),
+        r.r(p.any_locked.1),
+        r.r(t.i32_),
+        r.r(p.g_ctrl.1),
+        r.r(p.arr_t),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+    );
+    let (ui, lst, i, raw, d, w, md, mi) = (
+        r.r(p.g_ui.1),
+        r.r(p.arr_t),
+        r.r(t.i32_),
+        r.r(p.a_raw.1),
+        r.r(dyn_t),
+        r.r(p.win_t),
+        r.r(p.w_modal.1),
+        r.r(t.i32_),
+    );
+    let mut a = Asm::new();
+    let ret = |a: &mut Asm, kk: usize| {
+        a.op(Opcode::Int {
+            dst: k,
+            ptr: ints[kk],
+        });
+        a.op(Opcode::Ret { ret: k });
+    };
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
+    a.op(Opcode::Int {
+        dst: none,
+        ptr: inone,
+    });
+    // a rest runs: the vanilla body refuses (never queue a leave behind a rest)
+    a.op(Opcode::Field {
+        dst: rest,
+        obj: Reg(1),
+        field: c.cm_rest.0,
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: rest,
+            offset: 0,
+        },
+        "ok",
+    );
+    // the vanilla lock test: anyPlayerLocked(true)
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ref { dst: rf, src: b });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.any_locked.0,
+        arg0: Reg(0),
+        arg1: rf,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "fade");
+    ret(&mut a, R_LOCKED);
+    a.label("fade");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.in_fade,
+        arg0: Reg(0),
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "alive");
+    ret(&mut a, R_FADE);
+    // toggleCamp__impl's own test: ctrl.isLocked() || waitLocks.length > 0
+    a.label("alive");
+    a.op(Opcode::Field {
+        dst: ctrl,
+        obj: Reg(0),
+        field: p.g_ctrl.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: ctrl,
+            offset: 0,
+        },
+        "win",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: c.is_locked,
+        arg0: ctrl,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "sync");
+    ret(&mut a, R_ALIVE);
+    a.label("sync");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: ctrl,
+        field: p.c_lock_sync,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "busy");
+    a.op(Opcode::Field {
+        dst: wl,
+        obj: ctrl,
+        field: p.c_wait_locks.0,
+    });
+    a.jmp(Opcode::JNull { reg: wl, offset: 0 }, "win");
+    a.op(Opcode::Field {
+        dst: n,
+        obj: wl,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSLte {
+            a: n,
+            b: zero,
+            offset: 0,
+        },
+        "win",
+    );
+    a.label("busy");
+    ret(&mut a, R_SYNC);
+    // GameUI.toggleCamp's canLeaveCamp: no modal window in ui.getAllWindows()
+    a.label("win");
+    a.op(Opcode::Field {
+        dst: ui,
+        obj: Reg(0),
+        field: p.g_ui.0,
+    });
+    a.jmp(Opcode::JNull { reg: ui, offset: 0 }, "ok");
+    a.op(Opcode::Call1 {
+        dst: lst,
+        fun: c.all_windows,
+        arg0: ui,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: lst,
+            offset: 0,
+        },
+        "ok",
+    );
+    top_down(&mut a, p, lst, i, zero, raw, d, w, "loop", "ok");
+    modal_test(&mut a, p, w, md, mi, none, "loop");
+    ret(&mut a, R_WINDOW);
+    a.label("ok");
+    ret(&mut a, 0);
+    push_fn(
+        code,
+        vec![p.game_t, c.cm_t],
+        t.i32_,
+        r.0,
+        a.finish(),
+        c.dbg_file,
+    )
+}
+
+/// `cpAsks(game)` (host): at most every ASK_EVERY s, `tool.closeActionWindow()`
+/// for every player lockedWith an st.item.Tool.
+fn add_cp_asks(
+    code: &mut Bytecode,
+    p: &Plan,
+    c: &Camp,
+    g: &CGlobals,
+    dyn_t: RefType,
+) -> Result<RefFun> {
+    let every = float_const(code, ASK_EVERY);
+    let i0 = int_const(code, 0);
+    let t = &p.t;
+    let bp_t = p.g_me.1;
+    let mut r = Regs(vec![p.game_t]);
+    let (now, last, diff, lim, st, sp, spa, all) = (
+        r.r(t.f64_),
+        r.r(t.f64_),
+        r.r(t.f64_),
+        r.r(t.f64_),
+        r.r(p.g_state.1),
+        r.r(p.st_players.1),
+        r.r(p.sp_array.1),
+        r.r(p.arr_t),
+    );
+    let (n, i, raw, d, pl, lw, cr, b, tool, v) = (
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(p.a_raw.1),
+        r.r(dyn_t),
+        r.r(bp_t),
+        r.r(p.bp_locked.1),
+        r.r(c.tool_cls.1),
+        r.r(t.bool_),
+        r.r(c.tool_t),
+        r.r(t.void),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Call0 {
+        dst: now,
+        fun: p.sys_time,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: last,
+        global: g.ask_at,
+    });
+    a.op(Opcode::Sub {
+        dst: diff,
+        a: now,
+        b: last,
+    });
+    a.op(Opcode::Float {
+        dst: lim,
+        ptr: every,
+    });
+    a.jmp(
+        Opcode::JSLt {
+            a: diff,
+            b: lim,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.ask_at,
+        src: now,
+    });
+    a.op(Opcode::Field {
+        dst: st,
+        obj: Reg(0),
+        field: p.g_state.0,
+    });
+    a.jmp(Opcode::JNull { reg: st, offset: 0 }, "end");
+    a.op(Opcode::Field {
+        dst: sp,
+        obj: st,
+        field: p.st_players.0,
+    });
+    a.jmp(Opcode::JNull { reg: sp, offset: 0 }, "end");
+    a.op(Opcode::Field {
+        dst: spa,
+        obj: sp,
+        field: p.sp_array.0,
+    });
+    a.op(Opcode::SafeCast { dst: all, src: spa });
+    a.jmp(
+        Opcode::JNull {
+            reg: all,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Int { dst: i, ptr: i0 });
+    a.loop_head("loop");
+    a.op(Opcode::Field {
+        dst: n,
+        obj: all,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: n,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: all,
+        field: p.a_raw.0,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: i,
+    });
+    a.op(Opcode::Incr { dst: i });
+    a.op(Opcode::UnsafeCast { dst: pl, src: d });
+    a.jmp(Opcode::JNull { reg: pl, offset: 0 }, "loop");
+    a.op(Opcode::Field {
+        dst: lw,
+        obj: pl,
+        field: p.bp_locked.0,
+    });
+    a.jmp(Opcode::JNull { reg: lw, offset: 0 }, "loop");
+    a.op(Opcode::GetGlobal {
+        dst: cr,
+        global: c.tool_cls.0,
+    });
+    // A State goes to BaseType.check's Dyn argument as is.
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: cr,
+        arg1: lw,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "loop");
+    a.op(Opcode::UnsafeCast { dst: tool, src: lw });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: c.close_rpc,
+        arg0: tool,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "loop");
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.game_t], t.void, r.0, a.finish(), c.dbg_file)
+}
+
+struct CFns {
+    log: RefFun,
+    why: RefFun,
+    asks: RefFun,
+}
+
+/// `cpAsk(ctrl) -> Bool`, in front of Controller.toggleCamp__impl: true = the
+/// request is pending (the impl returns), false = the vanilla body runs.
+fn add_cp_ask(code: &mut Bytecode, p: &Plan, c: &Camp, g: &CGlobals, f: &CFns) -> Result<RefFun> {
+    let ints = reason_ints(code);
+    let i1 = int_const(code, 1);
+    let cpending = str_global(code, p.t.str_, CPENDING);
+    let t = &p.t;
+    let ctrl_t = p.g_ctrl.1;
+    let mut r = Regs(vec![ctrl_t]);
+    let (game, b, md, cr, cm, k, k1, last, zero, one, s_r, v) = (
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(p.g_mode.1),
+        r.r(c.cm_cls.1),
+        r.r(c.cm_t),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(t.str_),
+        r.r(t.void),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: ints[0],
+    });
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: c.ctrl_game,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "vanilla",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_multi,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: game,
+        field: p.g_auth,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::Field {
+        dst: md,
+        obj: game,
+        field: p.g_mode.0,
+    });
+    a.jmp(Opcode::JNull { reg: md, offset: 0 }, "vanilla");
+    a.op(Opcode::GetGlobal {
+        dst: cr,
+        global: c.cm_cls.0,
+    });
+    // A GameMode goes to BaseType.check's Dyn argument as is.
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: cr,
+        arg1: md,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::UnsafeCast { dst: cm, src: md });
+    a.op(Opcode::Call2 {
+        dst: k,
+        fun: f.why,
+        arg0: game,
+        arg1: cm,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: k,
+            b: zero,
+            offset: 0,
+        },
+        "pend",
+    );
+    // Nothing refuses: no request pending any more; the vanilla body runs now.
+    a.op(Opcode::Null { dst: md });
+    a.op(Opcode::SetGlobal {
+        global: g.mode,
+        src: md,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: last,
+        global: g.last,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: last,
+            b: zero,
+            offset: 0,
+        },
+        "vanilla",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.last,
+        src: zero,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s_r,
+        global: cpending,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: f.log,
+        arg0: game,
+        arg1: s_r,
+        arg2: k,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "vanilla");
+    // Pending: remember the mode, ask the busy players' machines to close, log changes.
+    a.label("pend");
+    a.op(Opcode::SetGlobal {
+        global: g.mode,
+        src: md,
+    });
+    a.op(Opcode::Int {
+        dst: k1,
+        ptr: ints[R_LOCKED],
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: k,
+            b: k1,
+            offset: 0,
+        },
+        "log",
+    );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: f.asks,
+        arg0: game,
+    });
+    a.label("log");
+    a.op(Opcode::Int { dst: one, ptr: i1 });
+    a.op(Opcode::Add {
+        dst: k1,
+        a: k,
+        b: one,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: last,
+        global: g.last,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: k1,
+            b: last,
+            offset: 0,
+        },
+        "handled",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.last,
+        src: k1,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s_r,
+        global: cpending,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: f.log,
+        arg0: game,
+        arg1: s_r,
+        arg2: k,
+    });
+    a.label("handled");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("vanilla");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![ctrl_t], t.bool_, r.0, a.finish(), c.dbg_file)
+}
+
+/// `cpUpdate(camp)`, at the top of CampMode.update (host): retry a pending
+/// leave of this mode through toggleCamp__impl; drop one of another mode.
+fn add_cp_update(code: &mut Bytecode, p: &Plan, c: &Camp, g: &CGlobals) -> Result<RefFun> {
+    let i0 = int_const(code, 0);
+    let t = &p.t;
+    let mut r = Regs(vec![c.cm_t]);
+    let (game, b, pend, zero, ctrl, v) = (
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(p.g_mode.1),
+        r.r(t.i32_),
+        r.r(p.g_ctrl.1),
+        r.r(t.void),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: c.cm_game,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_multi,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "end");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: game,
+        field: p.g_auth,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "end");
+    a.op(Opcode::GetGlobal {
+        dst: pend,
+        global: g.mode,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: pend,
+            offset: 0,
+        },
+        "end",
+    );
+    a.jmp(
+        Opcode::JEq {
+            a: pend,
+            b: Reg(0),
+            offset: 0,
+        },
+        "mine",
+    );
+    // a request of an earlier camp: forget it
+    a.op(Opcode::Null { dst: pend });
+    a.op(Opcode::SetGlobal {
+        global: g.mode,
+        src: pend,
+    });
+    a.op(Opcode::Int { dst: zero, ptr: i0 });
+    a.op(Opcode::SetGlobal {
+        global: g.last,
+        src: zero,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "end");
+    a.label("mine");
+    a.op(Opcode::Field {
+        dst: ctrl,
+        obj: game,
+        field: p.g_ctrl.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: ctrl,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: c.toggle,
+        arg0: ctrl,
+    });
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![c.cm_t], t.void, r.0, a.finish(), c.dbg_file)
+}
+
+/// `cpClose(tool) -> Bool`, in front of Tool.closeActionWindow__impl: in multi,
+/// on the machine locked with this tool, close the top closable lock window
+/// (flClosable) and return true; false = the vanilla body (single player).
+fn add_cp_close(code: &mut Bytecode, p: &Plan, c: &Camp, closable: RefFun) -> Result<RefFun> {
+    let ccloses = str_global(code, p.t.str_, CCLOSES);
+    let t = &p.t;
+    let i0 = int_const(code, 0);
+    let imax = int_const(code, 4);
+    let mut r = Regs(vec![c.tool_t]);
+    let (game, b, me, lw, w, name, s_r, v) = (
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(p.g_me.1),
+        r.r(p.bp_locked.1),
+        r.r(p.win_t),
+        r.r(t.str_),
+        r.r(t.str_),
+        r.r(t.void),
+    );
+    let (cnt, lim, last_w) = (r.r(t.i32_), r.r(t.i32_), r.r(p.win_t));
+    let mut a = Asm::new();
+    a.op(Opcode::GetThis {
+        dst: game,
+        field: c.tool_game,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "vanilla",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_multi,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::Field {
+        dst: me,
+        obj: game,
+        field: p.g_me.0,
+    });
+    a.jmp(Opcode::JNull { reg: me, offset: 0 }, "done");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.in_fade,
+        arg0: game,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "done");
+    // Close top-down (a UnitInfo over the tool window first), at most 4 windows,
+    // while this machine is still locked with this tool.
+    a.op(Opcode::Int { dst: cnt, ptr: i0 });
+    a.op(Opcode::Null { dst: last_w });
+    a.loop_head("loop");
+    a.op(Opcode::Int {
+        dst: lim,
+        ptr: imax,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: cnt,
+            b: lim,
+            offset: 0,
+        },
+        "done",
+    );
+    a.op(Opcode::Incr { dst: cnt });
+    a.op(Opcode::Field {
+        dst: lw,
+        obj: me,
+        field: p.bp_locked.0,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: lw,
+            b: Reg(0),
+            offset: 0,
+        },
+        "done",
+    );
+    a.op(Opcode::Call1 {
+        dst: w,
+        fun: closable,
+        arg0: game,
+    });
+    a.jmp(Opcode::JNull { reg: w, offset: 0 }, "done");
+    a.jmp(
+        Opcode::JEq {
+            a: w,
+            b: last_w,
+            offset: 0,
+        },
+        "done",
+    );
+    a.op(Opcode::Mov {
+        dst: last_w,
+        src: w,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s_r,
+        global: ccloses,
+    });
+    a.op(Opcode::Field {
+        dst: name,
+        obj: w,
+        field: p.w_name.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: s_r,
+        fun: p.str_add,
+        arg0: s_r,
+        arg1: name,
+    });
+    close_own_tail(&mut a, p, w, s_r, v);
+    a.jmp(Opcode::JAlways { offset: 0 }, "loop");
+    a.label("done");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("vanilla");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![c.tool_t], t.bool_, r.0, a.finish(), c.dbg_file)
+}
+
 /// New functions, in the order `apply` appends them.
 struct Added {
     why: RefFun,
@@ -3073,6 +4095,15 @@ struct Added {
     update: RefFun,
     paused: RefFun,
     tav: Option<TAdded>,
+    camp: Option<CAdded>,
+}
+
+struct CAdded {
+    why: RefFun,
+    asks: RefFun,
+    ask: RefFun,
+    update: RefFun,
+    close: RefFun,
 }
 
 struct TAdded {
@@ -3114,6 +4145,11 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         tl_last: add_global(code, p.t.i32_),
         tl_closed: add_global(code, p.win_t),
     };
+    let cg = p.camp.as_ref().map(|_| CGlobals {
+        mode: add_global(code, p.g_mode.1),
+        last: add_global(code, p.t.i32_),
+        ask_at: add_global(code, p.t.f64_),
+    });
     let why = add_why(code, p)?;
     let log = add_log(code, p, dyn_t)?;
     let refused = add_refused(code, p, why, log)?;
@@ -3181,6 +4217,34 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
             })
         }
     };
+    let camp = match (&p.camp, &cg) {
+        (Some(c), Some(cg)) => {
+            let cwhy = add_cp_why(code, p, c, dyn_t)?;
+            let asks = add_cp_asks(code, p, c, cg, dyn_t)?;
+            let cf = CFns {
+                log,
+                why: cwhy,
+                asks,
+            };
+            let ask = add_cp_ask(code, p, c, cg, &cf)?;
+            let cupdate = add_cp_update(code, p, c, cg)?;
+            let close = add_cp_close(code, p, c, closable)?;
+            guard_hook(&mut code.functions[c.ask_fi], p.t.bool_, p.t.void, ask);
+            guard_hook(&mut code.functions[c.close_fi], p.t.bool_, p.t.void, close);
+            let f = &mut code.functions[c.upd_fi];
+            f.regs.push(p.t.void);
+            let v = Reg((f.regs.len() - 1) as u32);
+            insert_ops(f, 0, vec![this_call(v, cupdate)]);
+            Some(CAdded {
+                why: cwhy,
+                asks,
+                ask,
+                update: cupdate,
+                close,
+            })
+        }
+        _ => None,
+    };
     Ok(Added {
         why,
         log,
@@ -3190,6 +4254,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         update,
         paused,
         tav,
+        camp,
     })
 }
 
@@ -3198,6 +4263,9 @@ fn touched(p: &Plan) -> Vec<usize> {
     let mut v = vec![p.update_fi, p.try_close_fi, p.leave_fi, p.content_fi];
     if let Some(tv) = &p.tav {
         v.extend([tv.ask_fi, tv.close_fi, tv.upd_fi]);
+    }
+    if let Some(c) = &p.camp {
+        v.extend([c.ask_fi, c.close_fi, c.upd_fi]);
     }
     v
 }
@@ -3226,6 +4294,12 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
                     t.ask.0, t.close.0, t.update.0, t.why.0, t.mark.0
                 );
             }
+            if let Some(c) = a.camp {
+                eprintln!(
+                    "patched force leave (camp): toggleCamp__impl -> fn@{}, CampMode.update -> fn@{}, Tool.closeActionWindow__impl -> fn@{} (why fn@{}, asks fn@{})",
+                    c.ask.0, c.update.0, c.close.0, c.why.0, c.asks.0
+                );
+            }
         }
         Err(e) => {
             snap.restore(code);
@@ -3251,21 +4325,26 @@ mod tests {
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let tv = p.tav.as_ref().expect("owned tavern part planned");
+        let cp = p.camp.as_ref().expect("camp part planned");
         let mut code = read(&image);
         let added = apply(&mut code, &p).expect("apply");
         let ta = added.tav.as_ref().expect("owned tavern part applied");
+        let ca = added.camp.as_ref().expect("camp part applied");
         let patched = write(&code);
         let back = read(&patched);
 
-        // Appended only: 12 functions (+ their types), 6 globals.
+        // Appended only: 17 functions (+ their types), 9 globals.
         let nf = orig.functions.len();
-        assert_eq!(back.functions.len(), nf + 12);
+        assert_eq!(back.functions.len(), nf + 17);
         assert_eq!(&back.types[..orig.types.len()], &orig.types[..]);
         let ng = orig.globals.len();
         assert_eq!(&back.globals[..ng], &orig.globals[..]);
         assert_eq!(
-            &back.globals[ng..ng + 6],
-            &[p.t.i32_, p.win_t, p.t.f64_, p.g_mode.1, p.t.i32_, p.win_t]
+            &back.globals[ng..ng + 9],
+            &[
+                p.t.i32_, p.win_t, p.t.f64_, p.g_mode.1, p.t.i32_, p.win_t, p.g_mode.1, p.t.i32_,
+                p.t.f64_
+            ]
         );
         let touched = touched(&p);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
@@ -3290,6 +4369,11 @@ mod tests {
             ta.ask,
             ta.update,
             ta.close,
+            ca.why,
+            ca.asks,
+            ca.ask,
+            ca.update,
+            ca.close,
         ];
         for (k, f) in back.functions[nf..].iter().enumerate() {
             assert_eq!(f.findex, new[k]);
@@ -3303,6 +4387,7 @@ mod tests {
             (p.try_close_fi, 0, added.refused),
             (p.leave_fi, p.paused_ret, added.paused),
             (tv.upd_fi, 0, ta.update),
+            (cp.upd_fi, 0, ca.update),
         ] {
             let (a, b) = (&orig.functions[fi], &back.functions[fi]);
             shifted(a, b, at, 1);
@@ -3311,8 +4396,14 @@ mod tests {
             );
             check_types(&back, b, at..at + 1);
         }
-        // `if (hook(this)) return;` in front of askLeave__impl / closeTavern__impl.
-        for (fi, fun) in [(tv.ask_fi, ta.ask), (tv.close_fi, ta.close)] {
+        // `if (hook(this)) return;` in front of askLeave__impl / closeTavern__impl,
+        // toggleCamp__impl / Tool.closeActionWindow__impl.
+        for (fi, fun) in [
+            (tv.ask_fi, ta.ask),
+            (tv.close_fi, ta.close),
+            (cp.ask_fi, ca.ask),
+            (cp.close_fi, ca.close),
+        ] {
             let (a, b) = (&orig.functions[fi], &back.functions[fi]);
             shifted(a, b, 0, 3);
             assert!(matches!(
@@ -3336,8 +4427,37 @@ mod tests {
         ));
         assert_eq!(cb.ops.len(), orig.functions[p.content_fi].ops.len());
 
+        // Camp: the retry re-enters the hooked toggleCamp__impl; the close requests
+        // go through the vanilla RPC wrapper, whose dispatch reaches the hooked impl.
+        let by = |fun: RefFun| back.functions.iter().find(|f| f.findex == fun).unwrap();
+        let calls_fn = |f: &Function, want: RefFun| {
+            f.ops
+                .iter()
+                .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == want))
+        };
+        assert!(calls_fn(by(ca.update), cp.toggle));
+        assert_eq!(back.functions[cp.ask_fi].findex, cp.toggle);
+        assert!(calls_fn(by(ca.asks), cp.close_rpc));
+        assert!(calls_fn(by(ca.close), added.closable));
+        let dispatch = proto(&orig, cp.tool_t, "networkRPC").unwrap();
+        let imp = orig.functions[cp.close_fi].findex;
+        assert!(calls_fn(by(dispatch), imp));
+        assert!(calls_fn(by(cp.close_rpc), imp));
+        // The camp tool windows enable their own close (Window.tryClose = canBeClosed).
+        let enable = method(&orig, p.win_t, "enableClose").unwrap().findex;
+        for l in &p.locks[LOCK_WINDOWS.len()..] {
+            let init = method(&orig, l.ct, "init").unwrap();
+            assert!(
+                init.ops
+                    .iter()
+                    .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == enable)),
+                "{} enables close",
+                s(&orig, obj(&orig, l.ct).unwrap().name)
+            );
+        }
+
         // The whitelist is checked against window classes, the slots are Window's.
-        assert_eq!(p.locks.len(), LOCK_WINDOWS.len());
+        assert_eq!(p.locks.len(), LOCK_WINDOWS.len() + CAMP_WINDOWS.len());
         assert_eq!(
             p.locks.iter().filter(|l| l.act.is_some()).count(),
             2,
@@ -3481,6 +4601,7 @@ mod tests {
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let tv = p.tav.as_ref().expect("owned tavern part planned");
+        let cp = p.camp.as_ref().expect("camp part planned");
         let out = crate::patch_image(&image).expect("patch_image");
         let b = read(&out);
         assert!(plan(&b).is_err(), "force leave was not applied");
@@ -3495,12 +4616,15 @@ mod tests {
             callee(tv.upd_fi, 0),
             callee(tv.ask_fi, 0),
             callee(tv.close_fi, 0),
+            callee(cp.ask_fi, 0),
+            callee(cp.close_fi, 0),
+            callee(cp.upd_fi, 0),
         ];
         let first_new = orig.functions.len() + orig.natives.len();
         assert!(roots.iter().all(|f| f.0 >= first_new));
         let ours = reachable(&b, first_new, &roots);
-        // All 12 but flPaused (it hangs off PlaceView.leave, which diag also edits).
-        assert_eq!(ours.len(), 11, "functions the hooks reach");
+        // All 17 but flPaused (it hangs off PlaceView.leave, which diag also edits).
+        assert_eq!(ours.len(), 16, "functions the hooks reach");
         for g in ours {
             check_flow(g);
             check_types(&b, g, 0..g.ops.len());
