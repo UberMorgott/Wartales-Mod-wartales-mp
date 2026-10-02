@@ -37,6 +37,7 @@ mod career_plan;
 mod chest_buttons;
 mod coop_gates;
 mod customize_slots;
+mod debrief_cure;
 mod diag;
 mod dlc_check;
 mod follow;
@@ -87,6 +88,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     party_inventory::patch_party_counts(&mut code);
     party_inventory::patch_party_lists(&mut code);
     loot_all::patch_loot_all(&mut code);
+    debrief_cure::patch_debrief_cure(&mut code);
     take_all::patch_take_all(&mut code);
     mod_version::patch_mod_version(&mut code);
     net_guard::patch_net_guard(&mut code);
