@@ -40,12 +40,23 @@
 //             text = isMulti && u.data.owner != null ? u.data.owner.getName() : "";
 //             mask = true; }                 // getName: nickname in <font color=player colour>
 //      ev.event.tile = tile; ev.event.filter.enable = mask;
-//      label.text = text; label.x = (ev.outerWidth - label.textWidth) / 2; label.y = -label.textHeight;
+//      label.text = text;
+//      centre: ev.mpHudW = ev.outerWidth;
+//              label.x = (ev.outerWidth - label.textWidth) / 2; label.y = -label.textHeight;
 //
-//    `mpHudUnit` / `mpHudLabel` are two fields appended to TimelineEvent (it
-//    has no subclass, so no field index moves).
+//    Same unit as last frame: only `centre` runs, and only when the diamond's
+//    outerWidth differs from mpHudW (a window / UI rescale), so the nickname
+//    stays centred without per-frame layout work.
+// 4. `TimelineEvent.sync` also calls `timelineHudList(ev)`: the co-op player
+//    status list above-left of the first diamond (see timeline_list.rs).
+//
+//    `mpHudUnit` / `mpHudLabel` / `mpHudW` and the list's fields are appended
+//    to TimelineEvent (it has no subclass, so no field index moves).
 //
 // Validated before editing; a mismatch skips the pass (logged).
+
+#[path = "timeline_list.rs"]
+mod list;
 
 use super::*;
 use crate::asm::{push_fn, string_ref, Asm, Regs};
@@ -53,6 +64,7 @@ use hlbc::types::{ObjField, RefGlobal, ValBool};
 
 const UNIT_FIELD: &str = "mpHudUnit";
 const LABEL_FIELD: &str = "mpHudLabel";
+const WIDTH_FIELD: &str = "mpHudW";
 
 struct Plan {
     ctor_fi: usize,
@@ -295,11 +307,12 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("TimelineEvent has a subclass");
     }
     let ev_o = obj(code, ev_t)?;
-    if ev_o
-        .fields
-        .iter()
-        .any(|f| [UNIT_FIELD, LABEL_FIELD].contains(&s(code, f.name)))
-    {
+    if ev_o.fields.iter().any(|f| {
+        [UNIT_FIELD, LABEL_FIELD, WIDTH_FIELD]
+            .iter()
+            .chain(list::FIELDS.iter().map(|(n, _)| n))
+            .any(|n| *n == s(code, f.name))
+    }) {
         bail!("TimelineEvent already has the HUD fields");
     }
 
@@ -500,8 +513,141 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     })
 }
 
-/// `timelineHud(ev)` (see the header). `f_unit` / `f_label` are the appended fields.
-fn add_hud(code: &mut Bytecode, p: &Plan, f_unit: RefField, f_label: RefField) -> Result<RefFun> {
+/// Scratch registers of [`emit_first_check`].
+struct FirstRegs {
+    par: Reg,
+    tlc: Reg,
+    b: Reg,
+    tl: Reg,
+    arr: Reg,
+    n: Reg,
+    raw: Reg,
+    d: Reg,
+    first: Reg,
+    /// Holds int 0 already.
+    zero: Reg,
+}
+
+/// Falls through when `ev` (register 0) is its Timeline's first diamond
+/// (`eventsElts[0]`), else jumps to `fail`. Uses labels "up", "next", "found".
+///
+/// ```text
+/// par = ev.parent;
+/// while (par != null) { if (Std.isOfType(par, Timeline)) break; par = par.parent; }
+/// if (par == null || tl.eventsElts == null || tl.eventsElts.length <= 0 || eventsElts[0] != ev) goto fail;
+/// ```
+fn emit_first_check(a: &mut Asm, p: &Plan, r: FirstRegs, fail: &'static str) {
+    let ev = Reg(0);
+    a.op(Opcode::Field {
+        dst: r.par,
+        obj: ev,
+        field: p.o_parent,
+    });
+    a.loop_head("up");
+    a.jmp(
+        Opcode::JNull {
+            reg: r.par,
+            offset: 0,
+        },
+        "found",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: r.tlc,
+        global: p.tl_cls,
+    });
+    a.op(Opcode::Call2 {
+        dst: r.b,
+        fun: p.base_check,
+        arg0: r.tlc,
+        arg1: r.par,
+    });
+    a.jmp(
+        Opcode::JFalse {
+            cond: r.b,
+            offset: 0,
+        },
+        "next",
+    );
+    a.jmp(Opcode::JAlways { offset: 0 }, "found");
+    a.label("next");
+    a.op(Opcode::Field {
+        dst: r.par,
+        obj: r.par,
+        field: p.o_parent,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "up");
+    a.label("found");
+    a.jmp(
+        Opcode::JNull {
+            reg: r.par,
+            offset: 0,
+        },
+        fail,
+    );
+    a.op(Opcode::UnsafeCast {
+        dst: r.tl,
+        src: r.par,
+    });
+    a.op(Opcode::Field {
+        dst: r.arr,
+        obj: r.tl,
+        field: p.tl_events,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: r.arr,
+            offset: 0,
+        },
+        fail,
+    );
+    a.op(Opcode::Field {
+        dst: r.n,
+        obj: r.arr,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: r.zero,
+            b: r.n,
+            offset: 0,
+        },
+        fail,
+    );
+    a.op(Opcode::Field {
+        dst: r.raw,
+        obj: r.arr,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: r.d,
+        array: r.raw,
+        index: r.zero,
+    });
+    a.op(Opcode::UnsafeCast {
+        dst: r.first,
+        src: r.d,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: r.first,
+            b: ev,
+            offset: 0,
+        },
+        fail,
+    );
+}
+
+/// The TimelineEvent fields this pass appends, in order.
+struct Fields {
+    unit: RefField,
+    label: RefField,
+    hud_w: RefField,
+    list: list::ListFields,
+}
+
+/// `timelineHud(ev)` (see the header).
+fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
+    let (f_unit, f_label, f_w) = (fl.unit, fl.label, fl.hud_w);
     let i0 = int_const(code, 0);
     let one = float_const(code, 1.0);
     let shadow_alpha = float_const(code, 0.8);
@@ -563,7 +709,7 @@ fn add_hud(code: &mut Bytecode, p: &Plan, f_unit: RefField, f_label: RefField) -
         r.r(p.f64_),
         r.r(p.f64_),
     );
-    let wi = r.r(p.i32_);
+    let (wi, wo) = (r.r(p.i32_), r.r(p.i32_));
 
     let mut a = Asm::new();
     // Player diamonds only.
@@ -771,108 +917,58 @@ fn add_hud(code: &mut Bytecode, p: &Plan, f_unit: RefField, f_label: RefField) -
         },
         "decide",
     );
-    a.op(Opcode::Field {
-        dst: par,
-        obj: ev,
-        field: p.o_parent,
-    });
-    a.loop_head("up");
-    a.jmp(
-        Opcode::JNull {
-            reg: par,
-            offset: 0,
-        },
-        "found",
-    );
-    a.op(Opcode::GetGlobal {
-        dst: tlc,
-        global: p.tl_cls,
-    });
-    a.op(Opcode::Call2 {
-        dst: b,
-        fun: p.base_check,
-        arg0: tlc,
-        arg1: par,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "next");
-    a.jmp(Opcode::JAlways { offset: 0 }, "found");
-    a.label("next");
-    a.op(Opcode::Field {
-        dst: par,
-        obj: par,
-        field: p.o_parent,
-    });
-    a.jmp(Opcode::JAlways { offset: 0 }, "up");
-    // `while (par != null) { if (Std.isOfType(par, Timeline)) break; par = par.parent; }`
-    a.label("found");
-    a.jmp(
-        Opcode::JNull {
-            reg: par,
-            offset: 0,
-        },
-        "decide",
-    );
-    a.op(Opcode::UnsafeCast { dst: tl, src: par });
-    a.op(Opcode::Field {
-        dst: arr,
-        obj: tl,
-        field: p.tl_events,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: arr,
-            offset: 0,
-        },
-        "decide",
-    );
-    a.op(Opcode::Field {
-        dst: n,
-        obj: arr,
-        field: p.a_len,
-    });
-    a.jmp(
-        Opcode::JSGte {
-            a: zero,
-            b: n,
-            offset: 0,
-        },
-        "decide",
-    );
-    a.op(Opcode::Field {
-        dst: raw,
-        obj: arr,
-        field: p.a_raw,
-    });
-    a.op(Opcode::GetArray {
-        dst: d,
-        array: raw,
-        index: zero,
-    });
-    a.op(Opcode::UnsafeCast { dst: first, src: d });
-    a.jmp(
-        Opcode::JNotEq {
-            a: first,
-            b: ev,
-            offset: 0,
+    emit_first_check(
+        &mut a,
+        p,
+        FirstRegs {
+            par,
+            tlc,
+            b,
+            tl,
+            arr,
+            n,
+            raw,
+            d,
+            first,
+            zero,
         },
         "decide",
     );
     a.op(Opcode::Mov { dst: u, src: cand });
 
-    // Act only on change.
+    // Act on change; the same unit only re-centres after a rescale.
     a.label("decide");
     a.op(Opcode::GetThis {
         dst: cur,
         field: f_unit,
     });
     a.jmp(
-        Opcode::JEq {
+        Opcode::JNotEq {
             a: cur,
             b: u,
             offset: 0,
         },
+        "changed",
+    );
+    a.op(Opcode::Call1 {
+        dst: wi,
+        fun: p.outer_width,
+        arg0: ev,
+    });
+    a.op(Opcode::GetThis {
+        dst: wo,
+        field: f_w,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: wi,
+            b: wo,
+            offset: 0,
+        },
         "untrap",
     );
+    a.jmp(Opcode::JAlways { offset: 0 }, "centre");
+    a.label("changed");
     a.op(Opcode::SetThis {
         field: f_unit,
         src: u,
@@ -1008,10 +1104,15 @@ fn add_hud(code: &mut Bytecode, p: &Plan, f_unit: RefField, f_label: RefField) -
         arg0: lbl,
         arg1: name,
     });
+    a.label("centre");
     a.op(Opcode::Call1 {
         dst: wi,
         fun: p.outer_width,
         arg0: ev,
+    });
+    a.op(Opcode::SetThis {
+        field: f_w,
+        src: wi,
     });
     a.op(Opcode::ToSFloat { dst: w, src: wi });
     a.op(Opcode::Call1 {
@@ -1057,17 +1158,36 @@ fn add_hud(code: &mut Bytecode, p: &Plan, f_unit: RefField, f_label: RefField) -
     push_fn(code, vec![p.ev_t], p.void_, r.0, a.finish(), p.dbg_file)
 }
 
-fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
-    // The two fields go last on TimelineEvent: their indices follow every inherited one.
+/// Every appended field, in order: name and type.
+fn new_fields(p: &Plan) -> Vec<(&'static str, RefType)> {
+    let mut v = vec![
+        (UNIT_FIELD, p.unit_t),
+        (LABEL_FIELD, p.html_t),
+        (WIDTH_FIELD, p.i32_),
+    ];
+    v.extend(list::FIELDS.iter().map(|(n, k)| (*n, k.of(p))));
+    v
+}
+
+fn apply(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan) -> Result<()> {
+    // The fields go last on TimelineEvent: their indices follow every inherited one.
     let base = obj(code, p.ev_t)?.fields.len();
-    let (f_unit, f_label) = (RefField(base), RefField(base + 1));
-    let hud = add_hud(code, p, f_unit, f_label)?;
-    let n_unit = string_ref(code, UNIT_FIELD);
-    let n_label = string_ref(code, LABEL_FIELD);
+    let fl = Fields {
+        unit: RefField(base),
+        label: RefField(base + 1),
+        hud_w: RefField(base + 2),
+        list: list::ListFields::at(base + 3),
+    };
+    let hud = add_hud(code, p, &fl)?;
+    let hud_list = list::add_list(code, p, lp, &fl.list)?;
+    let names: Vec<_> = new_fields(p)
+        .into_iter()
+        .map(|(n, t)| (string_ref(code, n), t))
+        .collect();
     let Type::Obj(o) = &mut code.types[p.ev_t.0] else {
         unreachable!()
     };
-    for (name, t) in [(n_unit, p.unit_t), (n_label, p.html_t)] {
+    for (name, t) in names {
         o.own_fields.push(ObjField { name, t });
         o.fields.push(ObjField { name, t });
     }
@@ -1084,24 +1204,35 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
     insert_ops(
         f,
         1,
-        vec![Opcode::Call1 {
-            dst: p.sync_void,
-            fun: hud,
-            arg0: Reg(0),
-        }],
+        vec![
+            Opcode::Call1 {
+                dst: p.sync_void,
+                fun: hud,
+                arg0: Reg(0),
+            },
+            Opcode::Call1 {
+                dst: p.sync_void,
+                fun: hud_list,
+                arg0: Reg(0),
+            },
+        ],
     );
     eprintln!(
-        "patched timeline hud: TimelineEvent ctor fn@{} op {} masks Player, sync fn@{} calls timelineHud fn@{}",
-        ctor.0, p.mask_switch, f.findex.0, hud.0
+        "patched timeline hud: TimelineEvent ctor fn@{} op {} masks Player, sync fn@{} calls timelineHud fn@{} and timelineHudList fn@{}",
+        ctor.0, p.mask_switch, f.findex.0, hud.0, hud_list.0
     );
     Ok(())
 }
 
 /// Shows the acting player unit's portrait and its player's nickname on the
-/// battle timeline's first diamond, or leaves `code` untouched and logs why.
+/// battle timeline's first diamond, plus the co-op player status list, or
+/// leaves `code` untouched and logs why.
 pub(crate) fn patch_timeline_hud(code: &mut Bytecode) {
     let snap = crate::asm::Snap::take(code);
-    let r = plan(code).and_then(|p| apply(code, &p));
+    let r = plan(code).and_then(|p| {
+        let lp = list::plan(code, &p)?;
+        apply(code, &p, &lp)
+    });
     if let Err(e) = r {
         snap.restore(code);
         eprintln!("timeline hud skipped: {e:#}");
@@ -1128,7 +1259,7 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        assert_eq!(back.functions.len(), orig.functions.len() + 1);
+        assert_eq!(back.functions.len(), orig.functions.len() + 2);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
             assert_eq!(
@@ -1138,7 +1269,8 @@ mod tests {
                 a.findex.0
             );
         }
-        let hud = back.functions.last().expect("new fn");
+        let hud = &back.functions[orig.functions.len()];
+        let hud_list = &back.functions[orig.functions.len() + 1];
 
         // Constructor: only the Player offset of the mask switch.
         let (a, b) = (&orig.functions[p.ctor_fi], &back.functions[p.ctor_fi]);
@@ -1172,27 +1304,46 @@ mod tests {
             }
         }
 
-        // sync: one call inserted after the super sync.
+        // sync: two calls inserted after the super sync.
         let (a, b) = (&orig.functions[p.sync_fi], &back.functions[p.sync_fi]);
-        shifted(a, b, 1, 1);
+        shifted(a, b, 1, 2);
         assert!(matches!(b.ops[1], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == hud.findex));
-        check_types(&back, b, 1..2);
+        assert!(
+            matches!(b.ops[2], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == hud_list.findex)
+        );
+        check_types(&back, b, 1..3);
         check_flow(b);
 
-        // Fields: appended, typed, used by the new function only.
+        // Fields: appended, typed, used by the new functions only.
         let ev = back.types[p.ev_t.0].get_type_obj().expect("ev");
         let ov = orig.types[p.ev_t.0].get_type_obj().expect("ev");
-        assert_eq!(ev.own_fields.len(), ov.own_fields.len() + 2);
+        let want = new_fields(&p);
+        assert_eq!(ev.own_fields.len(), ov.own_fields.len() + want.len());
         let names: Vec<&str> = ev.own_fields[ov.own_fields.len()..]
             .iter()
             .map(|f| back.strings[f.name.0].as_str())
             .collect();
-        assert_eq!(names, [UNIT_FIELD, LABEL_FIELD]);
-        assert_eq!(field(&back, p.ev_t, UNIT_FIELD).unwrap().1, p.unit_t);
-        assert_eq!(field(&back, p.ev_t, LABEL_FIELD).unwrap().1, p.html_t);
+        assert_eq!(
+            names,
+            want.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            "field names"
+        );
+        for (n, t) in &want {
+            assert_eq!(field(&back, p.ev_t, n).unwrap().1, *t, "{n}");
+        }
+        assert_eq!(names[..3], [UNIT_FIELD, LABEL_FIELD, WIDTH_FIELD]);
 
-        check_types(&back, hud, 0..hud.ops.len());
-        check_flow(hud);
+        for f in [hud, hud_list] {
+            check_types(&back, f, 0..f.ops.len());
+            check_flow(f);
+        }
+        // The list colours names with getName and is gated on isMulti.
+        for want in [p.bp_get_name, p.is_multi] {
+            assert!(hud_list
+                .ops
+                .iter()
+                .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == want)));
+        }
 
         let mut again = read(&patched);
         assert!(plan(&again).is_err());

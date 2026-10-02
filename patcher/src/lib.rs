@@ -34,7 +34,8 @@
 // longer throws every frame and stalls the inventory grid (see censer_tip.rs), and so a co-op ping lands where
 // the pinging player's cursor is and, in battle, makes the pinged cell blink orange for everyone (see
 // ping_cell.rs), and so in battle the timeline's first diamond shows the acting player unit's portrait under its
-// player's nickname (see timeline_hud.rs), and so the customize screen logs its 2D
+// player's nickname, with a co-op player status list (acting / done / waiting) above and left of it
+// (see timeline_hud.rs, timeline_list.rs), and so the customize screen logs its 2D
 // hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs).
 
 mod asm;
