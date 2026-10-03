@@ -23,7 +23,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 - The mode-switch wait (leaving or entering a town, the tavern or a place, starting a battle) no longer leaves every screen black forever: the host drops a player who has not answered after 30 seconds and reloads them into the running game; a player who joins during the switch is let in after it.
 - An error in the game's handling of a network message is logged instead of ending the whole co-op session.
-- The in-game DLC check never marks a player who owns a DLC as missing it (which locked DLC content for the whole party); a real mismatch is written to the log as a warning.
+- DLC ownership checks are untouched (vanilla): DLC content and the save's DLC markers follow the game's own rules.
 - Fixes the post-battle screen rebuilding itself every frame in co-op when the remedy count and the injured units disagreed.
 - The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.
 - A failed activity of a client (a lost fish or a broken lockpick on Extreme, or a failed activity that injures) no longer freezes fishing or the activity with a "Not allowed" error: the unit's injury is applied by the host and synced to everyone.
@@ -63,7 +63,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 ### Diagnostics
 
-- Writes game errors, co-op mode-switch steps, forced leaves and DLC warnings to **shim.log**, to help with bug reports. This only adds log lines.
+- Writes game errors, co-op mode-switch steps and forced leaves to **shim.log**, to help with bug reports. This only adds log lines.
 - Writes the end steps of every activity and mini-game (ruins puzzles, lock picking, fishing, dice) and every refused co-op network call to **shim.log**, to find where a mini-game freezes. This only adds log lines.
 ## Install
 

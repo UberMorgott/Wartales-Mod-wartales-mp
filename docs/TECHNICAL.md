@@ -65,7 +65,7 @@ Nothing in the game folder is renamed, replaced or edited. `winmm.dll` is a new
 file that Windows loads because it searches the application directory before
 `System32` for this name.
 
-The game's bytecode (`hlboot.dat`) is not modified either. Eight bytes in it have
+The game's bytecode (`hlboot.dat`) is not modified either. Seven bytes in it have
 to change (see "How it works"), so the mod keeps a patched **copy** under
 `%LOCALAPPDATA%\wartales-mp\hlboot.dat` and hands the game that copy when it
 opens the file. The original on disk is only ever read. If a game update moves
@@ -239,15 +239,15 @@ needs no patch for it.
    that is left alone. Instead, the mod's own CA is appended to the chain the
    game configures, so the local master is trusted. Certificate verification is
    never disabled.
-4. **Patches eight bytes of the bytecode, in a copy.** In this build, the client
+4. **Patches seven bytes of the bytecode, in a copy.** In this build, the client
    timeout path is fatal for every role: about a minute of sitting in a lobby
    ends in a `Null access` crash. Two bytes turn the timeout comparison into one
    that is never true, so the crash cannot fire. Four more relax the
    title screen's "join by code" field, which is built around 5-symbol codes
    (input cap, truncation, validation, submit check), to accept at least 5
    and up to 32 symbols, so the mod's 8/11/13/16/25-symbol codes are accepted and
-   vanilla codes still work. The remaining two bypass the missing-DLC gate
-   and the requirement that every player own a human unit. This allows four
+   vanilla codes still work. The last one lifts the requirement that every
+   player own a human unit; DLC checks are left as in vanilla. This allows four
    players to start with a modded party of three humans and one animal.
    Units still need owners, and players must finish joining before starting.
    The patches are applied to a copy under

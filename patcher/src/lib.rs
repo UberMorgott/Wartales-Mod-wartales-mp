@@ -16,8 +16,7 @@
 // and so a co-op caravan follows the moving player while its owner is in a menu
 // or toggled follow with F (see follow.rs), and so skill tooltips outside a battle show
 // the skill's Valor cost for units that are not (yet) the player's (see skill_cost.rs),
-// and so the in-game DLC ownership check never reports a player as missing a DLC,
-// printing a warning instead (see dlc_check.rs), and so the co-op shared chest panel
+// and so the co-op shared chest panel
 // gets sort / quick stack / take similar buttons (see chest_buttons.rs), and so
 // item costs paid "with the chest" (crafting, repairs, dialogs, injury remedies, recipe
 // ingredient rows, fishing hooks, lockpicks) also draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
@@ -55,7 +54,7 @@ mod coop_gates;
 mod customize_slots;
 mod debrief_cure;
 mod diag;
-mod dlc_check;
+mod dlc_untouched;
 mod follow;
 mod force_leave;
 mod friendly_fire;
@@ -106,7 +105,6 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     slot4_diag::patch_slot4_diag(&mut code);
     follow::patch_follow(&mut code);
     skill_cost::patch_skill_cost(&mut code);
-    dlc_check::patch_dlc_check(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
     party_inventory::patch_party_inventory(&mut code);
     party_inventory::patch_party_counts(&mut code);
