@@ -31,12 +31,7 @@
 //          ev.getProperties(label).isAbsolute = true;
 //          label.dropShadow = { dx: 1, dy: 1, color: 0, alpha: 0.8 };
 //      }
-//      u = state.startedPlaying (set by the unit's first move / action and
-//          synced, Battle.doExecuteSkill -> setCurrentUnitPlaying); while it is
-//          null, battle.currentUnit (the local selection: setUnit leaves
-//          startedPlaying alone) when !isMulti || u.data.owner == game.me, its
-//          PlayedThisRound flag (bit 0) is clear and u.isAlive();
-//          kept only when it is on the player side and
+//      u = state.startedPlaying, kept only when it is on the player side and
 //          ev is the Timeline's first diamond (eventsElts[0]); else null
 //      if (u == ev.mpHudUnit) return;        // act only on change
 //      ev.mpHudUnit = u;
@@ -113,10 +108,6 @@ struct Plan {
     o_parent: RefField,
     o_filter: RefField,
     b_state: RefField,
-    /// `Battle.currentUnit`: the locally selected unit.
-    b_current: RefField,
-    /// `Game.me`: the local player.
-    g_me: RefField,
     s_started: RefField,
     s_side: RefField,
     u_owner: RefField,
@@ -341,8 +332,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let (o_parent, op_t) = field(code, obj_t, "parent")?;
     let (o_filter, of_t) = field(code, obj_t, "filter")?;
     let (b_state, bs_t) = field(code, battle_t, "state")?;
-    let (b_current, bc_t) = field(code, battle_t, "currentUnit")?;
-    let (g_me, gm_t) = field(code, game_t, "me")?;
     let (s_started, ss_t) = field(code, state_t, "startedPlaying")?;
     let (s_side, side_t) = field(code, state_t, "playerSide")?;
     let (u_owner, uo_t) = field(code, unit_t, "owner")?;
@@ -358,8 +347,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         || of_t != filter_t
         || bs_t != state_t
         || ss_t != unit_t
-        || bc_t != unit_t
-        || gm_t != bp_t
         || uo_t != player_t
         || ud_t != sunit_t
         || ps_t != side_t
@@ -488,8 +475,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         o_parent,
         o_filter,
         b_state,
-        b_current,
-        g_me,
         s_started,
         s_side,
         u_owner,
@@ -661,10 +646,9 @@ struct Fields {
 }
 
 /// `timelineHud(ev)` (see the header).
-fn add_hud(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan, fl: &Fields) -> Result<RefFun> {
+fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
     let (f_unit, f_label, f_w) = (fl.unit, fl.label, fl.hud_w);
     let i0 = int_const(code, 0);
-    let i1 = int_const(code, 1);
     let one = float_const(code, 1.0);
     let shadow_alpha = float_const(code, 0.8);
     let half = float_const(code, 0.5);
@@ -726,7 +710,6 @@ fn add_hud(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan, fl: &Fields) -> R
         r.r(p.f64_),
     );
     let (wi, wo) = (r.r(p.i32_), r.r(p.i32_));
-    let (me, flags, bits, bit0) = (r.r(p.bp_t), r.r(lp.flags_t), r.r(p.i32_), r.r(p.i32_));
 
     let mut a = Asm::new();
     // Player diamonds only.
@@ -898,113 +881,12 @@ fn add_hud(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan, fl: &Fields) -> R
         field: p.s_started,
     });
     a.jmp(
-        Opcode::JNotNull {
-            reg: cand,
-            offset: 0,
-        },
-        "side",
-    );
-    // Nobody acts yet: the locally selected unit, when it is ours (any in solo),
-    // alive and has not played this round.
-    a.op(Opcode::Field {
-        dst: cand,
-        obj: bat,
-        field: p.b_current,
-    });
-    a.jmp(
         Opcode::JNull {
             reg: cand,
             offset: 0,
         },
         "decide",
     );
-    a.op(Opcode::GetThis {
-        dst: game,
-        field: p.ev_game,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: game,
-            offset: 0,
-        },
-        "decide",
-    );
-    a.op(Opcode::Call1 {
-        dst: b,
-        fun: p.is_multi,
-        arg0: game,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "selplay");
-    a.op(Opcode::Field {
-        dst: sdata,
-        obj: cand,
-        field: p.u_data,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: sdata,
-            offset: 0,
-        },
-        "decide",
-    );
-    a.op(Opcode::Field {
-        dst: bp,
-        obj: sdata,
-        field: p.su_owner,
-    });
-    a.jmp(Opcode::JNull { reg: bp, offset: 0 }, "decide");
-    a.op(Opcode::Field {
-        dst: me,
-        obj: game,
-        field: p.g_me,
-    });
-    a.jmp(
-        Opcode::JNotEq {
-            a: bp,
-            b: me,
-            offset: 0,
-        },
-        "decide",
-    );
-    a.label("selplay");
-    a.op(Opcode::Field {
-        dst: flags,
-        obj: cand,
-        field: lp.u_flags,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: flags,
-            offset: 0,
-        },
-        "decide",
-    );
-    a.op(Opcode::Field {
-        dst: bits,
-        obj: flags,
-        field: lp.fl_value,
-    });
-    a.op(Opcode::Int { dst: bit0, ptr: i1 });
-    a.op(Opcode::And {
-        dst: bits,
-        a: bits,
-        b: bit0,
-    });
-    a.jmp(
-        Opcode::JNotEq {
-            a: bits,
-            b: zero,
-            offset: 0,
-        },
-        "decide",
-    );
-    a.op(Opcode::Call1 {
-        dst: b,
-        fun: lp.is_alive,
-        arg0: cand,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "decide");
-    a.label("side");
     a.op(Opcode::Field {
         dst: owner,
         obj: cand,
@@ -1296,7 +1178,7 @@ fn apply(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan) -> Result<()> {
         hud_w: RefField(base + 2),
         list: list::ListFields::at(base + 3),
     };
-    let hud = add_hud(code, p, lp, &fl)?;
+    let hud = add_hud(code, p, &fl)?;
     let hud_list = list::add_list(code, p, lp, &fl.list)?;
     let names: Vec<_> = new_fields(p)
         .into_iter()
@@ -1454,13 +1336,6 @@ mod tests {
         for f in [hud, hud_list] {
             check_types(&back, f, 0..f.ops.len());
             check_flow(f);
-        }
-        // Nobody acting yet: the diamond falls back to the local selection.
-        for want in [p.s_started, p.b_current, p.g_me] {
-            assert!(hud
-                .ops
-                .iter()
-                .any(|o| matches!(o, Opcode::Field { field, .. } if *field == want)));
         }
         // The list colours names with getName and is gated on isMulti.
         for want in [p.bp_get_name, p.is_multi] {
