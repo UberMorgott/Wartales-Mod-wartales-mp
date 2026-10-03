@@ -53,6 +53,18 @@
 //    `mpHudUnit` / `mpHudLabel` / `mpHudW` and the list's fields are appended
 //    to TimelineEvent (it has no subclass, so no field index moves).
 //
+// 5. Diagnostics (shim log, via Sys.println -> hl_sys_print):
+//    - "mp: timelineHud: why=<n> started=<unit name|null> shown=<portrait|swords>"
+//      whenever startedPlaying or the gate result changes (why: 0 shown,
+//      1 no battle/state, 2 nobody acting, 3 no owner, 4 not the player side,
+//      5 not the Timeline's first diamond);
+//    - "mp: timelineHud error: <exception>" / "mp: timelineHudList error: ..."
+//      from the catch blocks (timelineHudReport, at most once a second per diamond);
+//    - "mp: timelineHud: portrait reset by the game, re-applied" when the event
+//      bitmap's tile no longer is the portrait set (mpHudTile) while the same
+//      unit acts; the portrait is then put back.
+//    mpHudUnit is stored only after a successful swap, so a failure is retried.
+//
 // Validated before editing; a mismatch skips the pass (logged).
 
 #[path = "timeline_list.rs"]
@@ -138,6 +150,15 @@ struct Plan {
     is_multi: RefFun,
     bp_get_name: RefFun,
     outer_width: RefFun,
+    /// `Sys.println(Dyn)`: reaches the shim log through `hl_sys_print`.
+    println: RefFun,
+    std_string: RefFun,
+    str_add: RefFun,
+    sys_time: RefFun,
+    /// `h2d.Bitmap.tile` (read to detect a reset by the style system).
+    bm_tile: RefField,
+    /// `st.Unit.name`.
+    su_name: RefField,
     text_width: RefFun,
     text_height: RefFun,
     set_x: RefFun,
@@ -384,6 +405,40 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let text_height = m(text_t, "get_textHeight", &[text_t], f64_)?;
     let set_x = m(obj_t, "set_x", &[obj_t, f64_], f64_)?;
     let set_y = m(obj_t, "set_y", &[obj_t, f64_], f64_)?;
+    let println = crate::diag::static_fn(code, "$Sys", "println")?.findex;
+    if sig(code, println)? != (vec![dyn_t], void_) {
+        bail!("Sys.println is not Dyn -> Void");
+    }
+    let std_string = crate::diag::static_fn(code, "$Std", "string")?.findex;
+    if sig(code, std_string)? != (vec![dyn_t], str_t) {
+        bail!("Std.string is not Dyn -> String");
+    }
+    let str_add = crate::diag::static_fn(code, "$String", "__add__")?.findex;
+    if sig(code, str_add)? != (vec![str_t, str_t], str_t) {
+        bail!("String.__add__ is not (String, String) -> String");
+    }
+    let sys_time = {
+        let hits: Vec<RefFun> = code
+            .natives
+            .iter()
+            .filter(|n| {
+                s(code, n.name) == "sys_time"
+                    && n.t
+                        .as_fun(code)
+                        .is_some_and(|t| t.args.is_empty() && t.ret == f64_)
+            })
+            .map(|n| n.findex)
+            .collect();
+        let [f] = hits[..] else {
+            bail!("expected one native sys_time, found {}", hits.len());
+        };
+        f
+    };
+    let (bm_tile, bt_t) = field(code, bitmap_t, "tile")?;
+    let (su_name, sn_t) = field(code, sunit_t, "name")?;
+    if bt_t != tile_t || sn_t != str_t {
+        bail!("unexpected h2d.Bitmap.tile / st.Unit.name types");
+    }
     let load_font = by_sig(code, "loadFont", &[str_t], font_t)?;
     let get_api = by_sig(code, "get_api", &[], api_t)?;
     let base_t = obj_type(code, "hl.BaseType")?;
@@ -505,6 +560,12 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         is_multi,
         bp_get_name,
         outer_width,
+        println,
+        std_string,
+        str_add,
+        sys_time,
+        bm_tile,
+        su_name,
         text_width,
         text_height,
         set_x,
@@ -643,12 +704,120 @@ struct Fields {
     label: RefField,
     hud_w: RefField,
     list: list::ListFields,
+    /// Last gate result traced (0 = portrait shown).
+    why: RefField,
+    /// Last `startedPlaying` traced.
+    seen: RefField,
+    /// The portrait tile set, to re-apply it when the game resets the bitmap.
+    tile: RefField,
+    /// `Sys.time()` of the last rate-limited report.
+    rep_t: RefField,
+}
+
+const WHY_FIELD: &str = "mpHudWhy";
+const SEEN_FIELD: &str = "mpHudSeen";
+const TILE_FIELD: &str = "mpHudTile";
+const REPORT_FIELD: &str = "mpHudRepT";
+
+/// `timelineHudReport(ev, msg, exc)`: at most once a second per diamond,
+/// `Sys.println(exc == null ? msg : msg + Std.string(exc))`; never throws.
+/// The catch blocks of timelineHud / timelineHudList end here, so an error in
+/// either reaches the shim log instead of vanishing.
+fn add_report(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
+    let one = float_const(code, 1.0);
+    let mut r = Regs(vec![p.ev_t, p.str_t, p.dyn_t]);
+    let (msg, exc) = (Reg(1), Reg(2));
+    let (v, now, last, lim, txt, e2) = (
+        r.r(p.void_),
+        r.r(p.f64_),
+        r.r(p.f64_),
+        r.r(p.f64_),
+        r.r(p.str_t),
+        r.r(p.dyn_t),
+    );
+    let mut a = Asm::new();
+    a.jmp(Opcode::Trap { exc: e2, offset: 0 }, "catch");
+    a.op(Opcode::Call0 {
+        dst: now,
+        fun: p.sys_time,
+    });
+    a.op(Opcode::GetThis {
+        dst: last,
+        field: fl.rep_t,
+    });
+    a.op(Opcode::Sub {
+        dst: last,
+        a: now,
+        b: last,
+    });
+    a.op(Opcode::Float { dst: lim, ptr: one });
+    a.jmp(
+        Opcode::JSLt {
+            a: last,
+            b: lim,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::SetThis {
+        field: fl.rep_t,
+        src: now,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: exc,
+            offset: 0,
+        },
+        "print",
+    );
+    a.op(Opcode::Call1 {
+        dst: txt,
+        fun: p.std_string,
+        arg0: exc,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.label("print");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: msg,
+    });
+    a.label("untrap");
+    a.op(Opcode::EndTrap { exc: e2 });
+    a.op(Opcode::Ret { ret: v });
+    a.label("catch");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(
+        code,
+        vec![p.ev_t, p.str_t, p.dyn_t],
+        p.void_,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
 }
 
 /// `timelineHud(ev)` (see the header).
-fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
+fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result<RefFun> {
     let (f_unit, f_label, f_w) = (fl.unit, fl.label, fl.hud_w);
+    let (f_why, f_seen, f_tile) = (fl.why, fl.seen, fl.tile);
     let i0 = int_const(code, 0);
+    let why_c: Vec<_> = (1..=5).map(|k| int_const(code, k)).collect();
+    let s_trace = string_ref(code, "mp: timelineHud: why=");
+    let s_started = string_ref(code, " started=");
+    let s_shown = string_ref(code, " shown=");
+    let s_portrait = string_ref(code, "portrait");
+    let s_swords = string_ref(code, "swords");
+    let s_reset = string_ref(
+        code,
+        "mp: timelineHud: portrait reset by the game, re-applied",
+    );
+    let s_err = string_ref(code, "mp: timelineHud error: ");
     let one = float_const(code, 1.0);
     let shadow_alpha = float_const(code, 0.8);
     let half = float_const(code, 0.5);
@@ -710,6 +879,26 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         r.r(p.f64_),
     );
     let (wi, wo) = (r.r(p.i32_), r.r(p.i32_));
+    let (why, oldw, seen, msg, txt, dd, t1, t2) = (
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.unit_t),
+        r.r(p.str_t),
+        r.r(p.str_t),
+        r.r(p.dyn_t),
+        r.r(p.tile_t),
+        r.r(p.tile_t),
+    );
+    let set_why = |a: &mut Asm, k: usize| {
+        if k == 0 {
+            a.op(Opcode::Int { dst: why, ptr: i0 });
+        } else {
+            a.op(Opcode::Int {
+                dst: why,
+                ptr: why_c[k - 1],
+            });
+        }
+    };
 
     let mut a = Asm::new();
     // Player diamonds only.
@@ -856,8 +1045,13 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
     });
 
     // u = the acting player-side unit, on the Timeline's first diamond only.
+    // why: 1 no battle / state, 2 nobody acting (startedPlaying null), 3 the
+    // acting unit has no owner, 4 it is not on the player side, 5 this is not
+    // the Timeline's first diamond, 0 shown.
     a.label("ready");
     a.op(Opcode::Null { dst: u });
+    a.op(Opcode::Null { dst: cand });
+    set_why(&mut a, 1);
     a.op(Opcode::GetThis {
         dst: bat,
         field: p.ev_battle,
@@ -880,6 +1074,7 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         obj: st,
         field: p.s_started,
     });
+    set_why(&mut a, 2);
     a.jmp(
         Opcode::JNull {
             reg: cand,
@@ -892,6 +1087,7 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         obj: cand,
         field: p.u_owner,
     });
+    set_why(&mut a, 3);
     a.jmp(
         Opcode::JNull {
             reg: owner,
@@ -899,6 +1095,7 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         },
         "decide",
     );
+    set_why(&mut a, 4);
     a.op(Opcode::Field {
         dst: s1,
         obj: owner,
@@ -917,6 +1114,7 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         },
         "decide",
     );
+    set_why(&mut a, 5);
     emit_first_check(
         &mut a,
         p,
@@ -935,9 +1133,143 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         "decide",
     );
     a.op(Opcode::Mov { dst: u, src: cand });
+    set_why(&mut a, 0);
 
-    // Act on change; the same unit only re-centres after a rescale.
+    // Trace: one line whenever startedPlaying or the gate result changes,
+    // "mp: timelineHud: why=<n> started=<unit name|null> shown=<portrait|swords>".
     a.label("decide");
+    a.op(Opcode::GetThis {
+        dst: seen,
+        field: f_seen,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: seen,
+            b: cand,
+            offset: 0,
+        },
+        "trace",
+    );
+    a.op(Opcode::GetThis {
+        dst: oldw,
+        field: f_why,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: oldw,
+            b: why,
+            offset: 0,
+        },
+        "traced",
+    );
+    a.label("trace");
+    a.op(Opcode::SetThis {
+        field: f_seen,
+        src: cand,
+    });
+    a.op(Opcode::SetThis {
+        field: f_why,
+        src: why,
+    });
+    a.op(Opcode::String {
+        dst: msg,
+        ptr: s_trace,
+    });
+    a.op(Opcode::ToDyn { dst: dd, src: why });
+    a.op(Opcode::Call1 {
+        dst: txt,
+        fun: p.std_string,
+        arg0: dd,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::String {
+        dst: txt,
+        ptr: s_started,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::Null { dst: txt });
+    a.jmp(
+        Opcode::JNull {
+            reg: cand,
+            offset: 0,
+        },
+        "named0",
+    );
+    a.op(Opcode::Field {
+        dst: sdata,
+        obj: cand,
+        field: p.u_data,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: sdata,
+            offset: 0,
+        },
+        "named0",
+    );
+    a.op(Opcode::Field {
+        dst: txt,
+        obj: sdata,
+        field: p.su_name,
+    });
+    a.label("named0");
+    // Std.string(null) is "null"; a String goes to the Dyn argument as is.
+    a.op(Opcode::Call1 {
+        dst: txt,
+        fun: p.std_string,
+        arg0: txt,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::String {
+        dst: txt,
+        ptr: s_shown,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::String {
+        dst: txt,
+        ptr: s_swords,
+    });
+    a.jmp(Opcode::JNull { reg: u, offset: 0 }, "shown");
+    a.op(Opcode::String {
+        dst: txt,
+        ptr: s_portrait,
+    });
+    a.label("shown");
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: msg,
+    });
+    a.label("traced");
+
+    // Act on change; the same unit only re-centres after a rescale, and its
+    // portrait is put back if something (the style system) reset the bitmap.
     a.op(Opcode::GetThis {
         dst: cur,
         field: f_unit,
@@ -950,6 +1282,78 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         },
         "changed",
     );
+    a.jmp(Opcode::JNull { reg: u, offset: 0 }, "kept");
+    a.op(Opcode::GetThis {
+        dst: bmp,
+        field: p.ev_event,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: bmp,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Field {
+        dst: t1,
+        obj: bmp,
+        field: p.bm_tile,
+    });
+    a.op(Opcode::GetThis {
+        dst: t2,
+        field: f_tile,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: t1,
+            b: t2,
+            offset: 0,
+        },
+        "kept",
+    );
+    a.jmp(Opcode::JNull { reg: t2, offset: 0 }, "kept");
+    a.op(Opcode::Call2 {
+        dst: t2,
+        fun: p.set_tile,
+        arg0: bmp,
+        arg1: t2,
+    });
+    a.op(Opcode::Field {
+        dst: filt,
+        obj: bmp,
+        field: p.o_filter,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: filt,
+            offset: 0,
+        },
+        "reported",
+    );
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.set_enable,
+        arg0: filt,
+        arg1: b,
+    });
+    a.label("reported");
+    a.op(Opcode::String {
+        dst: msg,
+        ptr: s_reset,
+    });
+    a.op(Opcode::Null { dst: dd });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: report,
+        arg0: ev,
+        arg1: msg,
+        arg2: dd,
+    });
+    a.label("kept");
     a.op(Opcode::Call1 {
         dst: wi,
         fun: p.outer_width,
@@ -968,11 +1372,9 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         "untrap",
     );
     a.jmp(Opcode::JAlways { offset: 0 }, "centre");
+    // mpHudUnit is stored only once the swap has gone through, so a failed
+    // attempt (an exception, reported by the catch) is retried next frame.
     a.label("changed");
-    a.op(Opcode::SetThis {
-        field: f_unit,
-        src: u,
-    });
     a.op(Opcode::GetThis {
         dst: bmp,
         field: p.ev_event,
@@ -1067,6 +1469,10 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
 
     // Swap the image, mask it for a portrait only, set and centre the label.
     a.label("apply");
+    a.op(Opcode::SetThis {
+        field: f_tile,
+        src: tile,
+    });
     a.op(Opcode::Call2 {
         dst: tile,
         fun: p.set_tile,
@@ -1103,6 +1509,10 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
         fun: p.html_set_text,
         arg0: lbl,
         arg1: name,
+    });
+    a.op(Opcode::SetThis {
+        field: f_unit,
+        src: u,
     });
     a.label("centre");
     a.op(Opcode::Call1 {
@@ -1154,6 +1564,17 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
     a.label("ret");
     a.op(Opcode::Ret { ret: v });
     a.label("catch");
+    a.op(Opcode::String {
+        dst: msg,
+        ptr: s_err,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: report,
+        arg0: ev,
+        arg1: msg,
+        arg2: exc,
+    });
     a.op(Opcode::Ret { ret: v });
     push_fn(code, vec![p.ev_t], p.void_, r.0, a.finish(), p.dbg_file)
 }
@@ -1166,6 +1587,12 @@ fn new_fields(p: &Plan) -> Vec<(&'static str, RefType)> {
         (WIDTH_FIELD, p.i32_),
     ];
     v.extend(list::FIELDS.iter().map(|(n, k)| (*n, k.of(p))));
+    v.extend([
+        (WHY_FIELD, p.i32_),
+        (SEEN_FIELD, p.unit_t),
+        (TILE_FIELD, p.tile_t),
+        (REPORT_FIELD, p.f64_),
+    ]);
     v
 }
 
@@ -1177,9 +1604,14 @@ fn apply(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan) -> Result<()> {
         label: RefField(base + 1),
         hud_w: RefField(base + 2),
         list: list::ListFields::at(base + 3),
+        why: RefField(base + 3 + list::FIELDS.len()),
+        seen: RefField(base + 4 + list::FIELDS.len()),
+        tile: RefField(base + 5 + list::FIELDS.len()),
+        rep_t: RefField(base + 6 + list::FIELDS.len()),
     };
-    let hud = add_hud(code, p, &fl)?;
-    let hud_list = list::add_list(code, p, lp, &fl.list)?;
+    let report = add_report(code, p, &fl)?;
+    let hud = add_hud(code, p, &fl, report)?;
+    let hud_list = list::add_list(code, p, lp, &fl.list, report)?;
     let names: Vec<_> = new_fields(p)
         .into_iter()
         .map(|(n, t)| (string_ref(code, n), t))
@@ -1218,8 +1650,8 @@ fn apply(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan) -> Result<()> {
         ],
     );
     eprintln!(
-        "patched timeline hud: TimelineEvent ctor fn@{} op {} masks Player, sync fn@{} calls timelineHud fn@{} and timelineHudList fn@{}",
-        ctor.0, p.mask_switch, f.findex.0, hud.0, hud_list.0
+        "patched timeline hud: TimelineEvent ctor fn@{} op {} masks Player, sync fn@{} calls timelineHud fn@{} and timelineHudList fn@{}, errors and changes printed (report fn@{})",
+        ctor.0, p.mask_switch, f.findex.0, hud.0, hud_list.0, report.0
     );
     Ok(())
 }
@@ -1259,7 +1691,7 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        assert_eq!(back.functions.len(), orig.functions.len() + 2);
+        assert_eq!(back.functions.len(), orig.functions.len() + 3);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
             assert_eq!(
@@ -1269,8 +1701,9 @@ mod tests {
                 a.findex.0
             );
         }
-        let hud = &back.functions[orig.functions.len()];
-        let hud_list = &back.functions[orig.functions.len() + 1];
+        let report = &back.functions[orig.functions.len()];
+        let hud = &back.functions[orig.functions.len() + 1];
+        let hud_list = &back.functions[orig.functions.len() + 2];
 
         // Constructor: only the Player offset of the mask switch.
         let (a, b) = (&orig.functions[p.ctor_fi], &back.functions[p.ctor_fi]);
@@ -1333,7 +1766,7 @@ mod tests {
         }
         assert_eq!(names[..3], [UNIT_FIELD, LABEL_FIELD, WIDTH_FIELD]);
 
-        for f in [hud, hud_list] {
+        for f in [report, hud, hud_list] {
             check_types(&back, f, 0..f.ops.len());
             check_flow(f);
         }
@@ -1349,6 +1782,51 @@ mod tests {
         assert!(plan(&again).is_err());
         patch_timeline_hud(&mut again);
         assert!(write(&again) == patched);
+    }
+
+    /// An exception in timelineHud / timelineHudList is no longer swallowed:
+    /// the Trap's handler passes the caught value to the report function,
+    /// which prints through Sys.println (rate-limited by Sys.time).
+    #[test]
+    fn catch_prints() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let p = plan(&orig).expect("plan");
+        let mut code = read(&image);
+        patch_timeline_hud(&mut code);
+        let back = read(&write(&code));
+        let n = orig.functions.len();
+        let report = &back.functions[n];
+        let calls = |f: &Function, fun: RefFun| {
+            f.ops
+                .iter()
+                .any(|o| matches!(o, Opcode::Call1 { fun: g, .. } | Opcode::Call0 { fun: g, .. } if *g == fun))
+        };
+        assert!(calls(report, p.println), "report prints");
+        assert!(calls(report, p.sys_time), "report is rate-limited");
+        for f in [&back.functions[n + 1], &back.functions[n + 2]] {
+            let (trap_at, exc, off) = f
+                .ops
+                .iter()
+                .enumerate()
+                .find_map(|(i, o)| match o {
+                    Opcode::Trap { exc, offset } => Some((i, *exc, *offset)),
+                    _ => None,
+                })
+                .expect("one Trap");
+            let handler = (trap_at as i64 + 1 + off as i64) as usize;
+            let tail = &f.ops[handler..];
+            assert!(
+                tail.iter().any(|o| matches!(o,
+                    Opcode::Call3 { fun, arg0: Reg(0), arg2, .. } if *fun == report.findex && *arg2 == exc)),
+                "fn@{}: the catch reports the exception",
+                f.findex.0
+            );
+            assert!(matches!(tail.last(), Some(Opcode::Ret { .. })));
+        }
     }
 
     /// A constructor whose Player case is not the unmasked branch, or a sync

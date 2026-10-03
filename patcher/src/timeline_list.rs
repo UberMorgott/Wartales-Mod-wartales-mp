@@ -255,7 +255,9 @@ pub(super) fn add_list(
     p: &Plan,
     lp: &ListPlan,
     fl: &ListFields,
+    report: RefFun,
 ) -> Result<RefFun> {
+    let s_err = string_ref(code, "mp: timelineHudList error: ");
     let c0 = int_const(code, 0);
     let c1 = int_const(code, 1);
     let c2 = int_const(code, 2);
@@ -1297,6 +1299,14 @@ pub(super) fn add_list(
     a.label("ret");
     a.op(Opcode::Ret { ret: v });
     a.label("catch");
+    str_op(&mut a, text, s_err);
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: report,
+        arg0: ev,
+        arg1: text,
+        arg2: exc,
+    });
     a.op(Opcode::Ret { ret: v });
     push_fn(code, vec![p.ev_t], p.void_, r.0, a.finish(), p.dbg_file)
 }
