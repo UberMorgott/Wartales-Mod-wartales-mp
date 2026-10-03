@@ -65,6 +65,14 @@
 //      unit acts; the portrait is then put back.
 //    mpHudUnit is stored only after a successful swap, so a failure is retried.
 //
+// Every String the new functions use is a constant global (GetGlobal, as the
+// game's own code does). The `String` opcode yields the raw UTF-16 bytes, and
+// the JIT trusts the register type: the hud4/hud5 builds put those bytes in
+// String registers, so the first message (and the "default" font name) raised
+// an access violation inside the trap, the report did the same inside its own
+// trap, and nothing was ever printed or drawn. asm::check_types now refuses a
+// `String` op into anything but a bytes register.
+//
 // Validated before editing; a mismatch skips the pass (logged).
 
 #[path = "timeline_list.rs"]
@@ -72,6 +80,7 @@ mod list;
 
 use super::*;
 use crate::asm::{push_fn, string_ref, Asm, Regs};
+use crate::job_xp::str_global;
 use hlbc::types::{ObjField, RefGlobal, ValBool};
 
 const UNIT_FIELD: &str = "mpHudUnit";
@@ -808,22 +817,23 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
     let (f_why, f_seen, f_tile) = (fl.why, fl.seen, fl.tile);
     let i0 = int_const(code, 0);
     let why_c: Vec<_> = (1..=5).map(|k| int_const(code, k)).collect();
-    let s_trace = string_ref(code, "mp: timelineHud: why=");
-    let s_started = string_ref(code, " started=");
-    let s_shown = string_ref(code, " shown=");
-    let s_portrait = string_ref(code, "portrait");
-    let s_swords = string_ref(code, "swords");
-    let s_reset = string_ref(
+    let s_trace = str_global(code, p.str_t, "mp: timelineHud: why=");
+    let s_started = str_global(code, p.str_t, " started=");
+    let s_shown = str_global(code, p.str_t, " shown=");
+    let s_portrait = str_global(code, p.str_t, "portrait");
+    let s_swords = str_global(code, p.str_t, "swords");
+    let s_reset = str_global(
         code,
+        p.str_t,
         "mp: timelineHud: portrait reset by the game, re-applied",
     );
-    let s_err = string_ref(code, "mp: timelineHud error: ");
+    let s_err = str_global(code, p.str_t, "mp: timelineHud error: ");
     let one = float_const(code, 1.0);
     let shadow_alpha = float_const(code, 0.8);
     let half = float_const(code, 0.5);
-    let s_default = string_ref(code, "default");
-    let s_icon = string_ref(code, "TimelineIcon");
-    let s_empty = string_ref(code, "");
+    let s_default = str_global(code, p.str_t, "default");
+    let s_icon = str_global(code, p.str_t, "TimelineIcon");
+    let s_empty = str_global(code, p.str_t, "");
 
     let mut r = Regs(vec![p.ev_t]);
     let ev = Reg(0);
@@ -974,9 +984,9 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         arg1: b,
     });
     a.label("mk");
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: name,
-        ptr: s_default,
+        global: s_default,
     });
     a.op(Opcode::Call1 {
         dst: font,
@@ -1171,9 +1181,9 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         field: f_why,
         src: why,
     });
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: msg,
-        ptr: s_trace,
+        global: s_trace,
     });
     a.op(Opcode::ToDyn { dst: dd, src: why });
     a.op(Opcode::Call1 {
@@ -1187,9 +1197,9 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         arg0: msg,
         arg1: txt,
     });
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: txt,
-        ptr: s_started,
+        global: s_started,
     });
     a.op(Opcode::Call2 {
         dst: msg,
@@ -1235,9 +1245,9 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         arg0: msg,
         arg1: txt,
     });
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: txt,
-        ptr: s_shown,
+        global: s_shown,
     });
     a.op(Opcode::Call2 {
         dst: msg,
@@ -1245,14 +1255,14 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         arg0: msg,
         arg1: txt,
     });
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: txt,
-        ptr: s_swords,
+        global: s_swords,
     });
     a.jmp(Opcode::JNull { reg: u, offset: 0 }, "shown");
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: txt,
-        ptr: s_portrait,
+        global: s_portrait,
     });
     a.label("shown");
     a.op(Opcode::Call2 {
@@ -1341,9 +1351,9 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         arg1: b,
     });
     a.label("reported");
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: msg,
-        ptr: s_reset,
+        global: s_reset,
     });
     a.op(Opcode::Null { dst: dd });
     a.op(Opcode::Call3 {
@@ -1391,18 +1401,18 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         obj: bmp,
         field: p.o_filter,
     });
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: name,
-        ptr: s_empty,
+        global: s_empty,
     });
     a.jmp(Opcode::JNotNull { reg: u, offset: 0 }, "portrait");
     a.op(Opcode::Call0 {
         dst: api,
         fun: p.get_api,
     });
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: icon,
-        ptr: s_icon,
+        global: s_icon,
     });
     a.op(Opcode::Call2 {
         dst: tile,
@@ -1564,9 +1574,9 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
     a.label("ret");
     a.op(Opcode::Ret { ret: v });
     a.label("catch");
-    a.op(Opcode::String {
+    a.op(Opcode::GetGlobal {
         dst: msg,
-        ptr: s_err,
+        global: s_err,
     });
     a.op(Opcode::Call3 {
         dst: v,
@@ -1827,6 +1837,122 @@ mod tests {
             );
             assert!(matches!(tail.last(), Some(Opcode::Ret { .. })));
         }
+    }
+
+    /// Globals holding the String constant `value`.
+    fn str_globals(code: &Bytecode, value: &str) -> Vec<RefGlobal> {
+        code.constants
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c.fields[..], [si, _] if code.strings.get(si).is_some_and(|x| x.as_str() == value)))
+            .map(|c| c.global)
+            .collect()
+    }
+
+    /// The hooked `sync` is the one the battle HUD builds and runs. Chain in the
+    /// vanilla 1.0.48274 image (indices for reference, the asserts are structural):
+    ///
+    /// - `Battle.initUI` fn@9716 ops 202..204: `new battle.ui.win.Timeline`,
+    ///   `Timeline.__constructor__` fn@10380, `this.timeline = it` (the only
+    ///   reference to fn@10380).
+    /// - `Timeline.init` fn@10357 (run by the ui.Window constructor) creates one
+    ///   "timeline-event" domkit component per `getUnitsTimeline` entry.
+    /// - `domkit.CompTimelineEvent.__constructor__` fn@10379 registers
+    ///   "timeline-event" with the maker fn@45085, which does
+    ///   `new TimelineEvent` and calls `TimelineEvent.__constructor__` fn@10378,
+    ///   the only user of the "TimelineIcon" icon (the crossed swords).
+    /// - `TimelineEvent`'s prototype `sync` (pindex 14) is fn@10369;
+    ///   `h2d.Object.sync` fn@961 calls every child's sync each frame.
+    ///
+    /// The test patches a scratch copy of the installed image and asserts the
+    /// timelineHud call lands in that very `sync`.
+    #[test]
+    fn battle_hud_constructs_hooked_sync() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let scratch = image.clone();
+        let orig = read(&image);
+        let p = plan(&orig).expect("plan");
+        let battle_t = obj_type(&orig, "battle.Battle").expect("Battle");
+        let tl_t = obj_type(&orig, "battle.ui.win.Timeline").expect("Timeline");
+
+        // Battle.initUI: new Timeline, then its constructor on that register.
+        let init_ui = method(&orig, battle_t, "initUI").expect("initUI");
+        let tl_ctor = init_ui
+            .ops
+            .windows(2)
+            .find_map(|w| match (&w[0], &w[1]) {
+                (Opcode::New { dst }, Opcode::Call1 { fun, arg0, .. })
+                    if arg0 == dst && init_ui.regs[dst.0 as usize] == tl_t =>
+                {
+                    Some(*fun)
+                }
+                _ => None,
+            })
+            .expect("initUI constructs the Timeline");
+        assert_eq!(sig(&orig, tl_ctor).expect("ctor sig").0, [tl_t]);
+
+        // Timeline.init creates "timeline-event" components.
+        let comp_name = str_globals(&orig, "timeline-event");
+        assert!(!comp_name.is_empty(), "timeline-event constant");
+        let uses_name = |f: &Function| {
+            f.ops.iter().any(
+                |o| matches!(o, Opcode::GetGlobal { global, .. } if comp_name.contains(global)),
+            )
+        };
+        assert!(uses_name(
+            method(&orig, tl_t, "init").expect("Timeline.init")
+        ));
+
+        // The "timeline-event" maker builds a TimelineEvent with the patched constructor.
+        let ctor = orig.functions[p.ctor_fi].findex;
+        let makers: Vec<RefFun> = orig
+            .functions
+            .iter()
+            .filter(|f| {
+                f.t.as_fun(&orig).is_some_and(|t| t.ret == p.ev_t)
+                    && f.ops.iter().any(
+                        |o| matches!(o, Opcode::New { dst } if f.regs[dst.0 as usize] == p.ev_t),
+                    )
+                    && f.ops
+                        .iter()
+                        .any(|o| matches!(o, Opcode::Call3 { fun, .. } if *fun == ctor))
+            })
+            .map(|f| f.findex)
+            .collect();
+        assert_eq!(makers.len(), 1, "one TimelineEvent maker");
+        let comp_t = obj_type(&orig, "domkit.CompTimelineEvent").expect("CompTimelineEvent");
+        assert!(
+            orig.functions.iter().any(|f| {
+                sig(&orig, f.findex).is_ok_and(|(a, _)| a.first() == Some(&comp_t))
+                    && uses_name(f)
+                    && f.ops.iter().any(
+                        |o| matches!(o, Opcode::StaticClosure { fun, .. } if *fun == makers[0]),
+                    )
+            }),
+            "CompTimelineEvent registers the maker under timeline-event"
+        );
+
+        // The constructor is what draws the swords.
+        let icon = str_globals(&orig, "TimelineIcon");
+        assert!(orig.functions[p.ctor_fi]
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::GetGlobal { global, .. } if icon.contains(global))));
+
+        // TimelineEvent's own prototype sync is the hooked function.
+        let sync = proto(&orig, p.ev_t, "sync").expect("TimelineEvent.sync");
+        assert_eq!(sync, orig.functions[p.sync_fi].findex);
+
+        let mut code = read(&scratch);
+        patch_timeline_hud(&mut code);
+        let back = read(&write(&code));
+        let hud = back.functions[orig.functions.len() + 1].findex;
+        assert_eq!(proto(&back, p.ev_t, "sync").expect("sync"), sync);
+        let f = &back.functions[p.sync_fi];
+        assert!(matches!(f.ops[1], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == hud));
     }
 
     /// A constructor whose Player case is not the unmasked branch, or a sync

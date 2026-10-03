@@ -255,6 +255,11 @@ pub(crate) mod testutil {
                 Opcode::Int { dst, .. } | Opcode::Incr { dst } => {
                     is(dst, |t| matches!(t, Type::I32))
                 }
+                // `String` loads the raw UTF-16 bytes, not a String object: the
+                // JIT trusts the register type, so a String register gets a
+                // pointer into the char data and the first use is an access
+                // violation. String objects come from constant globals (str_global).
+                Opcode::String { dst, .. } => is(dst, |t| matches!(t, Type::Bytes)),
                 Opcode::Add { dst, a, b } | Opcode::Sub { dst, a, b } => {
                     rt(dst) == rt(a)
                         && rt(a) == rt(b)

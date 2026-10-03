@@ -257,7 +257,7 @@ pub(super) fn add_list(
     fl: &ListFields,
     report: RefFun,
 ) -> Result<RefFun> {
-    let s_err = string_ref(code, "mp: timelineHudList error: ");
+    let s_err = str_global(code, p.str_t, "mp: timelineHudList error: ");
     let c0 = int_const(code, 0);
     let c1 = int_const(code, 1);
     let c2 = int_const(code, 2);
@@ -270,13 +270,13 @@ pub(super) fn add_list(
     let f_gap = float_const(code, GAP);
     let f_edge = float_const(code, EDGE);
     let f_zero = float_const(code, 0.0);
-    let s_default = string_ref(code, "default");
-    let s_empty = string_ref(code, "");
-    let s_acting = string_ref(code, ACTING);
-    let s_done = string_ref(code, DONE);
-    let s_waiting = string_ref(code, WAITING);
-    let s_cut = string_ref(code, CUT);
-    let s_br = string_ref(code, BR);
+    let s_default = str_global(code, p.str_t, "default");
+    let s_empty = str_global(code, p.str_t, "");
+    let s_acting = str_global(code, p.str_t, ACTING);
+    let s_done = str_global(code, p.str_t, DONE);
+    let s_waiting = str_global(code, p.str_t, WAITING);
+    let s_cut = str_global(code, p.str_t, CUT);
+    let s_br = str_global(code, p.str_t, BR);
 
     let mut r = Regs(vec![p.ev_t]);
     let ev = Reg(0);
@@ -367,7 +367,7 @@ pub(super) fn add_list(
     );
 
     let mut a = Asm::new();
-    let str_op = |a: &mut Asm, dst: Reg, ptr| a.op(Opcode::String { dst, ptr });
+    let str_op = |a: &mut Asm, dst: Reg, global| a.op(Opcode::GetGlobal { dst, global });
     let concat = |a: &mut Asm, dst: Reg, x: Reg, y: Reg| {
         a.op(Opcode::Call2 {
             dst,
