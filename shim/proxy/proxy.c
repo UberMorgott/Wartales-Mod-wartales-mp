@@ -654,6 +654,59 @@ static unsigned long long fnv1a(const unsigned char *p, size_t n) {
 	return h;
 }
 
+// The tips library reports each pass on stderr ("patched ..." or "... skipped:
+// why"), which the game process does not have. For the duration of the call,
+// stderr is a temporary file (Rust looks the handle up on every write); its
+// lines are then copied into the log as "tips: <line>".
+static HANDLE tips_capture_begin(HANDLE *prev) {
+	wchar_t path[MAX_PATH * 2];
+	HANDLE h;
+
+	*prev = GetStdHandle(STD_ERROR_HANDLE);
+	if (!helper_path(L"\\tips-stderr.tmp", path, MAX_PATH * 2))
+		return INVALID_HANDLE_VALUE;
+	h = open_raw(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE);
+	if (h == INVALID_HANDLE_VALUE)
+		return h;
+	if (!SetStdHandle(STD_ERROR_HANDLE, h)) {
+		CloseHandle(h);
+		return INVALID_HANDLE_VALUE;
+	}
+	return h;
+}
+
+static void tips_capture_end(HANDLE h, HANDLE prev) {
+	LARGE_INTEGER size, zero;
+	char *buf, *line, *end;
+	DWORD got = 0;
+
+	if (h == INVALID_HANDLE_VALUE)
+		return;
+	SetStdHandle(STD_ERROR_HANDLE, prev);
+	zero.QuadPart = 0;
+	if (GetFileSizeEx(h, &size) && size.QuadPart > 0 && size.QuadPart < 1024 * 1024 &&
+		SetFilePointerEx(h, zero, NULL, FILE_BEGIN)) {
+		buf = (char *)malloc((size_t)size.QuadPart + 1);
+		if (buf != NULL && ReadFile(h, buf, (DWORD)size.QuadPart, &got, NULL)) {
+			buf[got] = 0;
+			for (line = buf; *line != 0; line = end) {
+				end = strchr(line, '\n');
+				if (end != NULL)
+					*end++ = 0;
+				else
+					end = line + strlen(line);
+				if (*line != 0 && line[strlen(line) - 1] == '\r')
+					line[strlen(line) - 1] = 0;
+				if (*line != 0)
+					shim_log("tips: %s", line);
+			}
+		}
+		free(buf);
+	}
+	CloseHandle(h);
+}
+
 // materialise_copy makes sure copy holds exactly tips(patch(source)) and
 // reports whether it may be handed out. FALSE means: use the original. The
 // tips stage (wartales-tips, structural) is best effort: if it refuses the
@@ -664,6 +717,8 @@ static BOOL materialise_copy(const wchar_t *source, const wchar_t *copy) {
 	size_t n, m, tips_n = 0;
 	uint8_t reason[256];
 	BOOL ok = FALSE;
+	HANDLE cap, prev_err;
+	int rc;
 
 	img = read_all(source, &n);
 	if (img == NULL) {
@@ -680,7 +735,10 @@ static BOOL materialise_copy(const wchar_t *source, const wchar_t *copy) {
 		(unsigned long)fnv1a(img, n));
 
 	reason[0] = 0;
-	if (wartales_tips_patch(img, n, &tips, &tips_n, reason, sizeof(reason)) == 0 && tips != NULL) {
+	cap = tips_capture_begin(&prev_err);
+	rc = wartales_tips_patch(img, n, &tips, &tips_n, reason, sizeof(reason));
+	tips_capture_end(cap, prev_err);
+	if (rc == 0 && tips != NULL) {
 		shim_log("tips: patched image %lu -> %lu bytes", (unsigned long)n, (unsigned long)tips_n);
 		free(img);
 		img = tips;
