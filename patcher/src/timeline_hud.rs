@@ -64,6 +64,12 @@
 //      bitmap's tile no longer is the portrait set (mpHudTile) while the same
 //      unit acts; the portrait is then put back.
 //    mpHudUnit is stored only after a successful swap, so a failure is retried.
+// 6. `Timeline.update` (every frame while the timeline is shown: it is what
+//    rebuilds the diamonds) first calls timelineHudTick(this), which prints
+//    "mp: timeline: diamonds=<n> first=<TimelineElement index>" when either
+//    changes and runs timelineHud on eventsElts[0]. In a v0.2.2 / hud4 session
+//    no timelineHud line ever appeared, so the sync path alone did not reach
+//    the Player diamond; the tick does not depend on h2d sync dispatch.
 //
 // Validated before editing; a mismatch skips the pass (logged).
 
@@ -83,6 +89,8 @@ struct Plan {
     /// The constructor's `Switch` choosing between masking `event` and removing `maskBitmap`.
     mask_switch: usize,
     sync_fi: usize,
+    /// `Timeline.update`: calls timelineHudTick first.
+    tl_update_fi: usize,
     /// `sync` op 0's void destination (the super sync result).
     sync_void: Reg,
     ev_t: RefType,
@@ -352,6 +360,29 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let (ev_game, eg_t) = field(code, ev_t, "game")?;
     let (o_parent, op_t) = field(code, obj_t, "parent")?;
     let (o_filter, of_t) = field(code, obj_t, "filter")?;
+    // Timeline.update runs every frame while the timeline is shown (it is what
+    // rebuilds the diamonds), so it also drives the HUD of its first diamond.
+    if code
+        .types
+        .iter()
+        .any(|t| matches!(t, Type::Obj(o) if o.super_ == Some(tl_t)))
+    {
+        bail!("Timeline has a subclass");
+    }
+    if obj(code, tl_t)?
+        .fields
+        .iter()
+        .any(|f| [TL_KEY_FIELD, TL_ERR_FIELD].contains(&s(code, f.name)))
+    {
+        bail!("Timeline already has the HUD fields");
+    }
+    let tl_update = method(code, tl_t, "update")?;
+    if fun_args(code, tl_update) != [tl_t, f64_]
+        || tl_update.t.as_fun(code).map(|f| f.ret) != Some(void_)
+    {
+        bail!("unexpected Timeline.update signature");
+    }
+    let tl_update_fi = fun_index(code, tl_update.findex)?;
     let (b_state, bs_t) = field(code, battle_t, "state")?;
     let (s_started, ss_t) = field(code, state_t, "startedPlaying")?;
     let (s_side, side_t) = field(code, state_t, "playerSide")?;
@@ -494,6 +525,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         ctor_fi,
         mask_switch,
         sync_fi,
+        tl_update_fi,
         sync_void,
         ev_t,
         void_,
@@ -718,6 +750,265 @@ const WHY_FIELD: &str = "mpHudWhy";
 const SEEN_FIELD: &str = "mpHudSeen";
 const TILE_FIELD: &str = "mpHudTile";
 const REPORT_FIELD: &str = "mpHudRepT";
+/// Timeline fields: last traced (diamond count, first diamond kind) key, and
+/// whether a tick error was printed.
+const TL_KEY_FIELD: &str = "mpTlKey";
+const TL_ERR_FIELD: &str = "mpTlErr";
+
+/// `timelineHudTick(tl)`, first thing in `Timeline.update`:
+///
+/// ```text
+/// try {
+///   arr = tl.eventsElts; n = arr == null ? -1 : arr.length;
+///   first = n > 0 ? arr[0] : null; k = first?.elt == null ? -1 : EnumIndex(first.elt);
+///   if (n * 16 + k != tl.mpTlKey) { tl.mpTlKey = n * 16 + k;
+///       Sys.println("mp: timeline: diamonds=" + n + " first=" + k); }
+///   if (first != null) timelineHud(first);
+/// } catch (e) { if (!tl.mpTlErr) { tl.mpTlErr = true; Sys.println("mp: timelineHudTick error: " + e); } }
+/// ```
+fn add_tick(code: &mut Bytecode, p: &Plan, hud: RefFun) -> Result<RefFun> {
+    let (key_f, err_f) = {
+        let o = obj(code, p.tl_t)?;
+        let base = o.fields.len();
+        (RefField(base), RefField(base + 1))
+    };
+    let c0 = int_const(code, 0);
+    let cm1 = int_const(code, -1);
+    let c16 = int_const(code, 16);
+    let s_head = string_ref(code, "mp: timeline: diamonds=");
+    let s_first = string_ref(code, " first=");
+    let s_err = string_ref(code, "mp: timelineHudTick error: ");
+    let mut r = Regs(vec![p.tl_t]);
+    let (v, exc, arr, n, k, zero, raw, d, first, elt, key, old, t16, msg, txt, dd, b) = (
+        r.r(p.void_),
+        r.r(p.dyn_t),
+        r.r(p.arr_t),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.raw_t),
+        r.r(p.dyn_t),
+        r.r(p.ev_t),
+        r.r(p.elt_t),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.str_t),
+        r.r(p.str_t),
+        r.r(p.dyn_t),
+        r.r(p.bool_),
+    );
+    let mut a = Asm::new();
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
+    a.op(Opcode::Int { dst: zero, ptr: c0 });
+    a.op(Opcode::Int { dst: n, ptr: cm1 });
+    a.op(Opcode::Int { dst: k, ptr: cm1 });
+    a.op(Opcode::Null { dst: first });
+    a.op(Opcode::GetThis {
+        dst: arr,
+        field: p.tl_events,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: arr,
+            offset: 0,
+        },
+        "keyed",
+    );
+    a.op(Opcode::Field {
+        dst: n,
+        obj: arr,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: zero,
+            b: n,
+            offset: 0,
+        },
+        "keyed",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: arr,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: zero,
+    });
+    a.op(Opcode::SafeCast { dst: first, src: d });
+    a.jmp(
+        Opcode::JNull {
+            reg: first,
+            offset: 0,
+        },
+        "keyed",
+    );
+    a.op(Opcode::Field {
+        dst: elt,
+        obj: first,
+        field: p.ev_elt,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: elt,
+            offset: 0,
+        },
+        "keyed",
+    );
+    a.op(Opcode::EnumIndex { dst: k, value: elt });
+    a.label("keyed");
+    a.op(Opcode::Int { dst: t16, ptr: c16 });
+    a.op(Opcode::Mul {
+        dst: key,
+        a: n,
+        b: t16,
+    });
+    a.op(Opcode::Add {
+        dst: key,
+        a: key,
+        b: k,
+    });
+    a.op(Opcode::GetThis {
+        dst: old,
+        field: key_f,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: old,
+            b: key,
+            offset: 0,
+        },
+        "run",
+    );
+    a.op(Opcode::SetThis {
+        field: key_f,
+        src: key,
+    });
+    a.op(Opcode::String {
+        dst: msg,
+        ptr: s_head,
+    });
+    a.op(Opcode::ToDyn { dst: dd, src: n });
+    a.op(Opcode::Call1 {
+        dst: txt,
+        fun: p.std_string,
+        arg0: dd,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::String {
+        dst: txt,
+        ptr: s_first,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::ToDyn { dst: dd, src: k });
+    a.op(Opcode::Call1 {
+        dst: txt,
+        fun: p.std_string,
+        arg0: dd,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: msg,
+    });
+    a.label("run");
+    a.jmp(
+        Opcode::JNull {
+            reg: first,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: hud,
+        arg0: first,
+    });
+    a.label("untrap");
+    a.op(Opcode::EndTrap { exc });
+    a.op(Opcode::Ret { ret: v });
+    a.label("catch");
+    a.op(Opcode::GetThis {
+        dst: b,
+        field: err_f,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "done");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetThis {
+        field: err_f,
+        src: b,
+    });
+    a.op(Opcode::String {
+        dst: msg,
+        ptr: s_err,
+    });
+    a.op(Opcode::Call1 {
+        dst: txt,
+        fun: p.std_string,
+        arg0: exc,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: msg,
+    });
+    a.label("done");
+    a.op(Opcode::Ret { ret: v });
+    let f = push_fn(code, vec![p.tl_t], p.void_, r.0, a.finish(), p.dbg_file)?;
+    let (key_name, err_name) = (
+        string_ref(code, TL_KEY_FIELD),
+        string_ref(code, TL_ERR_FIELD),
+    );
+    let Type::Obj(o) = &mut code.types[p.tl_t.0] else {
+        unreachable!()
+    };
+    for (name, t) in [(key_name, p.i32_), (err_name, p.bool_)] {
+        o.own_fields.push(ObjField { name, t });
+        o.fields.push(ObjField { name, t });
+    }
+    // Timeline.update: `timelineHudTick(this)` first (a new void register).
+    let u = &mut code.functions[p.tl_update_fi];
+    let vr = Reg(u.regs.len() as u32);
+    u.regs.push(p.void_);
+    insert_ops(
+        u,
+        0,
+        vec![Opcode::Call1 {
+            dst: vr,
+            fun: f,
+            arg0: Reg(0),
+        }],
+    );
+    Ok(f)
+}
 
 /// `timelineHudReport(ev, msg, exc)`: at most once a second per diamond,
 /// `Sys.println(exc == null ? msg : msg + Std.string(exc))`; never throws.
@@ -1612,6 +1903,7 @@ fn apply(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan) -> Result<()> {
     let report = add_report(code, p, &fl)?;
     let hud = add_hud(code, p, &fl, report)?;
     let hud_list = list::add_list(code, p, lp, &fl.list, report)?;
+    let tick = add_tick(code, p, hud)?;
     let names: Vec<_> = new_fields(p)
         .into_iter()
         .map(|(n, t)| (string_ref(code, n), t))
@@ -1631,6 +1923,7 @@ fn apply(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan) -> Result<()> {
     };
     offsets[0] = offsets[1];
     let ctor = c.findex;
+    let upd = code.functions[p.tl_update_fi].findex;
 
     let f = &mut code.functions[p.sync_fi];
     insert_ops(
@@ -1650,8 +1943,9 @@ fn apply(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan) -> Result<()> {
         ],
     );
     eprintln!(
-        "patched timeline hud: TimelineEvent ctor fn@{} op {} masks Player, sync fn@{} calls timelineHud fn@{} and timelineHudList fn@{}, errors and changes printed (report fn@{})",
-        ctor.0, p.mask_switch, f.findex.0, hud.0, hud_list.0, report.0
+        "patched timeline hud: TimelineEvent ctor fn@{} op {} masks Player, sync fn@{} calls timelineHud fn@{} and timelineHudList fn@{}, errors and changes printed (report fn@{}), Timeline.update fn@{} calls timelineHudTick fn@{}",
+        ctor.0, p.mask_switch, f.findex.0, hud.0, hud_list.0, report.0,
+        upd.0, tick.0
     );
     Ok(())
 }
@@ -1691,12 +1985,12 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        assert_eq!(back.functions.len(), orig.functions.len() + 3);
+        assert_eq!(back.functions.len(), orig.functions.len() + 4);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
             assert_eq!(
                 same,
-                i != p.ctor_fi && i != p.sync_fi,
+                i != p.ctor_fi && i != p.sync_fi && i != p.tl_update_fi,
                 "function #{i} (fn@{})",
                 a.findex.0
             );
@@ -1766,10 +2060,27 @@ mod tests {
         }
         assert_eq!(names[..3], [UNIT_FIELD, LABEL_FIELD, WIDTH_FIELD]);
 
-        for f in [report, hud, hud_list] {
+        let tick = &back.functions[orig.functions.len() + 3];
+        for f in [report, hud, hud_list, tick] {
             check_types(&back, f, 0..f.ops.len());
             check_flow(f);
         }
+        // Timeline.update calls the tick first, which drives timelineHud.
+        let (a, b) = (
+            &orig.functions[p.tl_update_fi],
+            &back.functions[p.tl_update_fi],
+        );
+        shifted(a, b, 0, 1);
+        assert!(matches!(b.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == tick.findex));
+        check_types(&back, b, 0..1);
+        check_flow(b);
+        assert!(tick
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == hud.findex)));
+        let tl = back.types[p.tl_t.0].get_type_obj().expect("tl");
+        let otl = orig.types[p.tl_t.0].get_type_obj().expect("tl");
+        assert_eq!(tl.own_fields.len(), otl.own_fields.len() + 2);
         // The list colours names with getName and is gated on isMulti.
         for want in [p.bp_get_name, p.is_multi] {
             assert!(hud_list
