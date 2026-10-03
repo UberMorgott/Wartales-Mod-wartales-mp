@@ -27,18 +27,29 @@
 //
 //      if (ev.mpHudLabel == null) {          // once per diamond
 //          if (ev.event.filter != null) ev.event.filter.enable = false;  // swords unmasked, as vanilla
-//          ev.mpHudLabel = new h2d.HtmlText(BaseUI.loadFont("default"), ev);
+//          ev.mpHudLabel = new h2d.HtmlText(nameFont(), ev);   // players panel font
 //          ev.getProperties(label).isAbsolute = true;
 //          label.dropShadow = { dx: 1, dy: 1, color: 0, alpha: 0.8 };
 //      }
 //      u = state.startedPlaying, kept only when it is on the player side and
 //          ev is the Timeline's first diamond (eventsElts[0]); else null
+//      if (startedPlaying == null && ev.mpHudUnit != null && ev is still first
+//          && ev.elt == state.timelines[0][0]) u = ev.mpHudUnit;   // why 6
+//          End turn clears startedPlaying (closure fn@29542) before the
+//          finish callback shifts timelines[0] and Timeline.update rebuilds
+//          the diamonds (ui.Window.rebuild fn@3427: new TimelineEvents);
+//          keeping the portrait while ev.elt is still the live head (same
+//          enum value) removes the swords flash. A shifted head, an instance
+//          reused for another slot (Timeline.update rebuilds only when an
+//          entry differs by type_enum_eq) or a new round's genTimeline values
+//          are other enum values, so those show the swords.
 //      if (u == ev.mpHudUnit) return;        // act only on change
 //      ev.mpHudUnit = u;
 //      if (u == null) { tile = get_api().getIcon("TimelineIcon"); text = ""; mask = false; }
 //      else { tile = u.data.getIcon();       // the AI / PlayerUnit portrait
 //             text = isMulti && u.data.owner != null ? u.data.owner.getName() : "";
-//             mask = true; }                 // getName: nickname in <font color=player colour>
+//             mask = true; }                 // getName: nickname in <font color=player colour>,
+//                                            // the markup the players panel shows too
 //      ev.event.tile = tile; ev.event.filter.enable = mask;
 //      label.text = text;
 //      centre: ev.mpHudW = ev.outerWidth;
@@ -57,7 +68,7 @@
 //    - "mp: timelineHud: why=<n> started=<unit name|null> shown=<portrait|swords>"
 //      whenever startedPlaying or the gate result changes (why: 0 shown,
 //      1 no battle/state, 2 nobody acting, 3 no owner, 4 not the player side,
-//      5 not the Timeline's first diamond);
+//      5 not the Timeline's first diamond, 6 kept after turn end);
 //    - "mp: timelineHud error: <exception>" / "mp: timelineHudList error: ..."
 //      from the catch blocks (timelineHudReport, at most once a second per diamond);
 //    - "mp: timelineHud: portrait reset by the game, re-applied" when the event
@@ -131,6 +142,8 @@ struct Plan {
     b_state: RefField,
     s_started: RefField,
     s_side: RefField,
+    /// `battle.State.timelines`: the live turn order, head = `timelines[0][0]`.
+    s_timelines: RefField,
     u_owner: RefField,
     u_data: RefField,
     p_side: RefField,
@@ -145,6 +158,22 @@ struct Plan {
     sh_dy: RefField,
     tl_cls: RefGlobal,
     tl_cls_t: RefType,
+    /// Name font chain (see `add_name_font`).
+    ldr_cls: RefGlobal,
+    ldr_cls_t: RefType,
+    ldr_cur: RefField,
+    loader_t: RefType,
+    res_load: RefFun,
+    any_t: RefType,
+    any_to: RefFun,
+    resource_t: RefType,
+    bf_t: RefType,
+    bf_cls: RefGlobal,
+    bf_cls_t: RefType,
+    to_sdf: RefFun,
+    nint_t: RefType,
+    ref_i32_t: RefType,
+    ref_f64_t: RefType,
     base_check: RefFun,
     set_enable: RefFun,
     load_font: RefFun,
@@ -364,6 +393,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let (b_state, bs_t) = field(code, battle_t, "state")?;
     let (s_started, ss_t) = field(code, state_t, "startedPlaying")?;
     let (s_side, side_t) = field(code, state_t, "playerSide")?;
+    let (s_timelines, stl_t) = field(code, state_t, "timelines")?;
     let (u_owner, uo_t) = field(code, unit_t, "owner")?;
     let (u_data, ud_t) = field(code, unit_t, "data")?;
     let (p_side, ps_t) = field(code, player_t, "side")?;
@@ -382,6 +412,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         || ps_t != side_t
         || suo_t != bp_t
         || te_t != arr_t
+        || stl_t != arr_t
         || al_t != i32_
     {
         bail!("unexpected field types on the timeline / unit / player path");
@@ -457,6 +488,40 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
     let base_check = check.findex;
     let (tl_cls, tl_cls_t) = class_global(code, "battle.ui.win.Timeline")?;
+
+    // The players panel's name font, `font: 'ui/fonts/eb_garamond_medium.fnt'
+    // 16 multi 0.5 0.45` (style.css, players-panel .players-list .player text),
+    // loaded the way h2d.domkit.CustomParser.parseFont does:
+    // Loader.currentInstance.load(path).to(BitmapFont).toSdfFont(size, channel, cutoff, smooth).
+    let (ldr_cls, ldr_cls_t) = class_global(code, "hxd.res.Loader")?;
+    let (ldr_cur, loader_t) = field(code, ldr_cls_t, "currentInstance")?;
+    let res_load = method(code, loader_t, "load")?.findex;
+    let (la, any_t) = sig(code, res_load)?;
+    if la != [loader_t, str_t] {
+        bail!("unexpected hxd.res.Loader.load signature");
+    }
+    let any_to = method(code, any_t, "to")?.findex;
+    let (ta, resource_t) = sig(code, any_to)?;
+    let bf_t = obj_type(code, "hxd.res.BitmapFont")?;
+    let (bf_cls, bf_cls_t) = class_global(code, "hxd.res.BitmapFont")?;
+    if ta.len() != 2 || ta[0] != any_t {
+        bail!("unexpected hxd.res.Any.to signature");
+    }
+    let to_sdf = method(code, bf_t, "toSdfFont")?.findex;
+    let (sa, sr) = sig(code, to_sdf)?;
+    let (nint_t, ref_i32_t, ref_f64_t) = match sa[..] {
+        [b, n, ri, rc, rs]
+            if b == bf_t
+                && sr == font_t
+                && rc == rs
+                && matches!(code.types[n.0], Type::Null(x) if x == i32_)
+                && matches!(code.types[ri.0], Type::Ref(x) if x == i32_)
+                && matches!(code.types[rc.0], Type::Ref(x) if x == f64_) =>
+        {
+            (n, ri, rc)
+        }
+        _ => bail!("unexpected BitmapFont.toSdfFont signature"),
+    };
 
     // Constructor: the Player case of the mask switch.
     let ctor = method(code, ev_t, "__constructor__")?;
@@ -541,6 +606,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         b_state,
         s_started,
         s_side,
+        s_timelines,
         u_owner,
         u_data,
         p_side,
@@ -555,6 +621,21 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         sh_dy,
         tl_cls,
         tl_cls_t,
+        ldr_cls,
+        ldr_cls_t,
+        ldr_cur,
+        loader_t,
+        res_load,
+        any_t,
+        any_to,
+        resource_t,
+        bf_t,
+        bf_cls,
+        bf_cls_t,
+        to_sdf,
+        nint_t,
+        ref_i32_t,
+        ref_f64_t,
         base_check,
         set_enable,
         load_font,
@@ -811,12 +892,189 @@ fn add_report(code: &mut Bytecode, p: &Plan, fl: &Fields) -> Result<RefFun> {
     )
 }
 
+/// `nameFont()`: the players panel's name font, built once and kept in a new
+/// global; on any failure the HUD's former `BaseUI.loadFont("default")`.
+///
+/// ```text
+/// if (G == null) {
+///   try { G = Loader.currentInstance.load(NAME_FONT).to(BitmapFont).toSdfFont(16, 4 /*multi*/, 0.5, 0.45); }
+///   catch (e) { Sys.println("mp: nameFont error: " + e); G = BaseUI.loadFont("default"); }
+/// }
+/// return G;
+/// ```
+fn add_name_font(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
+    code.globals.push(p.font_t);
+    let g = RefGlobal(code.globals.len() - 1);
+    let s_path = str_global(code, p.str_t, NAME_FONT);
+    let s_err = str_global(code, p.str_t, "mp: nameFont error: ");
+    let s_default = str_global(code, p.str_t, "default");
+    let c_size = int_const(code, NAME_FONT_SIZE);
+    let c_multi = int_const(code, 4);
+    let c_cut = float_const(code, 0.5);
+    let c_smooth = float_const(code, 0.45);
+    let mut r = Regs(vec![]);
+    let (font, exc, lc, ld, path, any, cls, res, bf) = (
+        r.r(p.font_t),
+        r.r(p.dyn_t),
+        r.r(p.ldr_cls_t),
+        r.r(p.loader_t),
+        r.r(p.str_t),
+        r.r(p.any_t),
+        r.r(p.bf_cls_t),
+        r.r(p.resource_t),
+        r.r(p.bf_t),
+    );
+    let (i, size, ch, rch, cut, rcut, sm, rsm, msg, txt, v) = (
+        r.r(p.i32_),
+        r.r(p.nint_t),
+        r.r(p.i32_),
+        r.r(p.ref_i32_t),
+        r.r(p.f64_),
+        r.r(p.ref_f64_t),
+        r.r(p.f64_),
+        r.r(p.ref_f64_t),
+        r.r(p.str_t),
+        r.r(p.str_t),
+        r.r(p.void_),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::GetGlobal {
+        dst: font,
+        global: g,
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: font,
+            offset: 0,
+        },
+        "ret",
+    );
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
+    a.op(Opcode::GetGlobal {
+        dst: lc,
+        global: p.ldr_cls,
+    });
+    a.op(Opcode::Field {
+        dst: ld,
+        obj: lc,
+        field: p.ldr_cur,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: path,
+        global: s_path,
+    });
+    a.op(Opcode::Call2 {
+        dst: any,
+        fun: p.res_load,
+        arg0: ld,
+        arg1: path,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: cls,
+        global: p.bf_cls,
+    });
+    a.op(Opcode::Call2 {
+        dst: res,
+        fun: p.any_to,
+        arg0: any,
+        arg1: cls,
+    });
+    a.op(Opcode::SafeCast { dst: bf, src: res });
+    a.op(Opcode::Int {
+        dst: i,
+        ptr: c_size,
+    });
+    a.op(Opcode::ToDyn { dst: size, src: i });
+    a.op(Opcode::Int {
+        dst: ch,
+        ptr: c_multi,
+    });
+    a.op(Opcode::Ref { dst: rch, src: ch });
+    a.op(Opcode::Float {
+        dst: cut,
+        ptr: c_cut,
+    });
+    a.op(Opcode::Ref {
+        dst: rcut,
+        src: cut,
+    });
+    a.op(Opcode::Float {
+        dst: sm,
+        ptr: c_smooth,
+    });
+    a.op(Opcode::Ref { dst: rsm, src: sm });
+    a.op(Opcode::CallN {
+        dst: font,
+        fun: p.to_sdf,
+        args: vec![bf, size, rch, rcut, rsm],
+    });
+    a.op(Opcode::EndTrap { exc });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: font,
+            offset: 0,
+        },
+        "store",
+    );
+    a.jmp(Opcode::JAlways { offset: 0 }, "fallback");
+    a.label("catch");
+    a.op(Opcode::GetGlobal {
+        dst: msg,
+        global: s_err,
+    });
+    a.op(Opcode::Call1 {
+        dst: txt,
+        fun: p.std_string,
+        arg0: exc,
+    });
+    a.op(Opcode::Call2 {
+        dst: msg,
+        fun: p.str_add,
+        arg0: msg,
+        arg1: txt,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: msg,
+    });
+    a.label("fallback");
+    a.op(Opcode::GetGlobal {
+        dst: path,
+        global: s_default,
+    });
+    a.op(Opcode::Call1 {
+        dst: font,
+        fun: p.load_font,
+        arg0: path,
+    });
+    a.label("store");
+    a.op(Opcode::SetGlobal {
+        global: g,
+        src: font,
+    });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: font });
+    push_fn(code, vec![], p.font_t, r.0, a.finish(), p.dbg_file)
+}
+
+/// The font the game's players panel draws player names with (style.css:
+/// `players-panel .players-list .player text`).
+const NAME_FONT: &str = "ui/fonts/eb_garamond_medium.fnt";
+const NAME_FONT_SIZE: i32 = 16;
+
 /// `timelineHud(ev)` (see the header).
-fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result<RefFun> {
+fn add_hud(
+    code: &mut Bytecode,
+    p: &Plan,
+    fl: &Fields,
+    report: RefFun,
+    name_font: RefFun,
+) -> Result<RefFun> {
     let (f_unit, f_label, f_w) = (fl.unit, fl.label, fl.hud_w);
     let (f_why, f_seen, f_tile) = (fl.why, fl.seen, fl.tile);
     let i0 = int_const(code, 0);
-    let why_c: Vec<_> = (1..=5).map(|k| int_const(code, k)).collect();
+    let why_c: Vec<_> = (1..=6).map(|k| int_const(code, k)).collect();
     let s_trace = str_global(code, p.str_t, "mp: timelineHud: why=");
     let s_started = str_global(code, p.str_t, " started=");
     let s_shown = str_global(code, p.str_t, " shown=");
@@ -831,7 +1089,6 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
     let one = float_const(code, 1.0);
     let shadow_alpha = float_const(code, 0.8);
     let half = float_const(code, 0.5);
-    let s_default = str_global(code, p.str_t, "default");
     let s_icon = str_global(code, p.str_t, "TimelineIcon");
     let s_empty = str_global(code, p.str_t, "");
 
@@ -889,6 +1146,13 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         r.r(p.f64_),
     );
     let (wi, wo) = (r.r(p.i32_), r.r(p.i32_));
+    let (kb, uold, tls, line, hd) = (
+        r.r(p.bool_),
+        r.r(p.unit_t),
+        r.r(p.arr_t),
+        r.r(p.arr_t),
+        r.r(p.elt_t),
+    );
     let (why, oldw, seen, msg, txt, dd, t1, t2) = (
         r.r(p.i32_),
         r.r(p.i32_),
@@ -984,14 +1248,9 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         arg1: b,
     });
     a.label("mk");
-    a.op(Opcode::GetGlobal {
-        dst: name,
-        global: s_default,
-    });
-    a.op(Opcode::Call1 {
+    a.op(Opcode::Call0 {
         dst: font,
-        fun: p.load_font,
-        arg0: name,
+        fun: name_font,
     });
     a.op(Opcode::New { dst: lbl });
     a.op(Opcode::Call3 {
@@ -1085,13 +1344,114 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         field: p.s_started,
     });
     set_why(&mut a, 2);
+    a.op(Opcode::Bool {
+        dst: kb,
+        value: ValBool(false),
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: cand,
+            offset: 0,
+        },
+        "acting",
+    );
+    // Nobody acting (end turn clears startedPlaying before the timeline
+    // shifts): keep the portrait already on this diamond while its event is
+    // still the live head of the turn order, timelines[0][0]. A shift, a
+    // reused instance for another slot or a new round's timeline is another
+    // enum value, so the swords come back then.
+    a.op(Opcode::GetThis {
+        dst: uold,
+        field: f_unit,
+    });
     a.jmp(
         Opcode::JNull {
-            reg: cand,
+            reg: uold,
             offset: 0,
         },
         "decide",
     );
+    a.op(Opcode::Field {
+        dst: tls,
+        obj: st,
+        field: p.s_timelines,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: tls,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: n,
+        obj: tls,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: zero,
+            b: n,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: tls,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: zero,
+    });
+    a.op(Opcode::UnsafeCast { dst: line, src: d });
+    a.jmp(
+        Opcode::JNull {
+            reg: line,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: n,
+        obj: line,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: zero,
+            b: n,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: line,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: zero,
+    });
+    a.op(Opcode::UnsafeCast { dst: hd, src: d });
+    a.jmp(
+        Opcode::JNotEq {
+            a: hd,
+            b: elt,
+            offset: 0,
+        },
+        "decide",
+    );
+    a.op(Opcode::Bool {
+        dst: kb,
+        value: ValBool(true),
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "chkfirst");
+    a.label("acting");
     a.op(Opcode::Field {
         dst: owner,
         obj: cand,
@@ -1125,6 +1485,7 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         "decide",
     );
     set_why(&mut a, 5);
+    a.label("chkfirst");
     emit_first_check(
         &mut a,
         p,
@@ -1142,8 +1503,19 @@ fn add_hud(code: &mut Bytecode, p: &Plan, fl: &Fields, report: RefFun) -> Result
         },
         "decide",
     );
+    a.jmp(
+        Opcode::JTrue {
+            cond: kb,
+            offset: 0,
+        },
+        "keepit",
+    );
     a.op(Opcode::Mov { dst: u, src: cand });
     set_why(&mut a, 0);
+    a.jmp(Opcode::JAlways { offset: 0 }, "decide");
+    a.label("keepit");
+    a.op(Opcode::Mov { dst: u, src: uold });
+    set_why(&mut a, 6);
 
     // Trace: one line whenever startedPlaying or the gate result changes,
     // "mp: timelineHud: why=<n> started=<unit name|null> shown=<portrait|swords>".
@@ -1620,8 +1992,9 @@ fn apply(code: &mut Bytecode, p: &Plan, lp: &list::ListPlan) -> Result<()> {
         rep_t: RefField(base + 6 + list::FIELDS.len()),
     };
     let report = add_report(code, p, &fl)?;
-    let hud = add_hud(code, p, &fl, report)?;
-    let hud_list = list::add_list(code, p, lp, &fl.list, report)?;
+    let name_font = add_name_font(code, p)?;
+    let hud = add_hud(code, p, &fl, report, name_font)?;
+    let hud_list = list::add_list(code, p, lp, &fl.list, report, name_font)?;
     let names: Vec<_> = new_fields(p)
         .into_iter()
         .map(|(n, t)| (string_ref(code, n), t))
@@ -1701,7 +2074,7 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        assert_eq!(back.functions.len(), orig.functions.len() + 3);
+        assert_eq!(back.functions.len(), orig.functions.len() + 4);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
             assert_eq!(
@@ -1712,8 +2085,9 @@ mod tests {
             );
         }
         let report = &back.functions[orig.functions.len()];
-        let hud = &back.functions[orig.functions.len() + 1];
-        let hud_list = &back.functions[orig.functions.len() + 2];
+        let name_font = &back.functions[orig.functions.len() + 1];
+        let hud = &back.functions[orig.functions.len() + 2];
+        let hud_list = &back.functions[orig.functions.len() + 3];
 
         // Constructor: only the Player offset of the mask switch.
         let (a, b) = (&orig.functions[p.ctor_fi], &back.functions[p.ctor_fi]);
@@ -1776,7 +2150,7 @@ mod tests {
         }
         assert_eq!(names[..3], [UNIT_FIELD, LABEL_FIELD, WIDTH_FIELD]);
 
-        for f in [report, hud, hud_list] {
+        for f in [report, name_font, hud, hud_list] {
             check_types(&back, f, 0..f.ops.len());
             check_flow(f);
         }
@@ -1786,6 +2160,35 @@ mod tests {
                 .ops
                 .iter()
                 .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == want)));
+        }
+
+        // Turn end: the portrait is kept only while this diamond's event is
+        // still the live head (state.timelines[0][0], compared by identity).
+        assert!(hud
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::Field { field, .. } if *field == p.s_timelines)));
+        assert!(hud
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::JNotEq { a, b, .. }
+            if hud.regs[a.0 as usize] == p.elt_t && hud.regs[b.0 as usize] == p.elt_t)));
+        // Names use the players panel's font, built by nameFont (SDF eb_garamond).
+        let calls = |f: &Function, fun: RefFun| {
+            f.ops.iter().any(|o| match o {
+                Opcode::Call0 { fun: g, .. }
+                | Opcode::Call1 { fun: g, .. }
+                | Opcode::Call2 { fun: g, .. } => *g == fun,
+                Opcode::CallN { fun: g, .. } => *g == fun,
+                _ => false,
+            })
+        };
+        for want in [p.res_load, p.any_to, p.to_sdf, p.load_font] {
+            assert!(calls(name_font, want), "nameFont calls fn@{}", want.0);
+        }
+        for f in [hud, hud_list] {
+            assert!(calls(f, name_font.findex));
+            assert!(!calls(f, p.load_font));
         }
 
         let mut again = read(&patched);
@@ -1817,7 +2220,7 @@ mod tests {
         };
         assert!(calls(report, p.println), "report prints");
         assert!(calls(report, p.sys_time), "report is rate-limited");
-        for f in [&back.functions[n + 1], &back.functions[n + 2]] {
+        for f in [&back.functions[n + 2], &back.functions[n + 3]] {
             let (trap_at, exc, off) = f
                 .ops
                 .iter()
@@ -1949,7 +2352,7 @@ mod tests {
         let mut code = read(&scratch);
         patch_timeline_hud(&mut code);
         let back = read(&write(&code));
-        let hud = back.functions[orig.functions.len() + 1].findex;
+        let hud = back.functions[orig.functions.len() + 2].findex;
         assert_eq!(proto(&back, p.ev_t, "sync").expect("sync"), sync);
         let f = &back.functions[p.sync_fi];
         assert!(matches!(f.ops[1], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == hud));

@@ -256,6 +256,7 @@ pub(super) fn add_list(
     lp: &ListPlan,
     fl: &ListFields,
     report: RefFun,
+    name_font: RefFun,
 ) -> Result<RefFun> {
     let s_err = str_global(code, p.str_t, "mp: timelineHudList error: ");
     let c0 = int_const(code, 0);
@@ -270,7 +271,6 @@ pub(super) fn add_list(
     let f_gap = float_const(code, GAP);
     let f_edge = float_const(code, EDGE);
     let f_zero = float_const(code, 0.0);
-    let s_default = str_global(code, p.str_t, "default");
     let s_empty = str_global(code, p.str_t, "");
     let s_acting = str_global(code, p.str_t, ACTING);
     let s_done = str_global(code, p.str_t, DONE);
@@ -289,14 +289,13 @@ pub(super) fn add_list(
         r.r(p.elt_t),
         r.r(p.dyn_t),
     );
-    let (lbl, font, props, sh, fl64, ci, name) = (
+    let (lbl, font, props, sh, fl64, ci) = (
         r.r(p.html_t),
         r.r(p.font_t),
         r.r(p.fprops_t),
         r.r(p.shadow_t),
         r.r(p.f64_),
         r.r(p.i32_),
-        r.r(p.str_t),
     );
     let (game, bat, st) = (r.r(p.game_t), r.r(p.battle_t), r.r(p.state_t));
     let (par, tlc, tl, arr, n, raw, d, first) = (
@@ -485,11 +484,9 @@ pub(super) fn add_list(
         },
         "sig",
     );
-    str_op(&mut a, name, s_default);
-    a.op(Opcode::Call1 {
+    a.op(Opcode::Call0 {
         dst: font,
-        fun: p.load_font,
-        arg0: name,
+        fun: name_font,
     });
     a.op(Opcode::New { dst: lbl });
     a.op(Opcode::Call3 {
