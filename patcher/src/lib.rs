@@ -29,7 +29,8 @@
 // barrier.rs), and so an exception in a game network handler is logged instead of ending
 // the co-op session (see net_guard.rs), and so a
 // tooltip's column of keyword helpers wraps into more columns instead of running off screen and
-// lists a shared helper once (see tip_overflow.rs), and so a censer's item tooltip without a unit no
+// lists a shared helper once (see tip_overflow.rs), and so transient item/skill tooltip decorations
+// cannot intercept their anchor's mouse events (see tooltip_input.rs), and so a censer's item tooltip without a unit no
 // longer throws every frame and stalls the inventory grid (see censer_tip.rs), and so a co-op ping lands where
 // the pinging player's cursor is and, in battle, makes the pinged cell blink orange for everyone (see
 // ping_cell.rs), and so in battle the timeline's first diamond shows the acting player unit's portrait under its
@@ -75,6 +76,7 @@ mod take_all;
 mod tavern_resume;
 mod timeline_hud;
 mod tip_overflow;
+mod tooltip_input;
 mod window_close;
 
 use anyhow::{bail, Context, Result};
@@ -123,6 +125,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     mod_version::patch_mod_version(&mut code);
     net_guard::patch_net_guard(&mut code);
     tip_overflow::patch_tip_overflow(&mut code);
+    tooltip_input::patch(&mut code);
     censer_tip::patch_censer_tip(&mut code);
     ping_cell::patch_ping_cell(&mut code);
     timeline_hud::patch_timeline_hud(&mut code);

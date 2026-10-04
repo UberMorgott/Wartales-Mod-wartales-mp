@@ -168,7 +168,20 @@ checks that rebuild the Debrief, their counts and button states, and the hovered
 clicked and topmost UI elements after a tooltip opens. Lines start with
 `[mp debrief]`. Each window has separate limits for rebuild and input messages.
 This distinguishes repeated window rebuilds from a tooltip intercepting input;
-it does not claim to fix the remaining reported input failure.
+the probes themselves do not change input behavior.
+
+**Transient tooltip input** (`src/tooltip_input.rs`): the helper-column screen
+clamp can move an item tooltip over the hovered slot. Decorative tooltip Icons
+inherit blocking Interactive handlers; hitting one outs the slot and removes
+the tooltip, then the next stationary-pointer check recreates it. Mouse press
+and release can consequently reach different Interactive objects. Scene's
+candidate dispatch now skips descendants of transient ItemTip, SkillTip and
+TipHelper content using its existing cancelled-candidate continuation, so the
+underlying control keeps receiving pointer events. Sticky tips (`keepTips`),
+gamepad, keyboard events and other tooltip content retain native handling.
+The guarded predicate fails open and changes no persistent input fields.
+This repairs a source-proven cycle; the reported multiplayer session has not
+been reproduced live with the new DLL.
 
 **Camp choice diagnostics** (`src/camp_choice.rs`): records the outgoing
 `Dialog.setClick` request, whether the host resolves its button ID, the chosen
