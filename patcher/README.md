@@ -163,6 +163,23 @@ shim copies the game's stdout (`hl_sys_print`) into `shim.log` as `game:`
 lines (buffered in memory, written by a background thread every 500 ms), so a stuck black screen shows which step never came. Skipped (logged) on
 mismatch.
 
+**Post-battle input diagnostics** (`src/debrief_diag.rs`): records availability
+checks that rebuild the Debrief, their counts and button states, and the hovered,
+clicked and topmost UI elements after a tooltip opens. Lines start with
+`[mp debrief]`. Each window has separate limits for rebuild and input messages.
+This distinguishes repeated window rebuilds from a tooltip intercepting input;
+it does not claim to fix the remaining reported input failure.
+
+**Camp choice diagnostics** (`src/camp_choice.rs`): records the outgoing
+`Dialog.setClick` request, whether the host resolves its button ID, the chosen
+confession gain, and the recipient's aptitude points before and after the grant.
+Lines start with `mp: dialog choice` or `mp: confession`. In FriendlyFire's
+training choice, Target is the attacker and Self is the injured speaker; the
+attacker receives the aptitude point with a Strength/Dexterity offer. These
+probes preserve the existing choice and reward behavior. Both machines need
+the diagnostic DLL to trace the client-to-host boundary; read each machine's
+`%LOCALAPPDATA%\wartales-mp\shim.log` after reproducing the issue.
+
 **Co-op barrier never hangs** (`src/barrier.rs`): every mode switch (town,
 tavern, place, battle start) waits on the host for each client's
 `onClientReady` (`Controller.waitLocks`), with no timeout and no cleanup, so a
