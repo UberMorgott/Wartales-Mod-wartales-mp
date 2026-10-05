@@ -355,27 +355,61 @@ static void game_log_start(void) {
 			(unsigned long)GetLastError());
 }
 
+// One shim.log line per printed line: a multi-line message (an exception and
+// its "Called from" stack) is split at '\n', and a line longer than
+// GAME_CHUNK UTF-16 units continues on the next shim.log line, so nothing is
+// cut. GAME_MSG_LINES bounds one message, GAME_LINES_MAX the whole run.
+#define GAME_CHUNK 300 // 300 UTF-16 units fit a 1 KB line once encoded (<= 900 bytes).
+#define GAME_MSG_SCAN (64 * 1024)
+#define GAME_MSG_LINES 400
+
+static BOOL game_emit(const wchar_t *w, size_t n) {
+	char utf8[GAME_CHUNK * 3 + 1];
+	LONG k = InterlockedIncrement(&game_lines);
+	int m;
+	if (k > GAME_LINES_MAX) {
+		if (k == GAME_LINES_MAX + 1)
+			game_line("game: further output not logged (%d lines)", GAME_LINES_MAX);
+		return FALSE;
+	}
+	m = WideCharToMultiByte(CP_UTF8, 0, w, (int)n, utf8, (int)sizeof(utf8) - 1, NULL, NULL);
+	if (m > 0) {
+		utf8[m] = 0;
+		game_line("game: %s", utf8);
+	}
+	return TRUE;
+}
+
 static void detour_sys_print(unsigned char *msg) {
 	if (msg != NULL) {
 		const wchar_t *w = (const wchar_t *)msg;
-		// 300 UTF-16 units fit a 1 KB line once encoded (<= 900 bytes).
-		size_t n = wcsnlen(w, 300);
-		while (n > 0 && (w[n - 1] == L'\n' || w[n - 1] == L'\r'))
-			n--;
-		if (n > 0) {
-			LONG k = InterlockedIncrement(&game_lines);
-			if (k <= GAME_LINES_MAX) {
-				char utf8[300 * 3 + 1];
-				int m = WideCharToMultiByte(CP_UTF8, 0, w, (int)n, utf8, (int)sizeof(utf8) - 1, NULL, NULL);
-				if (m > 0) {
-					utf8[m] = 0;
-					game_line("game: %s", utf8);
-				}
-			} else if (k == GAME_LINES_MAX + 1) {
-				game_line("game: further output not logged (%d lines)", GAME_LINES_MAX);
+		size_t len = wcsnlen(w, GAME_MSG_SCAN);
+		size_t pos = 0;
+		int lines = 0;
+		while (len > 0 && (w[len - 1] == L'\n' || w[len - 1] == L'\r'))
+			len--;
+		while (pos < len && lines < GAME_MSG_LINES) {
+			size_t end = pos, n;
+			while (end < len && w[end] != L'\n')
+				end++;
+			n = end - pos;
+			if (n > 0 && w[pos + n - 1] == L'\r')
+				n--;
+			while (n > 0 && lines < GAME_MSG_LINES) {
+				size_t take = n > GAME_CHUNK ? GAME_CHUNK : n;
+				// Never split a UTF-16 surrogate pair.
+				if (take < n && take > 1 && w[pos + take - 1] >= 0xD800 && w[pos + take - 1] <= 0xDBFF)
+					take--;
+				if (!game_emit(w + pos, take))
+					goto done;
+				lines++;
+				pos += take;
+				n -= take;
 			}
+			pos = end + 1;
 		}
 	}
+done:
 	if (real_sys_print != NULL)
 		real_sys_print(msg);
 }

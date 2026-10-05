@@ -882,9 +882,29 @@ int main(int argc, char **argv) {
 		static const wchar_t nl[] = L"\n";
 		check(pr != NULL && calls != NULL, "fake hl_sys_print present");
 		if (pr != NULL && calls != NULL) {
+			// An exception with its stack: one shim.log line per printed line,
+			// and a line past 300 units continues on the next one (nothing cut).
+			static wchar_t multi[700];
+			int k = 0, i;
+			const wchar_t *head = L"mp: style: boom\nCalled from a.B (a/B.hx line 1)\r\nCalled from c.D (c/D.hx line 2)\n";
+			while (*head)
+				multi[k++] = *head++;
+			for (i = 0; i < 350; i++)
+				multi[k++] = (wchar_t)(L'a' + i % 26);
+			multi[k++] = L'Z';
+			multi[k++] = L'\n';
+			multi[k] = 0;
 			pr((unsigned char *)line);
 			pr((unsigned char *)nl);
-			check(calls() == 2, "the original hl_sys_print still runs");
+			pr((unsigned char *)multi);
+			check(calls() == 3, "the original hl_sys_print still runs");
+			check(wait_log(log, "] game: Called from c.D (c/D.hx line 2)\r\n", 5000),
+				"a multi-line message is split into shim.log lines");
+			check(log_contains(log, "] game: mp: style: boom\r\n") &&
+					log_contains(log, "] game: Called from a.B (a/B.hx line 1)\r\n"),
+				"each line of a multi-line message gets its own prefix");
+			check(log_contains(log, "] game: opqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklZ\r\n"),
+				"a line past 300 units continues on the next line, not cut");
 			// Game lines are buffered and written by the shim's writer thread
 			// (every 500 ms), never by the printing thread.
 			check(wait_log(log, "] game: mp: onClientReady waitLocks left=0 \xc3\xa9\r\n", 5000),

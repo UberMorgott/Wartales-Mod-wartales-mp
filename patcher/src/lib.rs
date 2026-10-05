@@ -43,7 +43,10 @@
 // by clicking outside it, as the host does (see window_close.rs), and so a co-op client's failed
 // activity (fishing, lock picking, any activity end) injures its unit through the host instead of
 // throwing "Not allowed" and freezing the activity (see activity_injury.rs), and so a co-op load
-// never waits forever for a player who left before reporting ready (see ready_start.rs).
+// never waits forever for a player who left before reporting ready (see ready_start.rs), and so
+// an exception inside a domkit style pass no longer leaves every later UI action throwing
+// "Infinite loop in apply style", and a failing game-over window is logged and replaced by
+// the pause menu (see style_guard.rs).
 
 mod activity_diag;
 mod activity_injury;
@@ -76,6 +79,7 @@ mod ping_cell;
 mod ready_start;
 mod skill_cost;
 mod slot4_diag;
+mod style_guard;
 mod take_all;
 mod tavern_resume;
 mod timeline_hud;
@@ -136,6 +140,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     ping_cell::patch_ping_cell(&mut code);
     timeline_hud::patch_timeline_hud(&mut code);
     activity_injury::patch_activity_injury(&mut code);
+    style_guard::patch_style_guard(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

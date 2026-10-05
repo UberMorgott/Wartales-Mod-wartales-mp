@@ -325,6 +325,26 @@ opens for itself). The client's call now gets `if (__host == null) close()` in
 front, as Escape already does (Game.hx:1725-1727); shared windows keep the RPC.
 Skipped (logged) on mismatch.
 
+**Style guard** (`src/style_guard.rs`): domkit's `Properties.applyStyle` saves
+the static `APPLY_LOOPS`, counts style passes in it and restores it at the end;
+`checkLoop` (run on every node creation, class change and hover) throws
+"Infinite loop in apply style" once it passes 100. An exception inside the pass
+skipped the restore, so the counter stayed above 100 and every later UI action
+on that machine threw the same error until restart (seen in co-op: the
+game-over `Pause` window, built when the escort-death popup is confirmed,
+threw there; afterwards no button answered on host or guest). Now the pass runs
+under a trap that restores `APPLY_LOOPS` and the dirty count, logs
+`mp: style: applyStyle threw after <n> passes ...` with the root and the first
+12 dirty nodes (component:object; on a runaway loop these are the nodes the
+last pass dirtied) plus the full stack, and rethrows. `Controller.gameOver__impl`
+runs under a trap too: on an exception it resets `APPLY_LOOPS`, logs
+`mp: game over window failed, opening the pause menu instead: ...` with the
+stack, closes the half-built window and removes its modal root, and opens the
+normal pause menu (Load / Quit) instead, so the host's popup closes and the
+session is not bricked. The shim now writes every line of a multi-line game
+message (exception + "Called from" stack) and continues long lines instead of
+cutting them at 300 characters. Skipped (logged) per part on mismatch.
+
 ## Install
 
 Two ways, pick one:
