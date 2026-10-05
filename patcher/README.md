@@ -409,6 +409,37 @@ logged as `mp: drag: ...`). The shared functions (`mpDragBegin`,
 `mpDragRestore`, `mpDragClamp`, `mpDragPanel`) are reusable for more panels.
 Each part is skipped (logged) on mismatch.
 
+**All players' inventories** (`src/all_inv.rs`): a bottom-bar button (co-op
+only; `WorldButtonsBar` constructor end, a `flow.button` with the
+`DialogMerchantTrade` icon, enabled like `btInventory`) opens, inside
+`GameInventory`'s dom, one panel per other connected player shaped like the
+vanilla `#inventory` one (title with the nickname and a Close icon,
+`inventory-content` holding `new ui.comp.Inventory(FoundItems, p.inventory, 6,
+content)`), draggable through `mpDragPanel(panel, "AllInv#<player index>")`.
+A player's `st.Inventory` belongs to its client and its RPCs are owner-routed,
+so every cross-player move is a `SlotOperation.MoveTo` executed by the owner of
+the source inventory (consume and `target.addItem` in one step; the add to a
+foreign inventory is the `netAddItem` RPC to its owner); no hand op, no
+Remove + local add. (N) `st.Inventory.networkAllow`'s dead `networkGetName`
+block (ops 41-50) now grants modes 0 (host receive) and 6 (caller pre-check)
+of RPCs `networkOperation` (7) and `netAddItem` (0) on an owned inventory to
+any client with a BasePlayer; modes 1/2 (routing) and 3-5 (sync, register)
+stay owner-only, so a call still runs once, on the owner. (S) the slot API's
+`networkOperation` closure sends a MoveTo on an owned inventory raw instead of
+vanilla's Remove + local add (whose result never comes back from the owner);
+containers keep the conversion. (U) take = the vanilla FoundItems right click
+(shift: amount), executed by the owner; `ItemSlot.allowPick` / `allowDrop` /
+`doPick` / `drop` refuse a foreign slot (FoundItems slot inside a
+`ui.comp.Inventory` whose inventory has an owner other than `Game.me`); give =
+`ItemSlot.onRightClick` op 0: while panels are open, ctrl + right click on the
+own inventory sends `MoveTo(target, stack)` through the slot API (ctrl +
+shift: amount box), target = the panel last hovered (`getTipContent` op 0) or
+right-clicked, else the first, connected players only. `GameUI.update` op 0
+closes the panels in battle, while loading, in an arena fight, in solo or when
+the HUD was rebuilt, and drops the panel of a player who disconnected. All
+players need this build. Appended functions run under a trap (`mp: allinv:
+...`); the whole pass is skipped (logged) if any part mismatches.
+
 ## Install
 
 Two ways, pick one:

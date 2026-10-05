@@ -52,6 +52,7 @@
 // locator, minimap arrow) show the player's nickname instead of P1..P4 (see marker_names.rs).
 
 mod activity_diag;
+mod all_inv;
 mod activity_injury;
 mod asm;
 mod barrier;
@@ -150,6 +151,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     timeline_hud::patch_timeline_hud(&mut code);
     activity_injury::patch_activity_injury(&mut code);
     style_guard::patch_style_guard(&mut code);
+    all_inv::patch_all_inv(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

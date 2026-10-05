@@ -61,21 +61,22 @@ struct Types {
     ref_bool: RefType,
 }
 
-/// What the constructor's own sortButton block uses to build an icon.
-struct IconBlock {
-    icon_g: RefGlobal,
-    alloc: RefFun,
-    arr_elem_t_op: Opcode,
-    wrap: RefFun,
-    arr_t: RefType,
-    arr_obj_t: RefType,
-    dyn_alloc: RefFun,
-    create: RefFun,
-    props_t: RefType,
-    props_obj: RefField,
-    obj_t: RefType,
-    onclick: RefField,
-    closure_t: RefType,
+/// What the constructor's own sortButton block uses to build an icon
+/// (also read by all_inv from WorldButtonsBar's btInventory block).
+pub(crate) struct IconBlock {
+    pub(crate) icon_g: RefGlobal,
+    pub(crate) alloc: RefFun,
+    pub(crate) arr_elem_t_op: Opcode,
+    pub(crate) wrap: RefFun,
+    pub(crate) arr_t: RefType,
+    pub(crate) arr_obj_t: RefType,
+    pub(crate) dyn_alloc: RefFun,
+    pub(crate) create: RefFun,
+    pub(crate) props_t: RefType,
+    pub(crate) props_obj: RefField,
+    pub(crate) obj_t: RefType,
+    pub(crate) onclick: RefField,
+    pub(crate) closure_t: RefType,
 }
 
 struct Plan {
@@ -392,7 +393,7 @@ fn enum_class_global(
     bail!("no createEnumIndex for enum type {}", enum_t.0)
 }
 
-fn plan_icon_block(
+pub(crate) fn plan_icon_block(
     code: &Bytecode,
     ctor: &Function,
     sort_field: RefField,
