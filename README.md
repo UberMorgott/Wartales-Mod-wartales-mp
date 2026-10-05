@@ -25,23 +25,28 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - An error in the game's handling of a network message is logged instead of ending the whole co-op session.
 - DLC ownership checks are untouched (vanilla): DLC content and the save's DLC markers follow the game's own rules.
 - Fixes the post-battle screen rebuilding itself every frame in co-op when the remedy count and the injured units disagreed.
+- Post-battle loot with a damaged or injured squad: the screen no longer tears itself down and rebuilds every frame while the "repair all" / "cure all" availability changes, which could leave loot items and **Take all** dead (hover sound repeating, clicks lost). The buttons now just turn on and off. *(Vanilla bug.)*
+- A co-op load no longer waits forever for a player who disconnected before they were ready to start, and a reconnecting player is no longer counted twice. *(Vanilla bug.)*
+- Clients no longer freeze when an enemy summons units and hits them in the same moment (for example the Rat Matriarch's howl spawning rats): the client makes the new units alive before it runs the host's battle messages. *(Vanilla bug.)*
+- The join gate no longer deadlocks when a save is loaded while a player is joining.
 - The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.
 - A failed activity of a client (a lost fish or a broken lockpick on Extreme, or a failed activity that injures) no longer freezes fishing or the activity with a "Not allowed" error: the unit's injury is applied by the host and synced to everyone.
 
 ### Co-op play
 
 - No more "waiting for the other players" after the world is loaded: the first player's click decides, as holding the button used to. A burst of clicks runs the action once.
-- Leaving a town, the tavern, a place or the owned tavern is never blocked by another player's business: their inspect windows and unstarted crafts are closed, and the shared dialog is ended. Started crafts and activities are waited for.
+- Leaving a town, the tavern, a place or the owned tavern is never blocked by another player's business: windows and confirms tied to that place are closed, and the shared dialog is ended once no choice is being resolved. Personal windows (unit sheet, inventory) stay open and do not block. Only a running mini-game still holds the leave.
 - Leaving the camp for the world map is no longer silently refused while another player is busy (strategy table, camp chest, banner editor, an unstarted craft): the request stays pending, their camp window is closed the way its X / Escape does (a strategy choice already made stays, nothing half-applied), and everyone switches to the world map together. Started crafts and a modal window open on the host are waited for; a rest still refuses the leave.
 - A player reading a recruit's (or any NPC's) info no longer stops the others from talking to a different NPC. The same NPC, chests, crafts and activities still wait, and so does every NPC while a dialog is open.
 - Talking to a unit from the camp reserve or a party portrait waits, like a click on a unit in the camp, while another player is busy (banner editor, chest, craft): it no longer pulls everyone into the dialog and leaves that player on a black screen.
-- Pings: in battle the pinged grid cell blinks orange for three seconds on every player's screen, drawn over terrain and units from any camera angle. Everywhere, the ping marker now lands where the pinging player's cursor is, instead of floating or sinking into the scenery for the others (its depth was read at UI coordinates, not render pixels).
+- Pings: in battle the pinged cell, or the whole footprint of the unit standing on it, blinks for three seconds on every player's screen in the pinging player's nickname colour, and a pinged unit's outline blinks too; the old ripple rings are gone. A ping now plays an audible chat sound (at most every 0.3 s). Everywhere, the ping marker now lands where the pinging player's cursor is, instead of floating or sinking into the scenery for the others (its depth was read at UI coordinates, not render pixels).
 - Battle timeline: while a player unit acts, the first diamond (bottom left) shows its portrait instead of the crossed swords, with the nickname of the player who controls it above, in that player's colour. Back to the swords when nobody acts; blank during the enemy turn.
 - Co-op battle status list above and left of that diamond, during your side's round: one row per player with units still alive, nickname in the player's colour; `» acting`, grey `× done` (already took their turn this round), `· waiting`. Long nicknames are cut with `...`.
 - Caravan follow on the world map: press **F** to make your caravan follow the player who last moved. It also follows on its own while you have a window open. Your own click cancels it.
 - Party-wide inventory: dialog, crafting, repair and healing costs, fishing hooks and lockpicks are paid from your inventory, the chests and then the other players' inventories, and the counts on screen include the other players' items (fishing and lock picking no longer stop at 0 hooks / lockpicks while the chest or another player has some). The injury heal panel lists remedies the other players carry, and recipe ingredients in the Grimoire and item tooltips are no longer shown missing (red) when the chest or another player has them.
 - Shared chest panel: sort, quick stack (move your items the chest already holds) and take similar buttons.
 - **Take all** button on the post-battle loot screen, and a take-all icon on searched barrels, crates and chests and on dialog item grids.
+- Item tooltips no longer swallow mouse input: a tooltip pushed over the hovered slot could make loot items unclickable and keep re-opening itself.
 - Career Plan fix: a client could see "+2" on level-up and get only "+1". The host now grants the extra point on top of its own current offer, ignores a grant when the unit has no aptitude point left, and drops a stale second request.
 - Lets you start even if a player has no human character assigned. For example, four players can use a modded starting party of three humans and one animal.
 
@@ -65,6 +70,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 - Writes game errors, co-op mode-switch steps and forced leaves to **shim.log**, to help with bug reports. This only adds log lines.
 - Writes the end steps of every activity and mini-game (ruins puzzles, lock picking, fishing, dice) and every refused co-op network call to **shim.log**, to find where a mini-game freezes. This only adds log lines.
+- Writes post-battle loot-window steps (window rebuilds, button states, hovered and clicked elements) and camp-dialog choice / confession rewards to **shim.log**. This only adds log lines.
 ## Install
 
 1. Download **winmm.dll** from **Assets** in the newest release. You do not need the **Source code** archives.
@@ -84,6 +90,10 @@ Install the mod on every player's machine. **All players need the same version**
 ## Update or remove
 
 To update, close the game and replace **winmm.dll** with the new version. To uninstall, close the game and remove that file from its folder. The mod does not overwrite the original game files.
+
+## Known issues
+
+- The post-battle loot fix (dead loot items / **Take all** with a damaged squad) is defensive: it removes the rebuild cause found in the game code but has not yet been confirmed in a live co-op session. If loot still does not react, send **shim.log** from every player (the loot-window diagnostics above are included).
 
 ## If it does not work
 
