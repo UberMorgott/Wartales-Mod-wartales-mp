@@ -8,13 +8,44 @@ use crate::asm::{push_fn, Asm, Regs, Snap};
 use hlbc::types::RefGlobal;
 
 const MARKER: &str = "[mp debrief] rebuild";
+// Once per second while a Debrief updates: rebuilds since the previous line
+// (only printed when non-zero), independent of the per-line caps below.
+const RATE: &str = "[mp debrief] rate";
+
+// Where the logger finds the Debrief: the hooked function's `this`, an
+// Element's window, or a ui.Window that may be a Debrief.
+#[derive(Clone, Copy, PartialEq)]
+enum Src {
+    Debrief,
+    Element,
+    Window,
+}
 
 struct Site {
     fi: usize,
     at: usize,
     tag: &'static str,
+    src: Src,
     element: bool,
     values: Vec<(&'static str, Reg)>,
+}
+
+fn native(code: &Bytecode, name: &str, ret: RefType) -> Result<RefFun> {
+    let hits: Vec<RefFun> = code
+        .natives
+        .iter()
+        .filter(|n| {
+            s(code, n.name) == name
+                && n.t
+                    .as_fun(code)
+                    .is_some_and(|t| t.args.is_empty() && t.ret == ret)
+        })
+        .map(|n| n.findex)
+        .collect();
+    match hits[..] {
+        [f] => Ok(f),
+        _ => bail!("expected one native {name}, found {}", hits.len()),
+    }
 }
 
 struct Plan {
@@ -27,6 +58,8 @@ struct Plan {
     void: RefType,
     int: RefType,
     bool_: RefType,
+    f64_: RefType,
+    sys_time: RefFun,
     get_window: RefFun,
     check: RefFun,
     class: RefGlobal,
@@ -62,16 +95,31 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let void = prim(|t| matches!(t, Type::Void))?;
     let int = prim(|t| matches!(t, Type::I32))?;
     let bool_ = prim(|t| matches!(t, Type::Bool))?;
+    let f64_ = prim(|t| matches!(t, Type::F64))?;
+    let sys_time = native(code, "sys_time", f64_)?;
     let rebuild = method(code, debrief, "rebuild")?;
-    let mut sites = vec![Site {
-        fi: index(code, rebuild.findex)?,
-        at: 0,
-        tag: MARKER,
-        element: false,
-        values: vec![],
-    }];
     let update = method(code, debrief, "update")?;
     let update_fi = index(code, update.findex)?;
+    // The rate site precedes update's mismatch sites: hooks are inserted in
+    // reverse site order, so later (higher) offsets in update go in first.
+    let mut sites = vec![
+        Site {
+            fi: index(code, rebuild.findex)?,
+            at: 0,
+            tag: MARKER,
+            src: Src::Debrief,
+            element: false,
+            values: vec![],
+        },
+        Site {
+            fi: update_fi,
+            at: 0,
+            tag: RATE,
+            src: Src::Debrief,
+            element: false,
+            values: vec![],
+        },
+    ];
     let repairs = field(code, debrief, "repairBtn")?.0;
     let cure = field(code, debrief, "cureBtn")?.0;
     let enable = field(code, element, "enable")?.0;
@@ -117,6 +165,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
             fi: update_fi,
             at,
             tag: branch.context("unknown rebuild branch")?,
+            src: Src::Debrief,
             element: false,
             values: vec![
                 (" count=", n),
@@ -140,15 +189,20 @@ fn plan(code: &Bytecode) -> Result<Plan> {
                 .push((" remedies=", remedies));
         }
     }
-    if sites.len() != 3 {
+    if sites.len() != 4 {
         bail!("expected two availability rebuilds");
     }
     let make = method(code, element, "makeInteractive")?;
     let interactive = obj_type(code, "h2d.Interactive")?;
+    // Press and release (or release outside) show whether both halves of a
+    // click reach the same element, and what is topmost at each moment.
     for (event, tag) in [
         ("onOver", "[mp debrief] over"),
         ("onOut", "[mp debrief] out"),
         ("onClick", "[mp debrief] click"),
+        ("onPush", "[mp debrief] press"),
+        ("onRelease", "[mp debrief] release"),
+        ("onReleaseOutside", "[mp debrief] release-outside"),
     ] {
         let event_field = field(code, interactive, event)?.0;
         let mut matches_ = vec![];
@@ -172,6 +226,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
             fi,
             at: 0,
             tag,
+            src: Src::Element,
             element: true,
             values: vec![],
         });
@@ -189,7 +244,42 @@ fn plan(code: &Bytecode) -> Result<Plan> {
             fi: index(code, f.findex)?,
             at: 0,
             tag,
+            src: Src::Element,
             element: true,
+            values: vec![],
+        });
+    }
+    // Rebuild trigger paths. The line printed just before a "rebuild" line
+    // names its cause: a dirty window (Controller.netRebuildWindow ->
+    // markForRebuild), a network rebuild (netRebuild / _netRebuild ->
+    // doRebuild) or an availability mismatch (above). A rebuild with no
+    // trigger line came from a direct call or a bound closure (e.g. a closed
+    // UnitInfo's onClose, set by Debrief.showUnit).
+    let w_update = method(code, window, "update")?;
+    let dirty = field(code, window, "dirty")?.0;
+    let set = w_update
+        .ops
+        .iter()
+        .position(|o| matches!(o, Opcode::SetThis { field, .. } if *field == dirty))
+        .context("Window.update: dirty reset missing")?;
+    if !matches!(w_update.ops.get(set + 1), Some(Opcode::CallThis { .. })) {
+        bail!("Window.update: dirty reset is not followed by the rebuild call");
+    }
+    let do_rebuild = method(code, window, "doRebuild")?;
+    for (f, at, tag, src) in [
+        (w_update, set + 1, "[mp debrief] trigger dirty", Src::Window),
+        (do_rebuild, 0, "[mp debrief] trigger net", Src::Window),
+    ] {
+        let fi = index(code, f.findex)?;
+        if code.functions[fi].regs.first() != Some(&window) {
+            bail!("unexpected trigger context");
+        }
+        sites.push(Site {
+            fi,
+            at,
+            tag,
+            src,
+            element: false,
             values: vec![],
         });
     }
@@ -215,6 +305,8 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         void,
         int,
         bool_,
+        f64_,
+        sys_time,
         get_window,
         check,
         class,
@@ -258,9 +350,19 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
     code.globals.push(p.int);
     let render_count = RefGlobal(code.globals.len());
     code.globals.push(p.int);
+    let rate_count = RefGlobal(code.globals.len());
+    code.globals.push(p.int);
+    let rate_lines = RefGlobal(code.globals.len());
+    code.globals.push(p.int);
+    let rate_start = RefGlobal(code.globals.len());
+    code.globals.push(p.f64_);
     let mut hooks = vec![];
     for site in &p.sites {
-        let source_t = if site.element { p.element } else { p.debrief };
+        let source_t = match site.src {
+            Src::Element => p.element,
+            Src::Debrief => p.debrief,
+            Src::Window => p.window,
+        };
         let mut args = vec![source_t];
         args.extend(
             site.values
@@ -281,9 +383,10 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
         let result = r.r(p.string);
         let boxed = r.r(p.dyn_);
         let exc = r.r(p.dyn_);
+        let now = r.r(p.f64_);
         let mut a = Asm::new();
         a.jmp(Opcode::Trap { exc, offset: 0 }, "caught");
-        if site.element {
+        if site.src != Src::Debrief {
             a.jmp(
                 Opcode::JNull {
                     reg: Reg(0),
@@ -291,11 +394,18 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                 },
                 "done",
             );
-            a.op(Opcode::Call1 {
-                dst: win,
-                fun: p.get_window,
-                arg0: Reg(0),
-            });
+            if site.src == Src::Element {
+                a.op(Opcode::Call1 {
+                    dst: win,
+                    fun: p.get_window,
+                    arg0: Reg(0),
+                });
+            } else {
+                a.op(Opcode::Mov {
+                    dst: win,
+                    src: Reg(0),
+                });
+            }
             a.op(Opcode::GetGlobal {
                 dst: class,
                 global: p.class,
@@ -323,6 +433,10 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                 src: Reg(0),
             });
         }
+        a.op(Opcode::Call0 {
+            dst: now,
+            fun: p.sys_time,
+        });
         a.op(Opcode::GetGlobal {
             dst: previous,
             global: last,
@@ -355,16 +469,97 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
             global: render_count,
             src: count,
         });
+        a.op(Opcode::SetGlobal {
+            global: rate_count,
+            src: count,
+        });
+        a.op(Opcode::SetGlobal {
+            global: rate_lines,
+            src: count,
+        });
+        a.op(Opcode::SetGlobal {
+            global: rate_start,
+            src: now,
+        });
         a.label("same");
         let input_event = matches!(
             site.tag,
-            "[mp debrief] over" | "[mp debrief] out" | "[mp debrief] click"
+            "[mp debrief] over"
+                | "[mp debrief] out"
+                | "[mp debrief] click"
+                | "[mp debrief] press"
+                | "[mp debrief] release"
+                | "[mp debrief] release-outside"
         );
         let grid_event = matches!(
             site.tag,
             "[mp debrief] inventory-rebuild" | "[mp debrief] slot-redraw"
         );
-        let counter = if input_event {
+        let rate_n = r.r(p.int);
+        if site.tag == MARKER {
+            // Every rebuild counts toward the rate, even past the line cap.
+            a.op(Opcode::GetGlobal {
+                dst: rate_n,
+                global: rate_count,
+            });
+            a.op(Opcode::Incr { dst: rate_n });
+            a.op(Opcode::SetGlobal {
+                global: rate_count,
+                src: rate_n,
+            });
+        }
+        if site.tag == RATE {
+            let start = r.r(p.f64_);
+            let one = r.r(p.f64_);
+            a.op(Opcode::GetGlobal {
+                dst: start,
+                global: rate_start,
+            });
+            a.op(Opcode::Sub {
+                dst: start,
+                a: now,
+                b: start,
+            });
+            a.op(Opcode::Float {
+                dst: one,
+                ptr: float_const(code, 1.0),
+            });
+            a.jmp(
+                Opcode::JSLt {
+                    a: start,
+                    b: one,
+                    offset: 0,
+                },
+                "done",
+            );
+            a.op(Opcode::SetGlobal {
+                global: rate_start,
+                src: now,
+            });
+            a.op(Opcode::GetGlobal {
+                dst: rate_n,
+                global: rate_count,
+            });
+            a.op(Opcode::Int {
+                dst: count,
+                ptr: int_const(code, 0),
+            });
+            a.op(Opcode::SetGlobal {
+                global: rate_count,
+                src: count,
+            });
+            a.jmp(
+                Opcode::JSGte {
+                    a: count,
+                    b: rate_n,
+                    offset: 0,
+                },
+                "done",
+            );
+        }
+        let counter = if site.tag == RATE {
+            rate_lines
+        } else if input_event {
             hover_count
         } else if grid_event {
             render_count
@@ -377,7 +572,16 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
         });
         a.op(Opcode::Int {
             dst: cap,
-            ptr: int_const(code, if input_event { 96 } else { 24 }),
+            ptr: int_const(
+                code,
+                if site.tag == RATE {
+                    600
+                } else if input_event {
+                    160
+                } else {
+                    48
+                },
+            ),
         });
         a.jmp(
             Opcode::JSGte {
@@ -582,6 +786,30 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
             });
             append_value(&mut a, p, msg, tmp, boxed, result, top);
         }
+        let mut tail: Vec<(&'static str, Reg)> = vec![];
+        if site.tag == RATE {
+            tail.push((" rebuilds/s=", rate_n));
+        }
+        // Wall clock (Sys.time, seconds since 1970) lines up machines; the
+        // shim's tick prefix lines up this machine's sdr/barrier lines.
+        tail.push((" t=", now));
+        for (label, value) in tail {
+            a.op(Opcode::GetGlobal {
+                dst: tmp,
+                global: job_xp::str_global(code, p.string, label),
+            });
+            a.op(Opcode::Call2 {
+                dst: result,
+                fun: p.add,
+                arg0: msg,
+                arg1: tmp,
+            });
+            a.op(Opcode::Mov {
+                dst: msg,
+                src: result,
+            });
+            append_value(&mut a, p, msg, tmp, boxed, result, value);
+        }
         a.op(Opcode::ToDyn {
             dst: boxed,
             src: msg,
@@ -753,7 +981,11 @@ mod tests {
         let image = std::fs::read(HLBOOT).expect("installed game fixture");
         let mut code = read(&image);
         let p = plan(&code).expect("plan");
-        let first = &p.sites[1];
+        let first = p
+            .sites
+            .iter()
+            .find(|s| s.tag.ends_with("-mismatch"))
+            .expect("availability site");
         code.functions[first.fi].ops[first.at - 1] = Opcode::Label;
         let before = write(&code);
         patch(&mut code);
