@@ -105,7 +105,7 @@ fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
         .with_context(|| format!("function @{} not found", findex.0))
 }
 
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
+pub(crate) fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
     let t = match code.natives.iter().find(|n| n.findex == f) {
         Some(n) => n.t,
         None => code.functions[fun_index(code, f)?].t,
@@ -114,7 +114,7 @@ fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
     Ok((t.args.clone(), t.ret))
 }
 
-fn fname(code: &Bytecode, f: RefFun) -> &str {
+pub(crate) fn fname(code: &Bytecode, f: RefFun) -> &str {
     code.functions
         .iter()
         .find(|g| g.findex == f)
@@ -123,7 +123,7 @@ fn fname(code: &Bytecode, f: RefFun) -> &str {
 }
 
 /// The class global of `name` (HL stores it 1-based) and its type `pkg.$Cls`.
-fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
+pub(crate) fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
     let o = obj(code, obj_type(code, name)?)?;
     let g = RefGlobal(
         o.global
@@ -352,7 +352,7 @@ fn depth_apply(code: &mut Bytecode, p: &DepthPlan) {
 // ---------- 2. player-colored cell / unit footprint (Controller.ping__impl) ----------
 
 /// Proto `name` of class `t` or its nearest ancestor: (function, vtable index).
-fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, i32)> {
+pub(crate) fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, i32)> {
     let mut cur = Some(t);
     while let Some(c) = cur {
         let o = obj(code, c)?;

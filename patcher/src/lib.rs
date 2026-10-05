@@ -71,6 +71,7 @@ mod diag;
 mod dlc_untouched;
 mod follow;
 mod force_leave;
+mod forge_mirror;
 mod friendly_fire;
 mod hold_speed;
 mod job_confirm;
@@ -148,6 +149,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     tooltip_input::patch(&mut code);
     censer_tip::patch_censer_tip(&mut code);
     ping_cell::patch_ping_cell(&mut code);
+    forge_mirror::patch_forge_mirror(&mut code);
     timeline_hud::patch_timeline_hud(&mut code);
     activity_injury::patch_activity_injury(&mut code);
     style_guard::patch_style_guard(&mut code);

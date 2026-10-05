@@ -440,6 +440,34 @@ the HUD was rebuilt, and drops the panel of a player who disconnected. All
 players need this build. Appended functions run under a trap (`mp: allinv:
 ...`); the whole pass is skipped (logged) if any part mismatches.
 
+**Co-op forge mirror** (`src/forge_mirror.rs`): while a player forges, the
+other players see that player's worker at the anvil hammer, with each hit's
+grade sound and particles and the success / fail gesture at the end; their
+camera, UI and input are untouched and no window is created on their side.
+Vanilla shares a mini-game only through data.cdb `props.coop` and a window
+class with hxbit-synced fields / RPCs (GatherAction); `ui.win.ForgeAction` has
+neither, so the others only got the worker parked at the anvil
+(`PlaceView.activityUnits.get(element).unitView`). Rather than a data change
+plus hand-written hxbit serialization and RPCs on ForgeAction (and a replicated
+window taking over every peer's screen), the events ride the existing ping RPC
+(`Controller.ping(x, y, z, player)`, any player -> host -> every machine) with
+x = -987654321, y = the element's hxbit `__uid`, z = code + (a << 2) + (b << 6):
+`ForgeAction.init` sends start (0), `setActionDone` a hit (1; a = EScoreTier
+A/B/C = perfect/good/bad, b = 1 + the shard's child index), `endActivity` the
+end (2; a = ActivityResult index); co-op only, under a trap. `ping__impl` starts
+with `if (forgeRecv(this, x, y, z, player)) return;`: any other x is a vanilla
+ping; a sentinel one never shows a marker. Skipped for the sender itself and
+outside a PlaceView; start remembers the worker's current anim as its idle;
+a hit plays ForgeAction's `animHit` ("Forge") once, back to idle on its end,
+and 0.4 s later the grade's sound (`game.ui.sfx`) and the vanilla particle
+prefabs at the shard (scene `allShards` child), else the `anvil`, else the
+worker, removed after 1.5 s; end plays `animSuccess` ("ForgeYes") on Success,
+else `animFail` ("ForgeMeh"). shim.log: `mp: forge send <code> <a> <b> <uid>`
+and `mp: forge recv <code> <a> <b> <stage>` (5 start, 6 end, 7 hit). All
+players need this build (an older one shows a far-away ping with its sound).
+Archery and the UnitAction kinds are not mirrored yet. Skipped (logged) on
+mismatch.
+
 ## Install
 
 Two ways, pick one:

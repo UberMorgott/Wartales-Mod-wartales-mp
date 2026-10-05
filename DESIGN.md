@@ -504,6 +504,40 @@ ctrl + shift — окно количества); цель — панель, по
 ванильных переносов между владельцами). Нужна эта сборка у всех: старая отклонит пересланный вызов
 (при отдаче предмет у отдающего пропадёт). Все добавленные функции под trap (`mp: allinv: ...`);
 при любом несовпадении весь проход пропускается (лог).
+Ковка у других игроков (`src/forge_mirror.rs`): ваниль делит окно мини-игры только при
+`activity.props.coop` в data.cdb (`Activity._start` -> `win.netSharing(true)`), и окно должно
+иметь синхронные поля/RPC (GatherAction: `activity`, `totalHits`, `lootKind`, `netFeedbackMine/Wood`,
+`addWoodLog`). У Forge флага нет, у `ForgeAction` нет ни одного синхронного поля и RPC (шаги
+случайны локально, ввод — локальный raycast, предмет создаётся локально); остальные видят только
+работника, припаркованного у наковальни (`Activity.setUnit__impl` -> RPC `addUnitToElement` ->
+`PlaceView.activityUnits.get(element).unitView`, idle-анимация). Путь GatherAction отвергнут:
+нужна правка pak (`coop`), ручное hxbit-поле `activity` на ForgeAction (serialize / unserialize /
+getSerializeSchema / networkSetBitCond, которых у класса нет), новые RPC для локально выпавших
+ударов (networkRPC / getRPCSchema / networkGetName / networkAllow + заглушки), гейты владельца в
+init / update / setActionDone (реплика сама бросала бы шаги, читала мышь и делала предметы), а
+реплицированное окно занимает экран зрителя. Вместо этого события едут по существующему RPC пинга
+(`Controller.ping(x, y, z, player)`: любой игрок -> хост -> все), x = SENTINEL (-987654321), y = hxbit
+`__uid` элемента (`activity.target`), z = code + (a << 2) + (b << 6). Отправка
+(`forgeSend`, только в коопе, под trap): вход `ForgeAction.init` (code 0, старт),
+`setActionDone` (1, удар: a = индекс EScoreTier A/B/C = отлично/хорошо/плохо, b = 1 + индекс осколка
+среди детей его родителя), `endActivity` (2, конец: a = индекс ActivityResult). Приём: вход
+`Controller.ping__impl` — `if (forgeRecv(...)) return;`; не-SENTINEL — ванильный пинг дальше,
+SENTINEL — никогда не маркер/звук пинга; свой же отправитель (`player == game.me`) и не-PlaceView
+пропускаются; элемент = `__host.ctx.refs.get(y)`, работник = `activityUnits.get(element).unitView`.
+Старт запоминает текущую анимацию работника как idle (пропущенный старт — берётся при первом
+ударе); удар — один раз `animHit` ("Forge") с `onEnd` -> `forgeIdle` (idle в цикле, если работник ещё
+в сцене) и через 0.4 с (тайминг ванили) `forgeFx`: звук степени через `game.ui.sfx` и ванильные
+префабы частиц (base+good+perfect / base+good / base+bad) в s3d в точке осколка (`allShards`, ребёнок
+b-1), иначе `anvil`, иначе работника, удаляются через 1.5 с; конец — `animSuccess` ("ForgeYes") при
+Success, иначе `animFail` ("ForgeMeh"), один раз, затем idle. Имена анимаций — из конструктора
+ForgeAction. Ничего не создаётся у зрителя, кроме частиц и вызовов анимации на уже существующем
+работнике: нет окна (force_leave не затронут), нет предметов/счётчиков, камера и ввод не трогаются.
+Лог: `mp: forge send <code> <a> <b> <uid>` у кующего, `mp: forge recv <code> <a> <b> <stage>` у
+остальных (5 старт, 6 конец, 7 удар; меньше — где остановилось). Нужна эта сборка у всех: старая
+покажет далёкий пинг со звуком. Отмена посреди ковки не шлётся: одноразовые анимации сами
+возвращаются в idle. Не сделано: Archery и UnitAction (Study, MoneyLaundering, Dismantling,
+Altering, Snaring, Tracking) — другие окна, свои точки событий. При несовпадении проход пропускается
+(лог).
 Кнопки общего сундука (`src/chest_buttons.rs`): в панели общего сундука коопа
 (`GameInventory.chestInventory`) слева сверху ряд иконок. Сортировка — то же меню, что у панели
 игрока (`SortButton`, пункты `Texts.tips.inventory_sort`), но применяется к сундуку лагеря через
