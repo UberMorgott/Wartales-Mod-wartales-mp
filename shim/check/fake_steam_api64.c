@@ -175,21 +175,36 @@ EXPORT void SteamAPI_SteamNetworkingMessage_t_Release(SteamNetworkingMessage_t *
 	LeaveCriticalSection(&lock);
 }
 
-// The session with whoever we last sent to is "connected"; everyone else: none.
+// Session states shimcheck sets per peer (fake_set_session_state).
+#define FORCED_MAX 16
+static struct {
+	uint64_t id;
+	int state, end_reason;
+} forced[FORCED_MAX];
+static int forced_n;
+
+// The session with whoever we last sent to is "connected"; everyone else: none,
+// unless shimcheck forced a state for that peer.
 EXPORT int SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo(void *self, const SteamNetworkingIdentity *peer,
 	SteamNetConnectionInfo_t *info, void *quick) {
-	int state;
+	int state, end_reason = 0, i;
 	(void)quick;
 	if (self != &g_msgs || peer == NULL || peer->m_eType != IDENTITY_STEAMID)
 		return 0;
 	EnterCriticalSection(&lock);
 	st.conn_infos++;
 	state = st.sends > 0 && peer->m_steamID64 == st.last_send_to ? 3 : 0; // k_ESteamNetworkingConnectionState_Connected
+	for (i = 0; i < forced_n; i++)
+		if (forced[i].id == peer->m_steamID64) {
+			state = forced[i].state;
+			end_reason = forced[i].end_reason;
+		}
 	LeaveCriticalSection(&lock);
 	if (info != NULL) {
 		memset(info, 0, sizeof(*info));
 		info->m_identityRemote = *peer;
 		info->m_eState = state;
+		info->m_eEndReason = end_reason;
 		info->m_idPOPRelay = state == 3 ? 0x666b6521 : 0; // "fke!"
 		strcpy(info->m_szConnectionDescription, state == 3 ? "fake loopback connection" : "no connection");
 	}
@@ -247,6 +262,23 @@ EXPORT void fake_inject(uint64_t from, int channel, const void *data, int len) {
 }
 
 EXPORT void fake_set_send_result(int res) { g_send_result = res; }
+
+// fake_set_session_state makes GetSessionConnectionInfo report state / end
+// reason for peer from now on.
+EXPORT void fake_set_session_state(uint64_t peer, int state, int end_reason) {
+	int i;
+	EnterCriticalSection(&lock);
+	for (i = 0; i < forced_n && forced[i].id != peer; i++)
+		;
+	if (i < FORCED_MAX) {
+		forced[i].id = peer;
+		forced[i].state = state;
+		forced[i].end_reason = end_reason;
+		if (i == forced_n)
+			forced_n++;
+	}
+	LeaveCriticalSection(&lock);
+}
 
 // SteamAPI_RegisterCallback, as steam_api does it: remember the object, set
 // the registered flag. Like the real Steam client, the fake delivers session

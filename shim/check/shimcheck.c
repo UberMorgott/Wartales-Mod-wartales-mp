@@ -271,6 +271,130 @@ static uint64_t get_uid(const unsigned char *in) {
 	return id;
 }
 
+// ------------------------------------------------------- lost-peer check
+//
+// A session the game holds drops (host quit, crashed, timed out): the shim
+// must hand the game exactly one vanilla code-8 frame from that peer,
+// [0x08, 0x00, 0x00, sid as last received], so SteamService runs its own
+// stop(); onStop(). Never for a session the game already closed, never for a
+// peer the game never read from, not when a re-dial reconnects in time.
+
+typedef void (*set_state_fn)(uint64_t, int, int);
+typedef int (*fire_failed_fn)(uint64_t, int, const char *);
+
+// arm_peer makes id a session the game uses: Steam says connected and the
+// game reads one game packet [code 5][pid 1 0][sid][abc] from it.
+static void arm_peer(read_fn read, inject_fn inject, set_state_fn set_state, const wchar_t *log, uint64_t id,
+	const unsigned char sid[4], const char *what) {
+	unsigned char pkt[10] = {5, 1, 0, 0, 0, 0, 0, 'a', 'b', 'c'}, buf[64];
+	char line[160];
+	uint32_t len = 0;
+	vuid from;
+	memcpy(pkt + 3, sid, 4);
+	set_state(id, 3, 0);
+	inject(id, 0, pkt, 10);
+	from = read(buf, sizeof(buf), &len, 0);
+	sprintf(line, "sdr: session with %llu: state 3 (connected)", (unsigned long long)id);
+	check(from != NULL && get_uid(from) == id && len == 10 && wait_log(log, line, 5000), what);
+}
+
+static void check_lost(read_fn read, avail_fn avail, session_fn close, HMODULE api, const wchar_t *log) {
+	inject_fn inject = (inject_fn)(void *)GetProcAddress(api, "fake_inject");
+	stats_fn stats = (stats_fn)(void *)GetProcAddress(api, "fake_stats");
+	set_state_fn set_state = (set_state_fn)(void *)GetProcAddress(api, "fake_set_session_state");
+	fire_failed_fn fire_failed = (fire_failed_fn)(void *)GetProcAddress(api, "fake_fire_session_failed");
+	const uint64_t HOST = 76561198000000001ULL, GONE = 76561198000000002ULL, NEVER = 76561198000000003ULL,
+				   FAILED = 76561198000000004ULL, FLAKY = 76561198000000005ULL;
+	const unsigned char sid_host[4] = {0x11, 0x22, 0x33, 0x44}, sid_failed[4] = {0x01, 0x00, 0x00, 0x80}, sid_x[4] = {7, 0, 0, 0};
+	const unsigned char want_host[7] = {8, 0, 0, 0x11, 0x22, 0x33, 0x44}, want_failed[7] = {8, 0, 0, 0x01, 0x00, 0x00, 0x80};
+	unsigned char buf[64], uid[8];
+	uint32_t size, len;
+	unsigned closes;
+	vuid from;
+	fake_stats_t st;
+
+	check(set_state != NULL && fire_failed != NULL, "fake exports fake_set_session_state / fake_fire_session_failed");
+	if (set_state == NULL || fire_failed == NULL)
+		return;
+
+	// The host quits: its session is closed by the peer. The real packet it
+	// sent last is read first, then exactly one close with the last sid.
+	arm_peer(read, inject, set_state, log, HOST, sid_host, "host session armed: connected, one game packet read");
+	inject(HOST, 0, "\x05\x02\x00\x11\x22\x33\x44last", 11);
+	set_state(HOST, 4, 1000);
+	check(wait_log(log, "sdr: session with 76561198000000001 lost (session ended: state 4 (closed by peer)", 5000),
+		"shim.log records the lost host session");
+	Sleep(3500);
+	check(!log_contains(log, "injected close for 76561198000000001"), "no close while the host's last real packet is unread");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == HOST && len == 11 && memcmp(buf + 7, "last", 4) == 0,
+		"the host's last real packet is read first");
+	check(wait_log(log, "sdr: peer lost, injected close for 76561198000000001 sid 1144201745 on channel 0", 4000),
+		"then a close is injected for the lost host with its last sid (getInt32 LE 0x44332211)");
+	size = 0;
+	check(avail(&size, 0) == 1 && size == 7, "the injected close is the next message: 7 bytes");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == HOST && len == 7 && memcmp(buf, want_host, 7) == 0,
+		"injected frame is [08 00 00 11 22 33 44] from the host's SteamID");
+	Sleep(3500);
+	check(avail(&size, 0) == 0, "exactly one close per lost session");
+	// The game reacts with stop(): closeSession. Steam's close waits ~1 s.
+	stats(&st);
+	closes = st.closes;
+	put_uid(uid, HOST);
+	check(close(uid) == 1 && wait_log(log, "sdr: session with 76561198000000001 closed (ok, CloseSessionWithUser deferred 1 s)", 2000),
+		"close_p2p_session answers ok and defers Steam's close");
+	stats(&st);
+	check(st.closes == closes, "CloseSessionWithUser is not called at once (the game's last code 8 still leaves)");
+	check(wait_log(log, "sdr: deferred CloseSessionWithUser(76561198000000001) = 1", 4000), "the deferred close runs 1-2 s later");
+	stats(&st);
+	check(st.closes == closes + 1 && st.last_close == HOST, "deferred close named the host, once");
+
+	// A session the game closed itself is never reported back.
+	arm_peer(read, inject, set_state, log, GONE, sid_x, "second session armed");
+	put_uid(uid, GONE);
+	check(close(uid) == 1, "the game closes that session");
+	set_state(GONE, 5, 5003);
+	check(wait_log(log, "sdr: session with 76561198000000002: state 5 (problem detected locally) was connected", 4000),
+		"the closed session's failure is still logged");
+
+	// A peer the game never read from (only a session request / sends).
+	set_state(NEVER, 3, 0);
+	inject(NEVER, 1, "x", 1); // never read by the game on channel 0
+	check(fire_failed(NEVER, 5003, "Timed out attempting to connect") == 1, "failure posted for a never-used peer");
+
+	// SessionFailed_t (the re-dial timed out) is a loss too.
+	arm_peer(read, inject, set_state, log, FAILED, sid_failed, "third session armed");
+	check(fire_failed(FAILED, 5003, "Timed out attempting to connect") == 1, "SessionFailed posted for the used session");
+	check(wait_log(log, "sdr: peer lost, injected close for 76561198000000004 sid -2147483647 on channel 0", 8000),
+		"SessionFailed_t leads to an injected close");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == FAILED && len == 7 && memcmp(buf, want_failed, 7) == 0,
+		"injected frame carries that session's sid [08 00 00 01 00 00 80]");
+
+	// A drop that reconnects within the confirmation window is not a loss.
+	arm_peer(read, inject, set_state, log, FLAKY, sid_x, "fourth session armed");
+	set_state(FLAKY, 5, 4000);
+	check(wait_log(log, "sdr: session with 76561198000000005 lost", 4000), "transient drop seen");
+	set_state(FLAKY, 3, 0);
+	check(wait_log(log, "sdr: session with 76561198000000005 connected again, no close injected", 4000),
+		"re-dial reached connected in time: loss cancelled");
+
+	Sleep(3500);
+	check(avail(&size, 0) == 0, "nothing injected for the closed, the never-used or the reconnected session");
+	check(!log_contains(log, "injected close for 76561198000000002") && !log_contains(log, "injected close for 76561198000000003") &&
+			!log_contains(log, "injected close for 76561198000000005"),
+		"shim.log shows no close for them");
+	from = read(buf, sizeof(buf), &len, 1);
+	check(from != NULL && get_uid(from) == NEVER && len == 1, "the never-used peer's own message is untouched");
+	put_uid(uid, FAILED);
+	close(uid);
+	put_uid(uid, FLAKY);
+	close(uid);
+	put_uid(uid, NEVER);
+	close(uid);
+}
+
 static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *log, const wchar_t *scratch) {
 	send_fn send = (send_fn)resolve(steam, "send_p2p_packet");
 	read_fn read = (read_fn)resolve(steam, "read_p2p_packet");
@@ -423,13 +547,17 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 	inject(OTHER, 0, "o1", 2);
 	inject(PEER, 1, "p2", 2);
 	check(avail(&size, 0) == 1 && size == 2, "queued messages before close");
-	check(close(peer) == 1, "close_p2p_session forwards to CloseSessionWithUser");
+	check(close(peer) == 1, "close_p2p_session answers ok");
+	check(wait_log(log, "sdr: deferred CloseSessionWithUser(72623859790382856) = 1", 4000),
+		"close_p2p_session reaches CloseSessionWithUser, deferred 1-2 s");
 	stats(&st);
 	check(st.closes == 1 && st.last_close == PEER, "close named the right peer");
 	from = read(buf, sizeof(buf), &len, 0);
 	check(from != NULL && get_uid(from) == OTHER && memcmp(buf, "o1", 2) == 0, "close dropped the closed peer's messages, kept the other peer's");
 	check(read(buf, sizeof(buf), &len, 0) == NULL && read(buf, sizeof(buf), &len, 1) == NULL, "nothing from the closed peer remains on any channel");
 	check(sdata(peer) == NULL, "get_p2p_session_data answers null");
+
+	check_lost(read, avail, close, api, log);
 
 	stats(&st);
 	check(st.allocated == st.released, "every message handed out by Steam was released");

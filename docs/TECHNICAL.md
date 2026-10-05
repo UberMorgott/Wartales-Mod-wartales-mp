@@ -299,7 +299,13 @@ needs no patch for it.
    semantics the game relies on (per-channel queues, reliability per send type,
    packet boundaries and truncation, the sender's Steam id). The old
    implementations are never called. If SDR cannot be set up, the calls fail
-   visibly and `shim.log` says why. It also opens a token-protected loopback
+   visibly and `shim.log` says why. The old API's "connection failed" event
+   does not exist on the new interface, so when a session the game uses drops
+   for good (the other player quit, crashed or timed out) the mod hands the
+   game the peer's own goodbye packet once, and the game runs its normal
+   disconnect (message, back to the title screen) instead of waiting forever,
+   e.g. on a black screen mid scene change. Closing a session is held back
+   about a second so the game's own goodbye reaches the other side. It also opens a token-protected loopback
    port for the helper, so the helper's master can talk to the other player's
    master over SDR too (channel 100, apart from the game's own channels).
 
