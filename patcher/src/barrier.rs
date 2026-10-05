@@ -28,7 +28,11 @@
 //       the gate lets a replay through) once no barrier is active; still
 //       active JOIN_CAP s later: the parked clients are disconnected;
 //     waitLocks entries no longer in host.clients (left, or replaced by their
-//       reconnection) or soft-kicked: removed;
+//       reconnection), soft-kicked, or with a parked Join: removed. The last
+//       ones connected before waitForClients took host.clients but have
+//       nothing synced, so they can never answer; waiting for them kept the
+//       barrier active and so their own Join parked (a save loaded into a
+//       battle: Battle.onEndGeneration waits while clients reconnect);
 //     waitLocks still not empty TIMEOUT s after the phase began: each late
 //       client is removed and soft-kicked (rejoin; c.stop() if refused);
 //     anything removed: release(ctrl).
@@ -54,6 +58,10 @@
 //     A client full-synced in the middle of a switch would get the objects but
 //     not the switch's earlier RPCs (doLeaveMode / doEnterMode) and end up in
 //     the wrong mode. The joining client simply waits for its SyncDone longer.
+//     Any Join (parked, replayed or let through) takes its client out of the
+//     soft-kicked list: it is a full sync from scratch, and a client kicked
+//     before it had synced anything ignored the rejoin RPC, so the tick would
+//     otherwise disconnect a client that joined fine TIMEOUT s after the kick.
 //     Kicked objects are not left out of `waitForClients` itself: their entry
 //     goes on the next tick, and a stale answer removing it a frame earlier
 //     releases nothing the tick would not release.
@@ -88,6 +96,7 @@ pub(crate) const PHASE_GRACE: f64 = 3.0;
 const LOG_GONE: &str = "mp: barrier: a client that left or rejoins is no longer waited for";
 const LOG_REJOIN: &str = "mp: barrier: no answer in 30 s, asked to rejoin: ";
 const LOG_STOP: &str = "mp: barrier: disconnected: ";
+const LOG_JOINING: &str = "mp: barrier: a client whose Join waits is not waited for";
 const LOG_PARK: &str = "mp: barrier: a Join waits for the mode switch to end";
 const LOG_REPLAY: &str = "mp: barrier: a parked Join goes ahead";
 
@@ -875,6 +884,7 @@ fn add_join_gate(
     let log_park = str_global(code, p.str_t, LOG_PARK);
     let na = &p.new_arr;
     let mut r = Regs(vec![p.game_t, p.nc_t, p.msg_t]);
+    let replay = r.r(p.bool_t);
     let (b, idx, zero, ctrl, pend, now, n, ty, raw, cast, msg, v) = (
         r.r(p.bool_t),
         r.r(p.i32_t),
@@ -896,12 +906,11 @@ fn add_join_gate(
         field: p.game_auth,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "no");
-    // A replay from the tick goes through (it was parked once already).
+    // Read before own(), which clears it for a new controller.
     a.op(Opcode::GetGlobal {
-        dst: b,
+        dst: replay,
         global: g.replaying,
     });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "no");
     a.jmp(
         Opcode::JNull {
             reg: Reg(2),
@@ -937,6 +946,40 @@ fn add_join_gate(
         },
         "no",
     );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: own,
+        arg0: ctrl,
+    });
+    // A Join is a full sync from scratch: a client soft-kicked before it had
+    // anything synced (the rejoin RPC found no controller there) is no longer
+    // quarantined, or the tick would disconnect it TIMEOUT s after the kick.
+    a.op(Opcode::GetGlobal {
+        dst: pend,
+        global: g.kicked,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: pend,
+            offset: 0,
+        },
+        "fresh",
+    );
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.remove,
+        arg0: pend,
+        arg1: Reg(1),
+    });
+    a.label("fresh");
+    // A replay from the tick goes through (it was parked once already).
+    a.jmp(
+        Opcode::JTrue {
+            cond: replay,
+            offset: 0,
+        },
+        "no",
+    );
     a.op(Opcode::Call2 {
         dst: b,
         fun: active,
@@ -944,11 +987,6 @@ fn add_join_gate(
         arg1: Reg(0),
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "no");
-    a.op(Opcode::Call1 {
-        dst: v,
-        fun: own,
-        arg0: ctrl,
-    });
     a.op(Opcode::GetGlobal {
         dst: pend,
         global: g.pending,
@@ -1084,6 +1122,8 @@ fn add_tick(
         r.r(p.nh_t),
     );
     let exc = r.r(p.dyn_t);
+    let pend = r.r(p.arr_t);
+    let log_joining = str_global(code, p.str_t, LOG_JOINING);
     let mut a = Asm::new();
     let log = |a: &mut Asm, g: RefGlobal, tail: Option<Reg>| {
         a.op(Opcode::GetGlobal {
@@ -1448,7 +1488,13 @@ fn add_tick(
         dst: kicked,
         global: g.kicked,
     });
-    // Drop the entries that left host.clients or are being kicked, last to first.
+    a.op(Opcode::GetGlobal {
+        dst: pend,
+        global: g.pending,
+    });
+    // Drop the entries that left host.clients, are being kicked, or whose Join is
+    // parked (connected before waitForClients took host.clients, nothing synced:
+    // they cannot answer, and waiting for them keeps their own Join parked).
     a.op(Opcode::Mov { dst: i, src: len });
     a.loop_head("prune");
     a.jmp(
@@ -1486,7 +1532,7 @@ fn add_tick(
             reg: kicked,
             offset: 0,
         },
-        "prune",
+        "parked",
     );
     a.op(Opcode::Call2 {
         dst: b,
@@ -1494,7 +1540,34 @@ fn add_tick(
         arg0: kicked,
         arg1: e,
     });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "drop");
+    a.label("parked");
+    a.jmp(
+        Opcode::JNull {
+            reg: pend,
+            offset: 0,
+        },
+        "prune",
+    );
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.contains,
+        arg0: pend,
+        arg1: e,
+    });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "prune");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.remove,
+        arg0: wl,
+        arg1: e,
+    });
+    a.op(Opcode::Bool {
+        dst: removed,
+        value: ValBool(true),
+    });
+    log(&mut a, log_joining, None);
+    a.jmp(Opcode::JAlways { offset: 0 }, "prune");
     a.label("drop");
     a.op(Opcode::Call2 {
         dst: b,
@@ -1862,5 +1935,493 @@ mod tests {
             patch_barrier(&mut code);
             assert!(write(&code) == before, "{what}");
         }
+    }
+
+    // A small interpreter for the functions this pass adds (gate, tick, active,
+    // own), run against the patched installed game. The game's own code is
+    // stubbed: release (runs the parked steps once waitLocks is empty), rejoin
+    // (sent, nothing happens: the client has no synced controller yet), the Join
+    // handler (records a full sync), NetworkClient.stop (leaves host.clients).
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum V {
+        Null,
+        B(bool),
+        I(i32),
+        F(f64),
+        R(usize),
+        E(usize),
+        S(String),
+    }
+
+    enum H {
+        Obj(std::collections::HashMap<usize, V>),
+        Arr(Vec<V>),
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Ev {
+        Release,
+        Rejoin(usize),
+        Join(usize),
+        Stop(usize),
+    }
+
+    struct Sim<'a> {
+        code: &'a Bytecode,
+        p: &'a Plan,
+        nf: usize,
+        heap: Vec<H>,
+        globals: std::collections::HashMap<usize, V>,
+        now: f64,
+        events: Vec<Ev>,
+        log: Vec<String>,
+        game: usize,
+        ctrl: usize,
+        host: usize,
+        g0: usize,
+    }
+
+    impl<'a> Sim<'a> {
+        fn new(code: &'a Bytecode, p: &'a Plan, nf: usize, g0: usize) -> Self {
+            let mut s = Sim {
+                code,
+                p,
+                nf,
+                g0,
+                heap: vec![],
+                globals: Default::default(),
+                now: 1000.0,
+                events: vec![],
+                log: vec![],
+                game: 0,
+                ctrl: 0,
+                host: 0,
+            };
+            let (wl, cb, mq, cl) = (s.arr(), s.arr(), s.arr(), s.arr());
+            s.game = s.obj();
+            s.ctrl = s.obj();
+            s.host = s.obj();
+            s.set(s.game, p.game_auth, V::B(true));
+            s.set(s.game, p.game_ctrl, V::R(s.ctrl));
+            s.set(s.game, p.game_host.0, V::R(s.host));
+            s.set(s.ctrl, p.ctrl_game, V::R(s.game));
+            s.set(s.ctrl, p.wait_locks, V::R(wl));
+            s.set(s.ctrl, p.callbs, V::R(cb));
+            s.set(s.ctrl, p.mode_queue, V::R(mq));
+            s.set(s.ctrl, p.lock_sync, V::B(false));
+            s.set(s.host, p.host_clients, V::R(cl));
+            s
+        }
+        fn obj(&mut self) -> usize {
+            self.heap.push(H::Obj(Default::default()));
+            self.heap.len() - 1
+        }
+        fn arr(&mut self) -> usize {
+            self.heap.push(H::Arr(vec![]));
+            self.heap.len() - 1
+        }
+        fn set(&mut self, o: usize, f: RefField, v: V) {
+            let H::Obj(m) = &mut self.heap[o] else { panic!("not an object") };
+            m.insert(f.0, v);
+        }
+        fn get(&self, o: usize, f: RefField) -> V {
+            match &self.heap[o] {
+                H::Obj(m) => m.get(&f.0).cloned().unwrap_or(V::Null),
+                H::Arr(a) if f == self.p.arr_len => V::I(a.len() as i32),
+                H::Arr(_) if f == self.p.arr_raw.0 => V::R(o),
+                H::Arr(_) => panic!("array field {}", f.0),
+            }
+        }
+        fn list(&mut self, o: usize) -> &mut Vec<V> {
+            let H::Arr(a) = &mut self.heap[o] else { panic!("not an array") };
+            a
+        }
+        fn field_arr(&self, o: usize, f: RefField) -> usize {
+            let V::R(a) = self.get(o, f) else { panic!("no array") };
+            a
+        }
+        fn wait_locks(&mut self) -> &mut Vec<V> {
+            let a = self.field_arr(self.ctrl, self.p.wait_locks);
+            self.list(a)
+        }
+        fn clients(&mut self) -> &mut Vec<V> {
+            let a = self.field_arr(self.host, self.p.host_clients);
+            self.list(a)
+        }
+        /// A client connects: in host.clients, its Join still on the way.
+        fn connect(&mut self) -> usize {
+            let c = self.obj();
+            self.set(c, self.p.nc_host.0, V::R(self.host));
+            self.clients().push(V::R(c));
+            c
+        }
+        /// waitForClients + waitForUnlock(cb): a new barrier phase.
+        fn phase(&mut self) {
+            let g = self.phase_global();
+            self.globals.insert(g, V::F(self.now));
+            let cl = self.clients().clone();
+            self.wait_locks().extend(cl);
+            let cb = self.field_arr(self.ctrl, self.p.callbs);
+            self.list(cb).push(V::Null);
+        }
+        /// apply() adds phase_at first.
+        fn phase_global(&self) -> usize {
+            self.g0
+        }
+        fn fun(&self, k: usize) -> RefFun {
+            self.code.functions[self.nf + k].findex
+        }
+        fn gate(&mut self, c: usize) -> bool {
+            let ctor0 = V::E(0);
+            let r = self.call(self.fun(4), vec![V::R(self.game), V::R(c), ctor0]);
+            r == V::B(true)
+        }
+        /// A Join reaches the patched handler.
+        fn join_arrives(&mut self, c: usize) {
+            let j = self.code.functions[self.p.join_fi].findex;
+            self.call(j, vec![V::R(self.game), V::R(c), V::E(0)]);
+        }
+        /// onClientReady__impl: the head removes the client, the tail is release.
+        fn ready(&mut self, c: usize) {
+            self.wait_locks().retain(|x| *x != V::R(c));
+            self.call(self.fun(0), vec![V::R(self.ctrl)]);
+        }
+        fn at(&self, e: &Ev) -> Option<usize> {
+            self.events.iter().position(|x| x == e)
+        }
+        fn tick(&mut self) {
+            self.call(self.fun(5), vec![V::R(self.ctrl)]);
+        }
+        /// Ticks every 0.25 s up to `t` s from the start.
+        fn run_to(&mut self, t: f64) {
+            while self.now < 1000.0 + t {
+                self.now += 0.25;
+                self.tick();
+            }
+        }
+        fn call(&mut self, f: RefFun, args: Vec<V>) -> V {
+            let p = self.p;
+            if let Some(k) = (0..6).find(|&k| self.fun(k) == f) {
+                match k {
+                    0 => {
+                        let cb = self.field_arr(self.ctrl, p.callbs);
+                        if self.wait_locks().is_empty() && !self.list(cb).is_empty() {
+                            self.list(cb).clear();
+                            self.events.push(Ev::Release);
+                        }
+                        return V::Null;
+                    }
+                    1 => {
+                        let V::R(c) = args[3] else { panic!() };
+                        self.events.push(Ev::Rejoin(c));
+                        return V::B(true);
+                    }
+                    _ => return self.exec(f, args),
+                }
+            }
+            // The patched Join handler: the gate first, then the full sync.
+            if f == self.code.functions[p.join_fi].findex {
+                let V::R(c) = args[1] else { panic!() };
+                if !self.gate(c) {
+                    self.events.push(Ev::Join(c));
+                }
+                return V::Null;
+            }
+            let arr = |_: &Self, v: &V| match v {
+                V::R(a) => *a,
+                _ => panic!("not an array: {v:?}"),
+            };
+            if f == p.contains {
+                let a = arr(self, &args[0]);
+                return V::B(self.list(a).contains(&args[1]));
+            }
+            if f == p.remove {
+                let a = arr(self, &args[0]);
+                let l = self.list(a);
+                let at = l.iter().position(|x| *x == args[1]);
+                return V::B(at.map(|i| l.remove(i)).is_some());
+            }
+            if f == p.push {
+                let a = arr(self, &args[0]);
+                self.list(a).push(args[1].clone());
+                return V::I(self.list(a).len() as i32);
+            }
+            if f == p.shift {
+                let a = arr(self, &args[0]);
+                let l = self.list(a);
+                return if l.is_empty() { V::Null } else { l.remove(0) };
+            }
+            if f == p.copy {
+                let a = arr(self, &args[0]);
+                let v = self.list(a).clone();
+                let n = self.arr();
+                *self.list(n) = v;
+                return V::R(n);
+            }
+            if f == p.concat {
+                let (a, b) = (arr(self, &args[0]), arr(self, &args[1]));
+                let mut v = self.list(a).clone();
+                v.extend(self.list(b).clone());
+                let n = self.arr();
+                *self.list(n) = v;
+                return V::R(n);
+            }
+            if f == p.new_arr.alloc {
+                return V::R(self.arr());
+            }
+            if f == p.new_arr.wrap {
+                return args[0].clone();
+            }
+            if f == p.sys_time {
+                return V::F(self.now);
+            }
+            if f == p.println {
+                let V::S(s) = &args[0] else { panic!() };
+                self.log.push(s.clone());
+                return V::Null;
+            }
+            if f == p.std_string {
+                return V::S(format!("{:?}", args[0]));
+            }
+            if f == p.str_add {
+                let (V::S(a), V::S(b)) = (&args[0], &args[1]) else { panic!() };
+                return V::S(format!("{a}{b}"));
+            }
+            panic!("unexpected call fn@{}", f.0);
+        }
+        fn exec(&mut self, f: RefFun, args: Vec<V>) -> V {
+            let code = self.code;
+            let func = &code.functions[fun_index(code, f).unwrap()];
+            let mut r: Vec<V> = vec![V::Null; func.regs.len()];
+            for (i, a) in args.into_iter().enumerate() {
+                r[i] = a;
+            }
+            let num = |v: &V| match v {
+                V::I(i) => *i as f64,
+                V::F(x) => *x,
+                _ => panic!("not a number: {v:?}"),
+            };
+            let mut pc = 0usize;
+            loop {
+                let op = &func.ops[pc];
+                pc += 1;
+                let jump = |pc: &mut usize, off: i32| *pc = (*pc as i64 + off as i64) as usize;
+                match op {
+                    Opcode::Label | Opcode::EndTrap { .. } | Opcode::Trap { .. } => {}
+                    Opcode::Ret { ret } => return r[ret.0 as usize].clone(),
+                    Opcode::Mov { dst, src } | Opcode::UnsafeCast { dst, src } => {
+                        r[dst.0 as usize] = r[src.0 as usize].clone()
+                    }
+                    Opcode::Null { dst } | Opcode::Type { dst, .. } => r[dst.0 as usize] = V::Null,
+                    Opcode::Bool { dst, value } => r[dst.0 as usize] = V::B(value.0),
+                    Opcode::Int { dst, ptr } => r[dst.0 as usize] = V::I(code.ints[ptr.0]),
+                    Opcode::Float { dst, ptr } => r[dst.0 as usize] = V::F(code.floats[ptr.0]),
+                    Opcode::Field { dst, obj, field } => {
+                        let V::R(o) = r[obj.0 as usize] else { panic!("null access op {}", pc - 1) };
+                        r[dst.0 as usize] = self.get(o, *field);
+                    }
+                    Opcode::GetGlobal { dst, global } => {
+                        let v = match self.globals.get(&global.0) {
+                            Some(v) => v.clone(),
+                            None => match code.globals_initializers.get(global) {
+                                Some(&ci) => {
+                                    let c = &code.constants.as_ref().unwrap()[ci];
+                                    V::S(code.strings[c.fields[0]].to_string())
+                                }
+                                None => match &code.types[code.globals[global.0].0] {
+                                    Type::F64 => V::F(0.0),
+                                    Type::Bool => V::B(false),
+                                    _ => V::Null,
+                                },
+                            },
+                        };
+                        r[dst.0 as usize] = v;
+                    }
+                    Opcode::SetGlobal { global, src } => {
+                        self.globals.insert(global.0, r[src.0 as usize].clone());
+                    }
+                    Opcode::EnumIndex { dst, value } => {
+                        let V::E(i) = r[value.0 as usize] else { panic!() };
+                        r[dst.0 as usize] = V::I(i as i32);
+                    }
+                    Opcode::Add { dst, a, b } | Opcode::Sub { dst, a, b } => {
+                        let sub = matches!(op, Opcode::Sub { .. });
+                        r[dst.0 as usize] = match (&r[a.0 as usize], &r[b.0 as usize]) {
+                            (V::I(x), V::I(y)) => V::I(if sub { x - y } else { x + y }),
+                            (x, y) => {
+                                let (x, y) = (num(x), num(y));
+                                V::F(if sub { x - y } else { x + y })
+                            }
+                        };
+                    }
+                    Opcode::GetArray { dst, array, index } => {
+                        let (V::R(a), V::I(i)) = (&r[array.0 as usize], &r[index.0 as usize]) else {
+                            panic!()
+                        };
+                        let (a, i) = (*a, *i as usize);
+                        r[dst.0 as usize] = self.list(a)[i].clone();
+                    }
+                    Opcode::JAlways { offset } => jump(&mut pc, *offset),
+                    Opcode::JTrue { cond, offset } | Opcode::JFalse { cond, offset } => {
+                        let want = matches!(op, Opcode::JTrue { .. });
+                        if r[cond.0 as usize] == V::B(want) {
+                            jump(&mut pc, *offset);
+                        }
+                    }
+                    Opcode::JNull { reg, offset } | Opcode::JNotNull { reg, offset } => {
+                        let want = matches!(op, Opcode::JNull { .. });
+                        if (r[reg.0 as usize] == V::Null) == want {
+                            jump(&mut pc, *offset);
+                        }
+                    }
+                    Opcode::JEq { a, b, offset } | Opcode::JNotEq { a, b, offset } => {
+                        let want = matches!(op, Opcode::JEq { .. });
+                        if (r[a.0 as usize] == r[b.0 as usize]) == want {
+                            jump(&mut pc, *offset);
+                        }
+                    }
+                    Opcode::JSGte { a, b, offset } | Opcode::JSGt { a, b, offset } => {
+                        let (x, y) = (num(&r[a.0 as usize]), num(&r[b.0 as usize]));
+                        let hit = if matches!(op, Opcode::JSGte { .. }) { x >= y } else { x > y };
+                        if hit {
+                            jump(&mut pc, *offset);
+                        }
+                    }
+                    Opcode::Call0 { dst, fun } => r[dst.0 as usize] = self.call(*fun, vec![]),
+                    Opcode::Call1 { dst, fun, arg0 } => {
+                        let a = vec![r[arg0.0 as usize].clone()];
+                        r[dst.0 as usize] = self.call(*fun, a);
+                    }
+                    Opcode::Call2 { dst, fun, arg0, arg1 } => {
+                        let a = vec![r[arg0.0 as usize].clone(), r[arg1.0 as usize].clone()];
+                        r[dst.0 as usize] = self.call(*fun, a);
+                    }
+                    Opcode::Call3 { dst, fun, arg0, arg1, arg2 } => {
+                        let a = [arg0, arg1, arg2].iter().map(|x| r[x.0 as usize].clone()).collect();
+                        r[dst.0 as usize] = self.call(*fun, a);
+                    }
+                    Opcode::CallN { dst, fun, args } => {
+                        let a = args.iter().map(|x| r[x.0 as usize].clone()).collect();
+                        r[dst.0 as usize] = self.call(*fun, a);
+                    }
+                    Opcode::CallMethod { dst, field, args } => {
+                        assert_eq!(*field, self.p.stop_slot);
+                        let V::R(c) = r[args[0].0 as usize] else { panic!() };
+                        self.events.push(Ev::Stop(c));
+                        self.clients().retain(|x| *x != V::R(c));
+                        self.set(c, self.p.nc_host.0, V::Null);
+                        r[dst.0 as usize] = V::Null;
+                    }
+                    o => panic!("sim: unsupported op {o:?}"),
+                }
+            }
+        }
+    }
+
+    fn sim_image() -> Option<(Bytecode, Bytecode)> {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return None;
+        };
+        let orig = read(&image);
+        let mut code = read(&image);
+        patch_barrier(&mut code);
+        Some((orig, code))
+    }
+
+    /// Loading a save into a battle: A is synced, B has reconnected but its
+    /// Join is still on the way when Battle.onEndGeneration's waitForClients
+    /// takes host.clients. B's Join is parked, so B can never answer; the
+    /// barrier must not wait for it (the phase goes on without it, then the
+    /// Join is replayed) and B, now synced, is never disconnected.
+    #[test]
+    fn parked_join_is_not_waited_for() {
+        let Some((orig, code)) = sim_image() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
+        s.tick();
+        let a = s.connect();
+        s.join_arrives(a);
+        assert_eq!(s.events, [Ev::Join(a)]);
+        let b = s.connect();
+        s.phase();
+        s.now += 0.5;
+        s.join_arrives(b);
+        assert_eq!(s.at(&Ev::Join(b)), None, "a Join during a switch is parked");
+        s.ready(a);
+        s.run_to(TIMEOUT - 1.0);
+        let rel = s.at(&Ev::Release).expect("the phase goes on without the joining client");
+        let join = s.at(&Ev::Join(b)).expect("the parked Join is replayed");
+        assert!(rel < join, "{:?}", s.events);
+        assert!(s.wait_locks().is_empty());
+        s.run_to(4.0 * JOIN_CAP);
+        assert!(
+            !s.events.iter().any(|e| matches!(e, Ev::Rejoin(_) | Ev::Stop(_))),
+            "{:?}\n{:?}",
+            s.events,
+            s.log
+        );
+    }
+
+    /// A client soft-kicked before its Join arrived (the rejoin RPC reaches a
+    /// client with nothing synced, so nothing happens) joins afterwards: that
+    /// Join is a full sync, and the quarantine must not disconnect it later.
+    #[test]
+    fn join_after_kick_is_not_disconnected() {
+        let Some((orig, code)) = sim_image() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
+        s.tick();
+        let b = s.connect();
+        s.phase();
+        s.run_to(TIMEOUT + 1.0);
+        assert!(s.at(&Ev::Rejoin(b)).is_some(), "{:?}", s.events);
+        assert!(s.at(&Ev::Release).is_some());
+        s.now += 1.0;
+        s.join_arrives(b);
+        assert!(s.at(&Ev::Join(b)).is_some(), "{:?}", s.events);
+        s.run_to(4.0 * JOIN_CAP);
+        assert_eq!(s.at(&Ev::Stop(b)), None, "{:?}\n{:?}", s.events, s.log);
+    }
+
+    /// Unchanged: a synced client that never answers is asked to rejoin after
+    /// TIMEOUT and disconnected TIMEOUT later if it is still there.
+    #[test]
+    fn silent_client_is_still_dropped() {
+        let Some((orig, code)) = sim_image() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
+        s.tick();
+        let a = s.connect();
+        s.join_arrives(a);
+        s.phase();
+        s.run_to(TIMEOUT - 1.0);
+        assert_eq!(s.at(&Ev::Release), None);
+        s.run_to(TIMEOUT + 1.0);
+        assert!(s.at(&Ev::Rejoin(a)).is_some() && s.at(&Ev::Release).is_some());
+        s.run_to(2.0 * TIMEOUT + 1.0);
+        assert!(s.at(&Ev::Stop(a)).is_some(), "{:?}", s.events);
+    }
+
+    /// A switch that never settles (lockSyncMode held): the parked client is
+    /// disconnected after JOIN_CAP and nothing is left to wait for.
+    #[test]
+    fn join_cap_drops_and_wait_set_recovers() {
+        let Some((orig, code)) = sim_image() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
+        s.tick();
+        let b = s.connect();
+        s.set(s.ctrl, p.lock_sync, V::B(true));
+        s.phase();
+        s.join_arrives(b);
+        s.run_to(JOIN_CAP - 1.0);
+        assert_eq!(s.at(&Ev::Stop(b)), None);
+        assert!(s.wait_locks().is_empty(), "the parked client is not waited for");
+        s.run_to(JOIN_CAP + 1.0);
+        assert!(s.at(&Ev::Stop(b)).is_some(), "{:?}", s.events);
+        assert_eq!(s.at(&Ev::Join(b)), None);
+        assert!(s.clients().is_empty() && s.wait_locks().is_empty());
     }
 }
