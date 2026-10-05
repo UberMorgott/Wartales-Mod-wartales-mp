@@ -59,14 +59,19 @@
 // `mp: forge recv <code> <a> <b> <stage>` on the others (stage 5 start, 6 end,
 // 7 hit played; lower: where it stopped).
 //
+// The validated types / fields / functions every mirror needs, the idle and
+// one-shot anim code and the ping__impl hook live in mirror.rs (shared with
+// work_mirror.rs, the archery / UnitAction mirror on its own sentinel).
+//
 // All players need this build: an older one shows a far-away ping marker and
 // plays the ping sound for each event. Validated before editing; a mismatch
 // skips the pass (logged).
 
 use super::asm::{push_fn, string_ref, Asm, Regs};
-use super::diag::{index_of, static_fn};
+use super::diag::index_of;
 use super::job_xp::{const_str, str_global};
-use super::ping_cell::{class_global, fname, sig, vproto};
+use super::mirror::{self, emit_log, emit_play_once, enum_constructs, int, want, want_field, Base};
+use super::ping_cell::fname;
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
@@ -84,69 +89,17 @@ const FX_BAD: &str = "prefabs/fx/activity/forge_particles_bad_hit.fx";
 const FX_PERFECT: &str = "prefabs/fx/activity/forge_particles_perfect_hit.fx";
 
 pub(crate) struct Plan {
+    /// The types, fields and functions every mirror shares (mirror.rs).
+    pub(crate) b: Base,
     pub(crate) fa_t: RefType,
-    pub(crate) ent_t: RefType,
-    pub(crate) obj_t: RefType,
-    pub(crate) ctrl_t: RefType,
-    pub(crate) player_t: RefType,
-    pub(crate) game_t: RefType,
-    mode_t: RefType,
-    pv_t: RefType,
-    host_t: RefType,
-    ctx_t: RefType,
-    refs_t: RefType,
-    omap_t: RefType,
-    ui_t: RefType,
-    ev_t: RefType,
     scene_t: RefType,
     mat_t: RefType,
-    str_t: RefType,
-    dyn_t: RefType,
-    dynobj_t: RefType,
-    f64_: RefType,
-    i32_: RefType,
-    bool_: RefType,
-    void_: RefType,
-    nbool_t: RefType,
-    arr_t: RefType,
-    raw_arr_t: RefType,
     pub(crate) w_game: RefField,
     pub(crate) w_act: RefField,
-    act_t: RefType,
-    pub(crate) a_target: RefField,
-    pub(crate) e_uid: RefField,
-    pub(crate) g_ctrl: RefField,
-    pub(crate) g_me: RefField,
-    pub(crate) g_mode: RefField,
-    pub(crate) g_event: RefField,
-    pub(crate) g_ui: RefField,
-    pub(crate) c_game: RefField,
-    pub(crate) c_host: RefField,
-    pub(crate) h_ctx: RefField,
-    pub(crate) x_refs: RefField,
     pub(crate) m_s3d: RefField,
-    pub(crate) pv_units: RefField,
-    pub(crate) e_obj: RefField,
-    pub(crate) e_anim: RefField,
-    pub(crate) o_parent: RefField,
-    pub(crate) o_children: RefField,
-    pub(crate) a_len: RefField,
-    pub(crate) a_arr: RefField,
     m41: RefField,
     m42: RefField,
     m43: RefField,
-    pub(crate) ping: RefFun,
-    pub(crate) check: RefFun,
-    pub(crate) pv_cls: RefGlobal,
-    pv_cls_t: RefType,
-    pub(crate) refs_get: RefFun,
-    pub(crate) omap_get: RefFun,
-    pub(crate) play_pi: RefField,
-    opts_t: RefType,
-    pos_t: RefType,
-    end_cb_t: RefType,
-    wait_cb_t: RefType,
-    pub(crate) wait: RefFun,
     pub(crate) sfx: RefFun,
     pub(crate) by_name: RefFun,
     pub(crate) abs_pos: RefFun,
@@ -165,9 +118,6 @@ pub(crate) struct Plan {
     res_t: RefType,
     prefab_t: RefType,
     pub(crate) load_prefab: RefFun,
-    pub(crate) println: RefFun,
-    pub(crate) std_string: RefFun,
-    pub(crate) str_add: RefFun,
     pub(crate) hit_g: RefGlobal,
     pub(crate) yes_g: RefGlobal,
     pub(crate) meh_g: RefGlobal,
@@ -175,39 +125,17 @@ pub(crate) struct Plan {
     pub(crate) init_fi: usize,
     pub(crate) done_fi: usize,
     pub(crate) end_fi: usize,
-    pub(crate) impl_fi: usize,
-    pub(crate) impl_ret: Reg,
     dbg_file: usize,
 }
 
-/// `t` is `of` or one of its subclasses.
-fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> bool {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return true;
-        }
-        cur = code.types[c.0].get_type_obj().and_then(|o| o.super_);
+impl std::ops::Deref for Plan {
+    type Target = Base;
+    fn deref(&self) -> &Base {
+        &self.b
     }
-    false
 }
 
-fn want(code: &Bytecode, f: RefFun, what: &str, args: &[RefType], ret: RefType) -> Result<()> {
-    if sig(code, f)? != (args.to_vec(), ret) {
-        bail!("unexpected {what} signature");
-    }
-    Ok(())
-}
-
-fn want_field(code: &Bytecode, t: RefType, name: &str, ty: RefType) -> Result<RefField> {
-    let (f, ft) = field(code, t, name)?;
-    if ft != ty {
-        bail!("field {name} has type {}, want {}", ft.0, ty.0);
-    }
-    Ok(f)
-}
-
-/// The op before `before` that last writes register `r`.
+/// The op before `before` that last writes register `r` (loads only).
 fn writer(f: &Function, r: Reg, before: usize) -> Option<&Opcode> {
     f.ops[..before].iter().rev().find(|o| {
         matches!(o,
@@ -236,113 +164,29 @@ fn ctor_literal(code: &Bytecode, ctor: &Function, f: RefField) -> Result<RefGlob
     bail!("ForgeAction constructor: no literal for field {}", f.0)
 }
 
-fn enum_constructs(code: &Bytecode, t: RefType) -> Result<Vec<String>> {
-    match &code.types[t.0] {
-        Type::Enum { constructs, .. } => Ok(constructs
-            .iter()
-            .map(|c| s(code, c.name).to_string())
-            .collect()),
-        _ => bail!("type {} is not an enum", t.0),
-    }
-}
-
-fn first_ret(f: &Function) -> Option<Reg> {
-    match f.ops.last() {
-        Some(Opcode::Ret { ret }) => Some(*ret),
-        _ => None,
-    }
-}
+/// The marker of an applied pass: its receiver's log tag.
+const RECV_TAG: &str = "mp: forge recv";
 
 pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
-    let f64_ = prim_type(code, "f64", |t| matches!(t, Type::F64))?;
-    let i32_ = prim_type(code, "i32", |t| matches!(t, Type::I32))?;
-    let bool_ = prim_type(code, "bool", |t| matches!(t, Type::Bool))?;
-    let void_ = prim_type(code, "void", |t| matches!(t, Type::Void))?;
-    let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
-    let dynobj_t = prim_type(code, "dynobj", |t| matches!(t, Type::DynObj))?;
-    let nbool_t = prim_type(
-        code,
-        "null<bool>",
-        |t| matches!(t, Type::Null(x) if *x == bool_),
-    )?;
-    let str_t = obj_type(code, "String")?;
+    if code.strings.iter().any(|s| s.as_str() == RECV_TAG) {
+        bail!("already applied");
+    }
+    let b = mirror::base(code)?;
     let fa_t = obj_type(code, "ui.win.ForgeAction")?;
-    let act_t = obj_type(code, "ui.win.Activity")?;
-    let ent_t = obj_type(code, "ent.Entity")?;
-    let obj_t = obj_type(code, "h3d.scene.Object")?;
-    let ctrl_t = obj_type(code, "st.Controller")?;
-    let player_t = obj_type(code, "ent.BasePlayer")?;
-    let game_t = obj_type(code, "Game")?;
-    let mode_t = obj_type(code, "GameMode")?;
-    let pv_t = obj_type(code, "world.PlaceView")?;
-    let host_t = obj_type(code, "hxbit.NetworkHost")?;
-    let omap_t = obj_type(code, "haxe.ds.ObjectMap")?;
-    let ev_t = obj_type(code, "hxd.WaitEvent")?;
     let scene_t = obj_type(code, "h3d.scene.Scene")?;
     let mat_t = obj_type(code, "h3d.MatrixImpl")?;
-    let arr_t = obj_type(code, "hl.types.ArrayObj")?;
+    let (obj_t, str_t, f64_, void_, dyn_t) = (b.obj_t, b.str_t, b.f64_, b.void_, b.dyn_t);
 
-    // ForgeAction: Window.game, activity; Activity.target; Entity.__uid
-    let w_game = want_field(code, fa_t, "game", game_t)?;
-    let w_act = want_field(code, fa_t, "activity", act_t)?;
-    let a_target = want_field(code, act_t, "target", ent_t)?;
-    let e_uid = want_field(code, ent_t, "__uid", i32_)?;
-    let g_ctrl = want_field(code, game_t, "ctrl", ctrl_t)?;
-    let g_me = field(code, game_t, "me")?;
-    if !is_sub(code, g_me.1, player_t) {
-        bail!("Game.me is not a BasePlayer");
-    }
-    let g_me = g_me.0;
-    let g_mode = want_field(code, game_t, "mode", mode_t)?;
-    let g_event = want_field(code, game_t, "globalEvent", ev_t)?;
-    let (g_ui, ui_t) = field(code, game_t, "ui")?;
-    let c_game = want_field(code, ctrl_t, "game", game_t)?;
-    let c_host = want_field(code, ctrl_t, "__host", host_t)?;
-    let (h_ctx, ctx_t) = field(code, host_t, "ctx")?;
-    let (x_refs, refs_t) = field(code, ctx_t, "refs")?;
-    if s(code, obj(code, refs_t)?.name) != "haxe.ds.IntMap" {
-        bail!("hxbit ctx.refs is not an IntMap");
-    }
-    let m_s3d = want_field(code, mode_t, "s3d", scene_t)?;
-    let pv_units = want_field(code, pv_t, "activityUnits", omap_t)?;
-    let e_obj = want_field(code, ent_t, "obj", obj_t)?;
-    let e_anim = want_field(code, ent_t, "currentAnim", str_t)?;
-    let o_parent = want_field(code, obj_t, "parent", obj_t)?;
-    let o_children = want_field(code, obj_t, "children", arr_t)?;
-    let a_len = want_field(code, arr_t, "length", i32_)?;
-    let (a_arr, raw_arr_t) = field(code, arr_t, "array")?;
-    if !matches!(code.types[raw_arr_t.0], Type::Array) {
-        bail!("ArrayObj.array is not a raw array");
-    }
+    // ForgeAction: Window.game, activity
+    let w_game = want_field(code, fa_t, "game", b.game_t)?;
+    let w_act = want_field(code, fa_t, "activity", b.act_t)?;
+    let m_s3d = want_field(code, b.mode_t, "s3d", scene_t)?;
     let m41 = want_field(code, mat_t, "_41", f64_)?;
     let m42 = want_field(code, mat_t, "_42", f64_)?;
     let m43 = want_field(code, mat_t, "_43", f64_)?;
 
-    // The ping RPC (stub) and its handler.
-    let ping = method(code, ctrl_t, "ping")?.findex;
-    want(
-        code,
-        ping,
-        "Controller.ping",
-        &[ctrl_t, f64_, f64_, f64_, player_t],
-        void_,
-    )?;
-    let imp = method(code, ctrl_t, "ping__impl")?;
-    if fun_args(code, imp) != [ctrl_t, f64_, f64_, f64_, player_t] {
-        bail!("unexpected Controller.ping__impl signature");
-    }
-    if matches!(imp.ops.first(), Some(Opcode::CallN { args, .. })
-        if args[..] == [Reg(0), Reg(1), Reg(2), Reg(3), Reg(4)])
-    {
-        bail!("already applied");
-    }
-    let impl_fi = index_of(code, imp.findex)?;
-    let impl_ret = first_ret(imp).context("ping__impl does not end in Ret")?;
-    if imp.regs[impl_ret.0 as usize] != void_ {
-        bail!("ping__impl: Ret register is not void");
-    }
-
     // ping__impl's fx load: Main.CACHE.loadPrefab(loader.loadCache(path, Resource), null, s3d)
+    let imp = &code.functions[b.impl_fi];
     let loads: Vec<(usize, Reg, Reg)> = imp
         .ops
         .iter()
@@ -404,79 +248,20 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("ping__impl: fx load globals have unexpected types");
     }
     want(code, get_loader, "get_loader", &[], loader_t)?;
-    let (la, lr) = sig(code, load_cache)?;
+    let (la, lr) = super::ping_cell::sig(code, load_cache)?;
     if la.len() != 3 || la[0] != loader_t || la[1] != str_t || lr != hres_t {
         bail!("unexpected loadCache signature");
     }
-    let (pa, pr) = sig(code, load_prefab)?;
+    let (pa, pr) = super::ping_cell::sig(code, load_prefab)?;
     let prefab_t = match pa[..] {
         [c, r, p, o] if c == cache_t && r == res_t && o == obj_t && pr == obj_t => p,
         _ => bail!("unexpected loadPrefab signature"),
     };
 
-    // PlaceView check, as Activity.setUnit__impl does it: check(world.$PlaceView, mode)
-    let (pv_cls, pv_cls_t) = class_global(code, "world.PlaceView")?;
-    let set_unit = method(code, act_t, "setUnit__impl")?;
-    let checks: Vec<RefFun> = set_unit
-        .ops
-        .iter()
-        .filter_map(|o| match o {
-            Opcode::Call2 {
-                fun, arg0, arg1, ..
-            } if set_unit.regs[arg0.0 as usize] == pv_cls_t
-                && set_unit.regs[arg1.0 as usize] == mode_t =>
-            {
-                Some(*fun)
-            }
-            _ => None,
-        })
-        .collect();
-    let [check] = checks[..] else {
-        bail!(
-            "Activity.setUnit__impl: {} PlaceView checks, want 1",
-            checks.len()
-        );
-    };
-    if fname(code, check) != "check" || sig(code, check)?.1 != bool_ {
-        bail!("the PlaceView check is not a Bool check");
-    }
-
-    let refs_get = proto(code, refs_t, "get")?;
-    want(code, refs_get, "IntMap.get", &[refs_t, i32_], dyn_t)?;
-    let omap_get = proto(code, omap_t, "get")?;
-    want(code, omap_get, "ObjectMap.get", &[omap_t, dyn_t], dyn_t)?;
-
-    // Entity.play(anim, opts, pos), virtual
-    let (play, play_pi) = vproto(code, ent_t, "play")?;
-    let (ppa, ppr) = sig(code, play)?;
-    let (opts_t, pos_t) = match ppa[..] {
-        [e, a, o, p] if e == ent_t && a == str_t && ppr == void_ => (o, p),
-        _ => bail!("unexpected Entity.play signature"),
-    };
-    if play_pi < 0 {
-        bail!("Entity.play is not virtual");
-    }
-    let (_, loop_t) = field_of_virtual(code, opts_t, "loop")?;
-    let (_, end_cb_t) = field_of_virtual(code, opts_t, "onEnd")?;
-    if loop_t != nbool_t || !matches!(code.types[pos_t.0], Type::Virtual { .. }) {
-        bail!("Entity.play options have unexpected types");
-    }
-    let wait = proto(code, ev_t, "wait")?;
-    let (wa, wr) = sig(code, wait)?;
-    if wa.len() != 3 || wa[0] != ev_t || wa[1] != f64_ || wr != void_ {
-        bail!("unexpected WaitEvent.wait signature");
-    }
-    let wait_cb_t = wa[2];
-    for t in [wait_cb_t, end_cb_t] {
-        match &code.types[t.0] {
-            Type::Fun(f) if f.args.is_empty() && f.ret == void_ => {}
-            _ => bail!("callback type {} is not () -> Void", t.0),
-        }
-    }
-    let (sfx, _) = vproto(code, ui_t, "sfx")?;
-    let (sa, sr) = sig(code, sfx)?;
+    let (sfx, _) = super::ping_cell::vproto(code, b.ui_t, "sfx")?;
+    let (sa, sr) = super::ping_cell::sig(code, sfx)?;
     if sa.len() != 3
-        || !is_sub(code, ui_t, sa[0])
+        || !mirror::is_sub(code, b.ui_t, sa[0])
         || sa[1] != str_t
         || sa[2] != dyn_t
         || sr != void_
@@ -503,19 +288,9 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     )?;
     let remove = proto(code, obj_t, "remove")?;
     want(code, remove, "Object.remove", &[obj_t], void_)?;
-    if !is_sub(code, scene_t, obj_t) {
+    if !mirror::is_sub(code, scene_t, obj_t) {
         bail!("h3d.scene.Scene is not an Object");
     }
-
-    let println_f = static_fn(code, "$Sys", "println")?;
-    if fun_args(code, println_f) != [dyn_t] {
-        bail!("Sys.println does not take one Dyn");
-    }
-    let println = println_f.findex;
-    let std_string = static_fn(code, "$Std", "string")?.findex;
-    want(code, std_string, "Std.string", &[dyn_t], str_t)?;
-    let str_add = static_fn(code, "$String", "__add__")?.findex;
-    want(code, str_add, "String.__add__", &[str_t, str_t], str_t)?;
 
     // ForgeAction: anim names, the three hooks.
     let ctor = method(code, fa_t, "__constructor__")?;
@@ -550,69 +325,16 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         .context("ActivityResult has no Success")? as i32;
 
     Ok(Plan {
+        b,
         fa_t,
-        ent_t,
-        obj_t,
-        ctrl_t,
-        player_t,
-        game_t,
-        mode_t,
-        pv_t,
-        host_t,
-        ctx_t,
-        refs_t,
-        omap_t,
-        ui_t,
-        ev_t,
         scene_t,
         mat_t,
-        str_t,
-        dyn_t,
-        dynobj_t,
-        f64_,
-        i32_,
-        bool_,
-        void_,
-        nbool_t,
-        arr_t,
-        raw_arr_t,
         w_game,
         w_act,
-        act_t,
-        a_target,
-        e_uid,
-        g_ctrl,
-        g_me,
-        g_mode,
-        g_event,
-        g_ui,
-        c_game,
-        c_host,
-        h_ctx,
-        x_refs,
         m_s3d,
-        pv_units,
-        e_obj,
-        e_anim,
-        o_parent,
-        o_children,
-        a_len,
-        a_arr,
         m41,
         m42,
         m43,
-        ping,
-        check,
-        pv_cls,
-        pv_cls_t,
-        refs_get,
-        omap_get,
-        play_pi: RefField(play_pi as usize),
-        opts_t,
-        pos_t,
-        end_cb_t,
-        wait_cb_t,
-        wait,
         sfx,
         by_name,
         abs_pos,
@@ -631,9 +353,6 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         res_t,
         prefab_t,
         load_prefab,
-        println,
-        std_string,
-        str_add,
         hit_g,
         yes_g,
         meh_g,
@@ -641,8 +360,6 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         init_fi: index_of(code, init.findex)?,
         done_fi: index_of(code, done.findex)?,
         end_fi: index_of(code, end.findex)?,
-        impl_fi,
-        impl_ret,
         dbg_file: debug_file(code, "src/ui/win/ForgeAction.hx")?,
     })
 }
@@ -683,46 +400,6 @@ fn strs(code: &mut Bytecode, p: &Plan) -> Strs {
         idle: RefGlobal(code.globals.len() - 1),
         ..s
     }
-}
-
-/// `println(tag + " " + Std.string(i) ...)` for the given Int registers.
-fn emit_log(a: &mut Asm, r: &mut Regs, p: &Plan, tag: RefGlobal, sp: RefGlobal, ints: &[Reg]) {
-    let (acc, t, d, v) = (r.r(p.str_t), r.r(p.str_t), r.r(p.dyn_t), r.r(p.void_));
-    a.op(Opcode::GetGlobal {
-        dst: acc,
-        global: tag,
-    });
-    for &i in ints {
-        a.op(Opcode::GetGlobal { dst: t, global: sp });
-        a.op(Opcode::Call2 {
-            dst: acc,
-            fun: p.str_add,
-            arg0: acc,
-            arg1: t,
-        });
-        a.op(Opcode::ToDyn { dst: d, src: i });
-        a.op(Opcode::Call1 {
-            dst: t,
-            fun: p.std_string,
-            arg0: d,
-        });
-        a.op(Opcode::Call2 {
-            dst: acc,
-            fun: p.str_add,
-            arg0: acc,
-            arg1: t,
-        });
-    }
-    a.op(Opcode::Call1 {
-        dst: v,
-        fun: p.println,
-        arg0: acc,
-    });
-}
-
-fn int(a: &mut Asm, code: &mut Bytecode, dst: Reg, v: i32) {
-    let ptr = int_const(code, v);
-    a.op(Opcode::Int { dst, ptr });
 }
 
 /// `forgeSend(win, code, a, shard)`: the ping carrying one event (see the header).
@@ -895,136 +572,6 @@ fn add_send(code: &mut Bytecode, p: &Plan, st: &Strs) -> Result<RefFun> {
         p.dbg_file,
     )
 }
-
-/// Plays `anim` once on entity `e` (registers given), `onEnd` = forgeIdle(e).
-fn emit_play_once(
-    a: &mut Asm,
-    r: &mut Regs,
-    code: &mut Bytecode,
-    p: &Plan,
-    e: Reg,
-    anim: Reg,
-    idle: RefFun,
-) {
-    let (dob, f, nb, cb, opts, pos, v) = (
-        r.r(p.dynobj_t),
-        r.r(p.bool_),
-        r.r(p.nbool_t),
-        r.r(p.end_cb_t),
-        r.r(p.opts_t),
-        r.r(p.pos_t),
-        r.r(p.void_),
-    );
-    let (kl, ke) = (string_ref(code, "loop"), string_ref(code, "onEnd"));
-    a.op(Opcode::New { dst: dob });
-    a.op(Opcode::Bool {
-        dst: f,
-        value: ValBool(false),
-    });
-    a.op(Opcode::ToDyn { dst: nb, src: f });
-    a.op(Opcode::DynSet {
-        obj: dob,
-        field: kl,
-        src: nb,
-    });
-    a.op(Opcode::InstanceClosure {
-        dst: cb,
-        fun: idle,
-        obj: e,
-    });
-    a.op(Opcode::DynSet {
-        obj: dob,
-        field: ke,
-        src: cb,
-    });
-    a.op(Opcode::ToVirtual {
-        dst: opts,
-        src: dob,
-    });
-    a.op(Opcode::Null { dst: pos });
-    a.op(Opcode::CallMethod {
-        dst: v,
-        field: p.play_pi,
-        args: vec![e, anim, opts, pos],
-    });
-}
-
-/// `forgeIdle(e)`: the remembered idle anim, looped, on a worker still in the scene.
-fn add_idle(code: &mut Bytecode, p: &Plan, st: &Strs) -> Result<RefFun> {
-    let mut r = Regs(vec![p.ent_t]);
-    let e = Reg(0);
-    let (exc, anim, o, par, dob, t, nb, opts, pos, v) = (
-        r.r(p.dyn_t),
-        r.r(p.str_t),
-        r.r(p.obj_t),
-        r.r(p.obj_t),
-        r.r(p.dynobj_t),
-        r.r(p.bool_),
-        r.r(p.nbool_t),
-        r.r(p.opts_t),
-        r.r(p.pos_t),
-        r.r(p.void_),
-    );
-    let kl = string_ref(code, "loop");
-    let mut a = Asm::new();
-    a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
-    a.op(Opcode::GetGlobal {
-        dst: anim,
-        global: st.idle,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: anim,
-            offset: 0,
-        },
-        "untrap",
-    );
-    a.op(Opcode::Field {
-        dst: o,
-        obj: e,
-        field: p.e_obj,
-    });
-    a.jmp(Opcode::JNull { reg: o, offset: 0 }, "untrap");
-    a.op(Opcode::Field {
-        dst: par,
-        obj: o,
-        field: p.o_parent,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: par,
-            offset: 0,
-        },
-        "untrap",
-    );
-    a.op(Opcode::New { dst: dob });
-    a.op(Opcode::Bool {
-        dst: t,
-        value: ValBool(true),
-    });
-    a.op(Opcode::ToDyn { dst: nb, src: t });
-    a.op(Opcode::DynSet {
-        obj: dob,
-        field: kl,
-        src: nb,
-    });
-    a.op(Opcode::ToVirtual {
-        dst: opts,
-        src: dob,
-    });
-    a.op(Opcode::Null { dst: pos });
-    a.op(Opcode::CallMethod {
-        dst: v,
-        field: p.play_pi,
-        args: vec![e, anim, opts, pos],
-    });
-    a.label("untrap");
-    a.op(Opcode::EndTrap { exc });
-    a.label("catch");
-    a.op(Opcode::Ret { ret: v });
-    push_fn(code, vec![p.ent_t], p.void_, r.0, a.finish(), p.dbg_file)
-}
-
 /// `forgeFx(st)`, st = { e, g, a, b }: the grade's sound and particles.
 fn add_fx(code: &mut Bytecode, p: &Plan, st: &Strs) -> Result<RefFun> {
     let mut r = Regs(vec![p.dynobj_t]);
@@ -1760,31 +1307,13 @@ fn add_recv(code: &mut Bytecode, p: &Plan, st: &Strs, idle: RefFun, fx: RefFun) 
 fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 4]> {
     let st = strs(code, p);
     let send = add_send(code, p, &st)?;
-    let idle = add_idle(code, p, &st)?;
+    let idle = mirror::add_idle(code, p, st.idle, p.dbg_file)?;
     let fx = add_fx(code, p, &st)?;
     let recv = add_recv(code, p, &st, idle, fx)?;
     let (i0, i1, i2) = (int_const(code, 0), int_const(code, 1), int_const(code, 2));
 
     // ping__impl: if (forgeRecv(this, x, y, z, player)) return;
-    let f = &mut code.functions[p.impl_fi];
-    f.regs.push(p.bool_);
-    let hb = Reg((f.regs.len() - 1) as u32);
-    insert_ops(
-        f,
-        0,
-        vec![
-            Opcode::CallN {
-                dst: hb,
-                fun: recv,
-                args: vec![Reg(0), Reg(1), Reg(2), Reg(3), Reg(4)],
-            },
-            Opcode::JFalse {
-                cond: hb,
-                offset: 1,
-            },
-            Opcode::Ret { ret: p.impl_ret },
-        ],
-    );
+    mirror::hook_ping(code, p, recv);
     // The three senders, at the entry of each ForgeAction step.
     let hook = |f: &mut Function, kind, arg: Option<Reg>, shard: Option<Reg>| {
         let mut nr = |t: RefType| {

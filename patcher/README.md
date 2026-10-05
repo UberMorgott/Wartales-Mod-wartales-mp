@@ -465,8 +465,8 @@ worker, removed after 1.5 s; end plays `animSuccess` ("ForgeYes") on Success,
 else `animFail` ("ForgeMeh"). shim.log: `mp: forge send <code> <a> <b> <uid>`
 and `mp: forge recv <code> <a> <b> <stage>` (5 start, 6 end, 7 hit). All
 players need this build (an older one shows a far-away ping with its sound).
-Archery and the UnitAction kinds are not mirrored yet. Skipped (logged) on
-mismatch.
+Archery and the UnitAction kinds: see the work mirror below. Skipped (logged)
+on mismatch.
 
 **Co-op spectating** (`src/coop_spectate.rs`): a shared mini-game (data.cdb
 `props.coop`: fishing, mining, wood cutting, lock picking, singing, gambling,
@@ -500,7 +500,36 @@ vanilla. Not covered: the unit choice before the start (the host's shared
 ChooseUnit, the clients' wait Interactive): which player starts it is known on
 the host only (`conds` is not synced). All players need this build. Skipped
 (logged) on mismatch.
-## Install
+
+**Co-op work mirror** (`src/work_mirror.rs`, shared parts in `src/mirror.rs`):
+while a player does archery or a progress-bar activity (`ui.win.UnitAction`:
+Study, MoneyLaundering, Dismantling, Altering, Snaring, Tracking and every
+other activity without its own mini-game window), the other players see that
+player's worker work. These activities are local-only (no `props.coop`); the
+others see the worker parked at the element in a place (`addUnitToElement`,
+when the activity prefab's Tool is visible) or the unit's own camp entry
+entity in the camp. Vanilla visuals: UnitAction.click plays "Attack" once on
+the worker (its progress bar is 2D); Archery is a first-person bow / arrows /
+target scene with shot sounds and no worker anim. So the mirror plays the work
+anim read from UnitAction.click ("Attack") once per click or shot, then the
+idle, and the idle at the end. Events ride the ping RPC like the forge mirror,
+with x = -987654322, y = the element's hxbit uid (place) or the unit's (camp),
+z = code + (camp << 2) + (kind << 3) (code 0 start, 1 hit, 2 end; kind 0
+UnitAction, 1 Archery): `workSend` at the entry of UnitAction.init / click and
+Archery.init / setWorldPosOnShoot, co-op only and never for a replicated (coop)
+activity, under a trap; start remembers the activity, and
+`Activity._cancel__impl` (every end, success or cancel) sends the end for it
+(`workEnd`). `ping__impl` gets a second `if (workRecv(...)) return;`: skipped
+for the sender; the worker is `mirrorWorker(game, y, camp)` (mirror.rs: the
+PlaceView `activityUnits` entry or the CampMode `entryEntities` entity whose
+`entry.content` is `Unit(u)`, as `Activity.setUnit__impl` finds them); start
+remembers its anim as the idle, a hit plays the work anim once (onEnd: the
+idle looped), the end loops the idle. `mirror.rs` also holds what both mirrors
+validate (types, fields, ping RPC, Entity.play, WaitEvent, logging) and the
+shared one-shot / idle anim code. shim.log: `mp: work send <code> <kind>
+<camp> <uid>`, `mp: work recv <code> <kind> <camp> <stage>` (3 start, 4 hit, 5
+end; 1 no worker). All players need this build (an older one shows a far-away
+ping with its sound). Skipped (logged) on mismatch.## Install
 
 Two ways, pick one:
 

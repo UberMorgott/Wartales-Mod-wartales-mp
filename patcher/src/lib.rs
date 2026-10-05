@@ -79,6 +79,7 @@ mod job_confirm;
 mod job_xp;
 mod loot_all;
 mod marker_names;
+mod mirror;
 mod mod_version;
 mod net_guard;
 mod npc_talk;
@@ -97,6 +98,7 @@ mod tip_overflow;
 mod tooltip_input;
 mod window_close;
 mod window_drag;
+mod work_mirror;
 
 use anyhow::{bail, Context, Result};
 use hlbc::opcodes::Opcode;
@@ -153,6 +155,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     censer_tip::patch_censer_tip(&mut code);
     ping_cell::patch_ping_cell(&mut code);
     forge_mirror::patch_forge_mirror(&mut code);
+    work_mirror::patch_work_mirror(&mut code);
     coop_spectate::patch_coop_spectate(&mut code);
     timeline_hud::patch_timeline_hud(&mut code);
     activity_injury::patch_activity_injury(&mut code);
