@@ -56,6 +56,7 @@ mod coop_gates;
 mod customize_slots;
 mod debrief_cure;
 mod debrief_diag;
+mod debrief_enable;
 mod diag;
 mod dlc_untouched;
 mod follow;
@@ -119,6 +120,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loot_all::patch_loot_all(&mut code);
     debrief_cure::patch_debrief_cure(&mut code);
     debrief_diag::patch(&mut code);
+    debrief_enable::patch_debrief_enable(&mut code);
     window_close::patch_window_close(&mut code);
     take_all::patch_take_all(&mut code);
     tavern_resume::patch_tavern_resume(&mut code);
