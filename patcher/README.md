@@ -269,6 +269,23 @@ empty; non-null replaces the label through the same `set_text` slot. The colour
 is the vanilla `player-<color>` dom class on `playerText`. Local UI only.
 Skipped (logged) on mismatch.
 
+**ALT highlight on the world map** (`src/alt_world.rs`): `Element.onOver`
+already picks the ALT colour (`isDown("Outlines")` ->
+`PREFS.outlineHighlightColor`), but `noOverNoOutline` (Element.hx:652) is true
+whenever `game.mode == game.world`, so the colour is wiped for every
+non-hovered element; `world.World` has no ALT poll (`PlaceView.update` has
+one). (A) that `JEq mode, world -> true` becomes `Call2 r = altWorldGate(mode,
+world); JTrue r` (`mode == world && !isDown("Outlines")`); places, ruins and
+`DialogOutView` unchanged. (B) after `updateCulling(false)` in `World.update`,
+`altWorldEdge(this)` (world mode only): on an ALT edge (state in a new bool
+global) it walks `game.state.persistStates` and calls `updateOutline` (vtable
+slot, as `PlaceView`) on every `Element` with an `obj`: on press only the
+un-culled ones (`obj.flags & 4 == 0`), on release all. (C) the single `Ret` of
+`Element.onUpdateCulling` becomes `altWorldCull(this); Ret` (after the lazy
+`interact` init): world mode, ALT held, on screen -> `updateOutline`.
+Local render state, no network. Places (POI markers) and `ent.Roaming` keep
+their own `onOver` and are not covered. Skipped (logged) on mismatch.
+
 **DLC ownership** is never patched: `BasePlayer.hasDlc`, `checkSignature`,
 `GameState.hasFeature`, `insertWtdc`, the lobby's `LobbyState.missingDlcs` and
 every other DLC check stay byte-identical to the game's (asserted by the

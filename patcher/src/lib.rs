@@ -49,10 +49,12 @@
 // the pause menu (see style_guard.rs), and so in co-op camp any player may move any party unit, assign it to a
 // camp tool and send it between camp and reserve (see camp_any_unit.rs), and so modal windows drag by their header
 // strip and the chest / inventory panels by their title, positions kept per window class / panel (see window_drag.rs), and so co-op player markers (screen-edge
-// locator, minimap arrow) show the player's nickname instead of P1..P4 (see marker_names.rs).
+// locator, minimap arrow) show the player's nickname instead of P1..P4 (see marker_names.rs), and so holding ALT on the
+// world map outlines the interactive elements on screen, as inside places (see alt_world.rs).
 
 mod activity_diag;
 mod all_inv;
+mod alt_world;
 mod activity_injury;
 mod asm;
 mod barrier;
@@ -161,6 +163,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     activity_injury::patch_activity_injury(&mut code);
     style_guard::patch_style_guard(&mut code);
     all_inv::patch_all_inv(&mut code);
+    alt_world::patch_alt_world(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)

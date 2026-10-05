@@ -470,6 +470,16 @@ closes <окно>`. Кольца удержания (`src/hold_speed.rs`, `BaseU
 `markerName(player)` берёт `BasePlayer.getUserName()` (простой текст с фильтром мата; `getName` —
 HTML, `h2d.Text` напечатал бы теги), длиннее 12 символов — 11 + `...`; null/пустой — остаётся
 «И1». Цвет — ванильный dom-класс `player-<color>`. Только локальный UI.
+Подсветка по ALT на карте мира (`src/alt_world.rs`): `Element.onOver` уже выбирает цвет ALT
+(`isDown("Outlines")`), но `noOverNoOutline` истинно при `game.mode == game.world` и стирает
+контур у всех элементов без наведения; у `world.World` нет опроса ALT (в `PlaceView.update` есть).
+(A) `JEq mode, world -> true` -> `altWorldGate(mode, world)` (`mode == world && !isDown`) + `JTrue`;
+(B) после `updateCulling(false)` в `World.update` — `altWorldEdge(this)`: на фронте ALT (новый
+bool-глобал, только в режиме мира) `updateOutline` для каждого `Element` из `persistStates` с
+`obj`: при нажатии только не отсечённые (`obj.flags & 4 == 0`), при отпускании все; (C) `Ret`
+в `Element.onUpdateCulling` -> `altWorldCull(this); Ret`: элемент, вошедший в экран при зажатом
+ALT, получает контур. Локально, без сети. Места (POI) и `ent.Roaming` не покрыты. При несовпадении
+проход пропускается (лог).
 Инвентари всех игроков (`src/all_inv.rs`): инвентарь игрока принадлежит его клиенту
 (`hasAuthority` = owner == Game.me), RPC `st.Inventory` хост пересылает только владельцу. Поэтому
 любой перенос между игроками — только `SlotOperation.MoveTo`, который выполняет владелец
