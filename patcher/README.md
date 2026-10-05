@@ -248,6 +248,19 @@ waits to enter/camp or has an interaction window. Host logic is untouched: only
 vanilla client RPCs; the state is new zero-initialised globals on each machine,
 cleared by `World.dispose` (quit or load). Skipped (logged) on mismatch.
 
+**Nicknames on player markers** (`src/marker_names.rs`): the co-op world-map
+locator (`ui.comp.PlayerMarker`, clamped to the screen edge) and the minimap
+arrow (`ui.comp.PlayerArrow`, also the arrow inside each locator) label the
+player with vanilla `Texts.multiplayer.playersArrow[getColor() - 1]` ("P1" /
+"И1"). Right after that `playerText.set_text` in both constructors (the call
+itself is a jump target, the next op is not), an appended
+`markerName(player)` returns `BasePlayer.getUserName()` (plain,
+profanity-filtered; `getName` is HTML and `h2d.Text` would print its tags), cut
+to 11 chars + `...` when longer than 12, or null when the name is null or
+empty; non-null replaces the label through the same `set_text` slot. The colour
+is the vanilla `player-<color>` dom class on `playerText`. Local UI only.
+Skipped (logged) on mismatch.
+
 **DLC ownership** is never patched: `BasePlayer.hasDlc`, `checkSignature`,
 `GameState.hasFeature`, `insertWtdc`, the lobby's `LobbyState.missingDlcs` and
 every other DLC check stay byte-identical to the game's (asserted by the

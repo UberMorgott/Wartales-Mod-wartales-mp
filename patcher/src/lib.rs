@@ -48,7 +48,8 @@
 // "Infinite loop in apply style", and a failing game-over window is logged and replaced by
 // the pause menu (see style_guard.rs), and so in co-op camp any player may move any party unit, assign it to a
 // camp tool and send it between camp and reserve (see camp_any_unit.rs), and so modal windows drag by their header
-// strip and the chest / inventory panels by their title, positions kept per window class / panel (see window_drag.rs).
+// strip and the chest / inventory panels by their title, positions kept per window class / panel (see window_drag.rs), and so co-op player markers (screen-edge
+// locator, minimap arrow) show the player's nickname instead of P1..P4 (see marker_names.rs).
 
 mod activity_diag;
 mod activity_injury;
@@ -74,6 +75,7 @@ mod hold_speed;
 mod job_confirm;
 mod job_xp;
 mod loot_all;
+mod marker_names;
 mod mod_version;
 mod net_guard;
 mod npc_talk;
@@ -123,6 +125,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     activity_diag::patch_activity_diag(&mut code);
     slot4_diag::patch_slot4_diag(&mut code);
     follow::patch_follow(&mut code);
+    marker_names::patch_marker_names(&mut code);
     skill_cost::patch_skill_cost(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
     party_inventory::patch_party_inventory(&mut code);

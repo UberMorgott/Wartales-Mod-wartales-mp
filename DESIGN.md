@@ -456,6 +456,13 @@ closes <окно>`. Кольца удержания (`src/hold_speed.rs`, `BaseU
 следует: в бою, в городе, на воде, в катсцене, при `lockedWith`/`waitActionIcon`/`currentWindow`.
 Хост ничего нового не решает — только ванильные RPC, состояние в новых глобалах на каждой машине,
 сбрасывается в `World.dispose` (выход/загрузка).
+Ники на маркерах игроков (`src/marker_names.rs`): указатель игрока у края экрана
+(`ui.comp.PlayerMarker`) и стрелка на мини-карте (`ui.comp.PlayerArrow`, она же внутри указателя)
+подписаны ванильным `Texts.multiplayer.playersArrow[getColor() - 1]` («И1»). Сразу после этого
+`playerText.set_text` в обоих конструкторах (сам вызов — цель прыжка, следующий op — нет) новая
+`markerName(player)` берёт `BasePlayer.getUserName()` (простой текст с фильтром мата; `getName` —
+HTML, `h2d.Text` напечатал бы теги), длиннее 12 символов — 11 + `...`; null/пустой — остаётся
+«И1». Цвет — ванильный dom-класс `player-<color>`. Только локальный UI.
 Кнопки общего сундука (`src/chest_buttons.rs`): в панели общего сундука коопа
 (`GameInventory.chestInventory`) слева сверху ряд иконок. Сортировка — то же меню, что у панели
 игрока (`SortButton`, пункты `Texts.tips.inventory_sort`), но применяется к сундуку лагеря через
