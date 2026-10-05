@@ -41,7 +41,8 @@
 // for the shim log (see activity_diag.rs), and so a co-op client closes its own modal window (the unit sheet)
 // by clicking outside it, as the host does (see window_close.rs), and so a co-op client's failed
 // activity (fishing, lock picking, any activity end) injures its unit through the host instead of
-// throwing "Not allowed" and freezing the activity (see activity_injury.rs).
+// throwing "Not allowed" and freezing the activity (see activity_injury.rs), and so a co-op load
+// never waits forever for a player who left before reporting ready (see ready_start.rs).
 
 mod activity_diag;
 mod activity_injury;
@@ -70,6 +71,7 @@ mod net_guard;
 mod npc_talk;
 mod party_inventory;
 mod ping_cell;
+mod ready_start;
 mod skill_cost;
 mod slot4_diag;
 mod take_all;
@@ -105,6 +107,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     job_xp::patch_job_xp(&mut code);
     job_confirm::patch_job_confirm(&mut code);
     barrier::patch_barrier(&mut code);
+    ready_start::patch_ready_start(&mut code);
     diag::patch_diag(&mut code);
     activity_diag::patch_activity_diag(&mut code);
     slot4_diag::patch_slot4_diag(&mut code);
