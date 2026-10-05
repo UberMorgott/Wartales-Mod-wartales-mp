@@ -32,36 +32,67 @@
 //      the unproject uses, in the texture's own pixels:
 //          d = p.getPixelF(Std.int(p.width * nx), Std.int(p.height * ny)).x
 //      (7 ops replaced, one NullCheck inserted; nothing else in the fn moves).
-//   2. Controller.ping__impl ends with `pingCell(this, x, y)` (new function):
-//          b = game.battle; if (b == null || b.grid == null) return;
+//   2. Controller.ping__impl starts with
+//          if (pingCell(this, x, y, player)) return;   // new function
+//      so in battle the vanilla marker (ping.fx: camera-facing ripple rings,
+//      T_ChocWave / T_circle textures) is not spawned; and its closing
+//      `ui.sfx("Ping")` (Wwise Play_WT_Hover_Skill, a barely audible hover tick,
+//      marked TODO in data.cdb) becomes pingSound(this).
+//      pingCell(ctrl, x, y, player) -> Bool:
+//          b = game.battle; if (b == null || b.grid == null) return false;
 //          cs = b.grid.cellSize; i = floor(x / cs); j = floor(y / cs);
-//          if (i, j) outside the grid: return;
+//          if (i, j) outside the grid: return false;
+//          center = cell center, size = cs;
 //          try {
-//              o = b.addSocle(load("prefabs/huds/orangeSquare.prefab"),
-//                             (i + .5) * cs, (j + .5) * cs, 0.01, cs, 0, 0.85);
+//              u = b.getUnitThere(i, j);    // alive, visible units only
+//              if (u != null && (n = u.getSocleSize()) >= 1) {
+//                  // its footprint, as getUnitThere computes it
+//                  p = u.getPosition(grid.pointTmp);
+//                  left = floor(p.x / cs) - floor(n / 2); (top alike)
+//                  center = ((left + n / 2) * cs, ...); size = n * cs;
+//              }
+//              c = getConst("PlayerColor" + player.getColor()).color;
+//              o = b.addSocle(load("prefabs/huds/orangeSquare.prefab"), center,
+//                             0.01, size, 0, 0.85);
+//              every ColorSet shader of o's materials: color__ = rgb(c);
 //              game.globalEvent.wait(3, o.remove);
-//              game.globalEvent.waitUntil(pingCellBlink.bind(o));
-//          } catch (_) {}
-//      pingCellBlink(o, dt): if (o.parent == null) return true;
-//          o.visible = floor((hxd.Timer.lastTimeStamp * 6) % 2) == 0; return false;
-//      orangeSquare.prefab is the game's own (unused) one-cell overlay: an Overlay
-//      pass with depthTest Always, so the square shows over terrain, props and
-//      units from any camera. addSocle is how the game places its other cell
-//      squares (redSquare on a move path, the pad cursor), as its own object:
-//      the player's move / attack previews are untouched.
+//              game.globalEvent.waitUntil(pingBlink.bind({o: o, u: u, c: c}));
+//          } catch (_) { return false; }
+//          pingSound(ctrl); return true;
+//      pingBlink(st, dt): while st.o is attached, st.o and st.u's outline
+//          (Entity.setOutline(st.c)) blink 3 times a second; once st.o is gone
+//          the outline is cleared (setOutline(null), as Unit.select(false))
+//          and the callback ends.
+//      pingSound(ctrl): ctrl.game.ui.sfx(SOUND) unless the last one played less
+//          than SOUND_GAP s ago (hxd.Timer.lastTimeStamp); the game's sfx path,
+//          so the SFX volume setting applies.
+//      The color is the one ent.BasePlayer.getName gives the player's nickname
+//      (PlayerColor<n>, n = BasePlayer.color + 1, a networked property), so all
+//      peers agree. orangeSquare.prefab is the game's own (unused) one-cell
+//      overlay: an Overlay pass with depthTest Always and a ColorSet shader
+//      (gfx/shader/ColorSet.hx), so the square shows over terrain, props and
+//      units from any camera and takes any color. addSocle is how the game
+//      places its other cell squares, as its own object: the player's move /
+//      attack previews are untouched.
 //
 // Purely visual and local to each peer: it rides the existing ping RPC (no new
 // message, no game state). Outside a battle (world map, places, camp) only the
-// depth fix applies; the vanilla marker stays everywhere.
+// depth fix and the sound apply; the vanilla marker stays there.
 //
 // Each half is validated before editing; a mismatch skips that half (logged).
 
-use super::asm::{push_fn, Asm, Regs};
+use super::asm::{push_fn, string_ref, Asm, Regs};
 use super::job_xp::str_global;
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
 const SQUARE: &str = "prefabs/huds/orangeSquare.prefab";
+/// data.cdb sound id (Wwise Play_WT_UI_ChatReceived_Message): the game's own
+/// co-op chat "message received" cue. Alternatives: NotifyNeutral
+/// (Play_WT_Interface_Notification_Neutral), SelectorClick.
+const SOUND: &str = "ChatReceiveMessage";
+/// Minimum seconds between two ping sounds.
+const SOUND_GAP: f64 = 0.3;
 const DURATION: f64 = 3.0;
 /// Visibility toggles per second (3 blinks a second).
 const BLINK_RATE: f64 = 6.0;
@@ -318,26 +349,99 @@ fn depth_apply(code: &mut Bytecode, p: &DepthPlan) {
     );
 }
 
-// ---------- 2. blinking orange cell (Controller.ping__impl) ----------
+// ---------- 2. player-colored cell / unit footprint (Controller.ping__impl) ----------
+
+/// Proto `name` of class `t` or its nearest ancestor: (function, vtable index).
+fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, i32)> {
+    let mut cur = Some(t);
+    while let Some(c) = cur {
+        let o = obj(code, c)?;
+        if let Some(p) = o.protos.iter().find(|p| s(code, p.name) == name) {
+            return Ok((p.findex, p.pindex));
+        }
+        cur = o.super_;
+    }
+    bail!("proto {name} not found on type {} or its ancestors", t.0)
+}
+
+/// Name of a function or native.
+fn any_name(code: &Bytecode, f: RefFun) -> &str {
+    match code.natives.iter().find(|n| n.findex == f) {
+        Some(n) => s(code, n.name),
+        None => fname(code, f),
+    }
+}
+
+/// The unique `CallN dst = fun(args)` in `f` whose callee is named `name`.
+fn call_named(code: &Bytecode, f: &Function, name: &str) -> Result<(RefFun, Vec<Reg>, Reg)> {
+    let hits: Vec<(RefFun, Vec<Reg>, Reg)> = f
+        .ops
+        .iter()
+        .filter_map(|o| {
+            let (fun, args, dst) = match o {
+                Opcode::Call0 { dst, fun } => (*fun, vec![], *dst),
+                Opcode::Call1 { dst, fun, arg0 } => (*fun, vec![*arg0], *dst),
+                Opcode::Call2 {
+                    dst,
+                    fun,
+                    arg0,
+                    arg1,
+                } => (*fun, vec![*arg0, *arg1], *dst),
+                Opcode::Call3 {
+                    dst,
+                    fun,
+                    arg0,
+                    arg1,
+                    arg2,
+                } => (*fun, vec![*arg0, *arg1, *arg2], *dst),
+                Opcode::Call4 {
+                    dst,
+                    fun,
+                    arg0,
+                    arg1,
+                    arg2,
+                    arg3,
+                } => (*fun, vec![*arg0, *arg1, *arg2, *arg3], *dst),
+                Opcode::CallN { dst, fun, args } => (*fun, args.clone(), *dst),
+                _ => return None,
+            };
+            (any_name(code, fun) == name).then_some((fun, args, dst))
+        })
+        .collect();
+    let Some(first) = hits.first() else {
+        bail!("fn@{}: no {name} call", f.findex.0);
+    };
+    if hits.iter().any(|h| h.0 != first.0) {
+        bail!("fn@{}: {name} calls reach different functions", f.findex.0);
+    }
+    Ok(first.clone())
+}
 
 struct CellPlan {
     impl_fi: usize,
-    /// The final `Ret` of ping__impl.
-    ret_at: usize,
+    /// The vanilla `ui.sfx("Ping", null)` call, right before the final Ret.
+    sfx_at: usize,
     ret_reg: Reg,
     ctrl_t: RefType,
+    player_t: RefType,
     f64_: RefType,
     i32_: RefType,
     bool_: RefType,
     void_: RefType,
     str_t: RefType,
+    dyn_t: RefType,
+    dynobj_t: RefType,
     c_game: (RefField, RefType),
     g_battle: (RefField, RefType),
     g_event: (RefField, RefType),
+    g_ui: (RefField, RefType),
     b_grid: (RefField, RefType),
     gr_cell: RefField,
     gr_w: RefField,
     gr_h: RefField,
+    gr_pt: (RefField, RefType),
+    pt_x: RefField,
+    pt_y: RefField,
     floor: RefFun,
     get_loader: RefFun,
     loader_t: RefType,
@@ -358,7 +462,41 @@ struct CellPlan {
     timer: RefGlobal,
     timer_t: RefType,
     t_stamp: RefField,
-    dyn_t: RefType,
+    sfx: RefFun,
+    // player color: getConst("PlayerColor" + player.getColor()).color
+    get_color: RefFun,
+    itos: RefFun,
+    alloc_str: RefFun,
+    add_str: RefFun,
+    ref_i32: RefType,
+    bytes_t: RefType,
+    get_const: RefFun,
+    const_t: RefType,
+    cv_color: (RefField, RefType),
+    // unit on the cell
+    unit_t: RefType,
+    unit_there: RefFun,
+    arr_t: RefType,
+    ref_bool: RefType,
+    socle_pindex: RefField,
+    get_pos: RefFun,
+    set_outline: RefFun,
+    // tint: ColorSet shader of the square's materials
+    get_mats: RefFun,
+    raw_arr_t: RefType,
+    a_len: RefField,
+    a_arr: RefField,
+    mat_t: RefType,
+    m_pass: (RefField, RefType),
+    get_shader: RefFun,
+    shader_t: RefType,
+    cset_t: RefType,
+    cset_cls: RefGlobal,
+    cset_cls_t: RefType,
+    cs_color: RefField,
+    vec_t: RefType,
+    vec_ctor: RefFun,
+    ref_f64: RefType,
     dbg_file: usize,
 }
 
@@ -368,18 +506,44 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     let bool_ = prim_type(code, "bool", |t| matches!(t, Type::Bool))?;
     let void_ = prim_type(code, "void", |t| matches!(t, Type::Void))?;
     let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
+    let dynobj_t = prim_type(code, "dynobj", |t| matches!(t, Type::DynObj))?;
+    let bytes_t = prim_type(code, "bytes", |t| matches!(t, Type::Bytes))?;
+    let ref_i32 = prim_type(
+        code,
+        "ref<i32>",
+        |t| matches!(t, Type::Ref(x) if *x == i32_),
+    )?;
+    let ref_bool = prim_type(
+        code,
+        "ref<bool>",
+        |t| matches!(t, Type::Ref(x) if *x == bool_),
+    )?;
+    let ref_f64 = prim_type(
+        code,
+        "ref<f64>",
+        |t| matches!(t, Type::Ref(x) if *x == f64_),
+    )?;
     let str_t = obj_type(code, "String")?;
     let ctrl_t = obj_type(code, "st.Controller")?;
+    let player_t = obj_type(code, "ent.BasePlayer")?;
     let game_t = obj_type(code, "Game")?;
     let battle_t = obj_type(code, "battle.Battle")?;
     let grid_t = obj_type(code, "battle.Grid")?;
+    let unit_t = obj_type(code, "battle.Unit")?;
     let obj_t = obj_type(code, "h3d.scene.Object")?;
     let ev_t = obj_type(code, "hxd.WaitEvent")?;
     let res_t = obj_type(code, "hrt.prefab.Resource")?;
+    let arr_t = obj_type(code, "hl.types.ArrayObj")?;
+    let point_t = obj_type(code, "h2d.col.PointImpl")?;
+    let mat_t = obj_type(code, "h3d.mat.Material")?;
+    let shader_t = obj_type(code, "hxsl.Shader")?;
+    let cset_t = obj_type(code, "gfx.shader.ColorSet")?;
+    let vec_t = obj_type(code, "h3d.VectorImpl")?;
 
     let c_game = field(code, ctrl_t, "game")?;
     let g_battle = field(code, game_t, "battle")?;
     let g_event = field(code, game_t, "globalEvent")?;
+    let g_ui = field(code, game_t, "ui")?;
     let b_grid = field(code, battle_t, "grid")?;
     if c_game.1 != game_t || g_battle.1 != battle_t || g_event.1 != ev_t || b_grid.1 != grid_t {
         bail!("Controller.game / Game.battle / Game.globalEvent / Battle.grid types differ");
@@ -390,7 +554,24 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     if ct != f64_ || wt != i32_ || ht != i32_ {
         bail!("battle.Grid cellSize / w / h types differ");
     }
+    let gr_pt = field(code, grid_t, "pointTmp")?;
+    let (pt_x, xt) = field(code, point_t, "x")?;
+    let (pt_y, yt) = field(code, point_t, "y")?;
+    if gr_pt.1 != point_t || xt != f64_ || yt != f64_ {
+        bail!("Grid.pointTmp / PointImpl.x / y types differ");
+    }
     let o_parent = field(code, obj_t, "parent")?;
+    let (a_len, lt) = field(code, arr_t, "length")?;
+    let (a_arr, at) = field(code, arr_t, "array")?;
+    if lt != i32_ || !matches!(code.types[at.0], Type::Array) {
+        bail!("ArrayObj length / array types differ");
+    }
+    let raw_arr_t = at;
+    let m_pass = field(code, mat_t, "passes")?;
+    let (cs_color, cct) = field(code, cset_t, "color__")?;
+    if cct != vec_t {
+        bail!("ColorSet.color__ is not a vector");
+    }
 
     let want = |f: RefFun, what: &str, args: &[RefType], ret: RefType| -> Result<()> {
         if sig(code, f)? != (args.to_vec(), ret) {
@@ -418,10 +599,30 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
         &[battle_t, res_t, f64_, f64_, f64_, f64_, f64_, f64_],
         obj_t,
     )?;
+    let unit_there = proto(code, battle_t, "getUnitThere")?;
+    want(
+        unit_there,
+        "Battle.getUnitThere",
+        &[battle_t, i32_, i32_, arr_t, ref_bool],
+        unit_t,
+    )?;
     let remove = proto(code, obj_t, "remove")?;
     want(remove, "Object.remove", &[obj_t], void_)?;
     let set_visible = proto(code, obj_t, "set_visible")?;
     want(set_visible, "Object.set_visible", &[obj_t, bool_], bool_)?;
+    let (get_mats, _) = vproto(code, obj_t, "getMaterials")?;
+    want(
+        get_mats,
+        "Object.getMaterials",
+        &[obj_t, arr_t, ref_bool],
+        arr_t,
+    )?;
+    let get_shader = proto(code, m_pass.1, "getShader")?;
+    let (ga, gr) = sig(code, get_shader)?;
+    if ga.len() != 2 || ga[0] != m_pass.1 || gr != shader_t {
+        bail!("unexpected Pass.getShader signature");
+    }
+    let (cset_cls, cset_cls_t) = class_global(code, "gfx.shader.ColorSet")?;
     let wait = proto(code, ev_t, "wait")?;
     let (wa, wr) = sig(code, wait)?;
     let wait_until = proto(code, ev_t, "waitUntil")?;
@@ -447,15 +648,84 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
         bail!("hxd.Timer.lastTimeStamp is not f64");
     }
 
+    // Unit footprint, as Battle.getUnitThere computes it: socle size by its
+    // virtual getSocleSize, position by getPosition(grid.pointTmp).
+    let ut = &code.functions[fun_index(code, unit_there)?];
+    let (socle_fn, socle_pi) = vproto(code, unit_t, "getSocleSize")?;
+    want(socle_fn, "Unit.getSocleSize", &[unit_t], i32_)?;
+    if socle_pi < 0
+        || !ut
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::CallMethod { field, .. } if field.0 as i32 == socle_pi))
+    {
+        bail!("Battle.getUnitThere does not size units by the virtual getSocleSize");
+    }
+    let (get_pos, _, _) = call_named(code, ut, "getPosition")?;
+    let (pa, pr) = sig(code, get_pos)?;
+    if pa.len() != 2 || pa[1] != point_t || pr != point_t {
+        bail!("unexpected getPosition signature");
+    }
+    let select = method(code, unit_t, "select")?;
+    let (set_outline, _, _) = call_named(code, select, "setOutline")?;
+    let (oa, or) = sig(code, set_outline)?;
+    let null_i32 = match oa[..] {
+        [_, n] if or == void_ && matches!(code.types[n.0], Type::Null(x) if x == i32_) => n,
+        _ => bail!("unexpected setOutline signature"),
+    };
+
+    // The nickname color: ent.BasePlayer.getName wraps the name in
+    // getConst("PlayerColor" + getColor()).color.
+    let get_color = proto(code, player_t, "getColor")?;
+    want(get_color, "BasePlayer.getColor", &[player_t], i32_)?;
+    let gn = method(code, player_t, "getName")?;
+    if !gn.ops.iter().any(|o| {
+        matches!(o, Opcode::GetGlobal { global, .. } if crate::job_xp::const_str(code, *global) == Some("PlayerColor"))
+    }) {
+        bail!("BasePlayer.getName does not read PlayerColor");
+    }
+    let (itos, _, _) = call_named(code, gn, "itos")?;
+    want(itos, "itos", &[i32_, ref_i32], bytes_t)?;
+    let (alloc_str, _, _) = call_named(code, gn, "__alloc__")?;
+    want(alloc_str, "String.__alloc__", &[bytes_t, i32_], str_t)?;
+    let (add_str, _, _) = call_named(code, gn, "__add__")?;
+    want(add_str, "String.__add__", &[str_t, str_t], str_t)?;
+    let (get_const, _, cdst) = call_named(code, gn, "getConst")?;
+    let const_t = gn.regs[cdst.0 as usize];
+    want(get_const, "getConst", &[str_t], const_t)?;
+    let cv_color = match &code.types[const_t.0] {
+        Type::Virtual { fields } => fields
+            .iter()
+            .position(|f| s(code, f.name) == "color")
+            .map(|i| (RefField(i), fields[i].t)),
+        _ => None,
+    }
+    .context("getConst result has no color field")?;
+    if cv_color.1 != null_i32 {
+        bail!("constant color is not null<i32>");
+    }
+
     // ping__impl(this, x, y, z, player): the fx load gives the loader, loadCache
-    // and the hrt.prefab.Resource class; it ends with sfx("Ping") and Ret.
+    // and the hrt.prefab.Resource class; it ends with ui.sfx("Ping") and Ret.
     let imp = method(code, ctrl_t, "ping__impl")?;
     let a = fun_args(code, imp);
-    if a.len() != 5 || a[1] != f64_ || a[2] != f64_ || a[3] != f64_ {
+    if a.len() != 5 || a[1] != f64_ || a[2] != f64_ || a[3] != f64_ || a[4] != player_t {
         bail!("unexpected Controller.ping__impl signature");
     }
     let impl_fi = fun_index(code, imp.findex)?;
     let o = &imp.ops;
+    if matches!(
+        o.first(),
+        Some(Opcode::Call4 {
+            arg0: Reg(0),
+            arg1: Reg(1),
+            arg2: Reg(2),
+            arg3: Reg(4),
+            ..
+        })
+    ) {
+        bail!("ping__impl: already applied");
+    }
     let loads: Vec<usize> = (0..o.len().saturating_sub(5))
         .filter(|&i| {
             matches!(
@@ -506,6 +776,30 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     if fname(code, *load_cache) != "loadCache" {
         bail!("ping__impl: the fx load is not loadCache");
     }
+    // The vanilla tint vectors: new h3d.VectorImpl(&r, &g, &b).
+    let ctors: Vec<RefFun> = o
+        .iter()
+        .filter_map(|x| match x {
+            Opcode::Call4 { fun, arg0, .. }
+                if imp.regs[arg0.0 as usize] == vec_t && fname(code, *fun) == "__constructor__" =>
+            {
+                Some(*fun)
+            }
+            _ => None,
+        })
+        .collect();
+    let Some(&vec_ctor) = ctors.first() else {
+        bail!("ping__impl: no h3d.VectorImpl constructor call");
+    };
+    if ctors.iter().any(|c| *c != vec_ctor) {
+        bail!("ping__impl: vector constructor calls differ");
+    }
+    want(
+        vec_ctor,
+        "VectorImpl.__constructor__",
+        &[vec_t, ref_f64, ref_f64, ref_f64],
+        void_,
+    )?;
 
     let ret_at = o.len() - 1;
     let Opcode::Ret { ret: ret_reg } = o[ret_at] else {
@@ -514,38 +808,55 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     if imp.regs[ret_reg.0 as usize] != void_ {
         bail!("ping__impl: Ret register is not void");
     }
-    match &o[ret_at - 1] {
-        Opcode::Call3 {
-            arg0: Reg(0),
-            arg1: Reg(1),
-            arg2: Reg(2),
-            ..
-        } => bail!("ping__impl: already applied"),
-        Opcode::Call3 { fun, .. } if fname(code, *fun) == "sfx" => {}
-        _ => bail!("ping__impl: no sfx call before the final Ret"),
-    }
+    let sfx_at = ret_at - 1;
+    let sfx = match (&o[sfx_at - 2], &o[sfx_at]) {
+        (
+            Opcode::GetGlobal { dst: g, global },
+            Opcode::Call3 {
+                fun, arg0, arg1, ..
+            },
+        ) if arg1 == g
+            && fname(code, *fun) == "sfx"
+            && imp.regs[arg0.0 as usize] == g_ui.1
+            && crate::job_xp::const_str(code, *global) == Some("Ping") =>
+        {
+            *fun
+        }
+        _ => bail!("ping__impl: no ui.sfx(\"Ping\") before the final Ret"),
+    };
+    want(sfx, "GameUI.sfx", &[g_ui.1, str_t, dyn_t], void_)?;
     for i in 0..o.len() {
-        if jump_targets(imp, i).contains(&ret_at) {
-            bail!("ping__impl: a jump lands on the final Ret");
+        if jump_targets(imp, i)
+            .iter()
+            .any(|&t| t == sfx_at || t == ret_at)
+        {
+            bail!("ping__impl: a jump lands on the sfx call or the final Ret");
         }
     }
     Ok(CellPlan {
         impl_fi,
-        ret_at,
+        sfx_at,
         ret_reg,
         ctrl_t,
+        player_t,
         f64_,
         i32_,
         bool_,
         void_,
         str_t,
+        dyn_t,
+        dynobj_t,
         c_game,
         g_battle,
         g_event,
+        g_ui,
         b_grid,
         gr_cell,
         gr_w,
         gr_h,
+        gr_pt,
+        pt_x,
+        pt_y,
         floor,
         get_loader: *get_loader,
         loader_t,
@@ -566,46 +877,194 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
         timer,
         timer_t,
         t_stamp,
-        dyn_t,
+        sfx,
+        get_color,
+        itos,
+        alloc_str,
+        add_str,
+        ref_i32,
+        bytes_t,
+        get_const,
+        const_t,
+        cv_color,
+        unit_t,
+        unit_there,
+        arr_t,
+        ref_bool,
+        socle_pindex: RefField(socle_pi as usize),
+        get_pos,
+        set_outline,
+        get_mats,
+        raw_arr_t,
+        a_len,
+        a_arr,
+        mat_t,
+        m_pass,
+        get_shader,
+        shader_t,
+        cset_t,
+        cset_cls,
+        cset_cls_t,
+        cs_color,
+        vec_t,
+        vec_ctor,
+        ref_f64,
         dbg_file: debug_file(code, "src/st/Controller.hx")?,
     })
 }
 
-/// `pingCellBlink(o, dt) -> Bool` (see the header).
+/// `pingSound(ctrl)`: `ctrl.game.ui.sfx(SOUND)`, at most once per SOUND_GAP s.
+fn add_sound(code: &mut Bytecode, p: &CellPlan) -> Result<RefFun> {
+    let name = str_global(code, p.str_t, SOUND);
+    code.globals.push(p.f64_);
+    let last_g = RefGlobal(code.globals.len() - 1);
+    let (fgap, f0) = (float_const(code, SOUND_GAP), float_const(code, 0.0));
+    let mut r = Regs(vec![p.ctrl_t]);
+    let ctrl = Reg(0);
+    let (tm, t, last, d, k, game, ui, sn, nul, v) = (
+        r.r(p.timer_t),
+        r.r(p.f64_),
+        r.r(p.f64_),
+        r.r(p.f64_),
+        r.r(p.f64_),
+        r.r(p.c_game.1),
+        r.r(p.g_ui.1),
+        r.r(p.str_t),
+        r.r(p.dyn_t),
+        r.r(p.void_),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::GetGlobal {
+        dst: tm,
+        global: p.timer,
+    });
+    a.op(Opcode::Field {
+        dst: t,
+        obj: tm,
+        field: p.t_stamp,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: last,
+        global: last_g,
+    });
+    a.op(Opcode::Sub {
+        dst: d,
+        a: t,
+        b: last,
+    });
+    a.op(Opcode::Float { dst: k, ptr: fgap });
+    a.jmp(
+        Opcode::JSGte {
+            a: d,
+            b: k,
+            offset: 0,
+        },
+        "play",
+    );
+    // the stamp went backwards (clock change): play anyway
+    a.op(Opcode::Float { dst: k, ptr: f0 });
+    a.jmp(
+        Opcode::JSLt {
+            a: d,
+            b: k,
+            offset: 0,
+        },
+        "play",
+    );
+    a.op(Opcode::Ret { ret: v });
+    a.label("play");
+    a.op(Opcode::SetGlobal {
+        global: last_g,
+        src: t,
+    });
+    a.op(Opcode::Field {
+        dst: game,
+        obj: ctrl,
+        field: p.c_game.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Field {
+        dst: ui,
+        obj: game,
+        field: p.g_ui.0,
+    });
+    a.jmp(Opcode::JNull { reg: ui, offset: 0 }, "end");
+    a.op(Opcode::GetGlobal {
+        dst: sn,
+        global: name,
+    });
+    a.op(Opcode::Null { dst: nul });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: p.sfx,
+        arg0: ui,
+        arg1: sn,
+        arg2: nul,
+    });
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.ctrl_t], p.void_, r.0, a.finish(), p.dbg_file)
+}
+
+/// `pingBlink(st, dt) -> Bool`, st = { o: square, u: unit or null, c: color }:
+/// the square (and the unit's outline, in the player color) blink until the
+/// square is removed; then the outline is cleared and the callback ends.
 fn add_blink(code: &mut Bytecode, p: &CellPlan) -> Result<RefFun> {
+    let (ko, ku, kc) = (
+        string_ref(code, "o"),
+        string_ref(code, "u"),
+        string_ref(code, "c"),
+    );
     let rate = float_const(code, BLINK_RATE);
     let two = float_const(code, 2.0);
     let i0 = int_const(code, 0);
-    let mut r = Regs(vec![p.obj_t, p.f64_]);
-    let o = Reg(0);
-    let (par, b, tm, t, k, zero) = (
+    let mut r = Regs(vec![p.dynobj_t, p.f64_]);
+    let st = Reg(0);
+    let (o, u, c, nc, par, b, tm, t, fr, k, zero, v) = (
+        r.r(p.obj_t),
+        r.r(p.unit_t),
+        r.r(p.cv_color.1),
+        r.r(p.cv_color.1),
         r.r(p.o_parent.1),
         r.r(p.bool_),
         r.r(p.timer_t),
         r.r(p.f64_),
+        r.r(p.f64_),
         r.r(p.i32_),
         r.r(p.i32_),
+        r.r(p.void_),
     );
-    let fr = r.r(p.f64_);
     let mut a = Asm::new();
+    a.op(Opcode::DynGet {
+        dst: o,
+        obj: st,
+        field: ko,
+    });
+    a.op(Opcode::DynGet {
+        dst: u,
+        obj: st,
+        field: ku,
+    });
+    a.op(Opcode::Null { dst: nc });
+    a.jmp(Opcode::JNull { reg: o, offset: 0 }, "done");
     a.op(Opcode::Field {
         dst: par,
         obj: o,
         field: p.o_parent.0,
     });
     a.jmp(
-        Opcode::JNotNull {
+        Opcode::JNull {
             reg: par,
             offset: 0,
         },
-        "live",
+        "done",
     );
-    a.op(Opcode::Bool {
-        dst: b,
-        value: ValBool(true),
-    });
-    a.op(Opcode::Ret { ret: b });
-    a.label("live");
     a.op(Opcode::GetGlobal {
         dst: tm,
         global: p.timer,
@@ -657,14 +1116,50 @@ fn add_blink(code: &mut Bytecode, p: &CellPlan) -> Result<RefFun> {
         arg0: o,
         arg1: b,
     });
+    a.jmp(Opcode::JNull { reg: u, offset: 0 }, "live");
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "off");
+    a.op(Opcode::DynGet {
+        dst: c,
+        obj: st,
+        field: kc,
+    });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: p.set_outline,
+        arg0: u,
+        arg1: c,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "live");
+    a.label("off");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: p.set_outline,
+        arg0: u,
+        arg1: nc,
+    });
+    a.label("live");
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(false),
     });
     a.op(Opcode::Ret { ret: b });
+    a.label("done");
+    a.jmp(Opcode::JNull { reg: u, offset: 0 }, "stop");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: p.set_outline,
+        arg0: u,
+        arg1: nc,
+    });
+    a.label("stop");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
     push_fn(
         code,
-        vec![p.obj_t, p.f64_],
+        vec![p.dynobj_t, p.f64_],
         p.bool_,
         r.0,
         a.finish(),
@@ -672,20 +1167,35 @@ fn add_blink(code: &mut Bytecode, p: &CellPlan) -> Result<RefFun> {
     )
 }
 
-/// `pingCell(ctrl, x, y)` (see the header).
-fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> {
+/// `pingCell(ctrl, x, y, player) -> Bool` (see the header); true when the
+/// battle marker was placed (the caller then skips the vanilla fx).
+fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> Result<RefFun> {
     let path = str_global(code, p.str_t, SQUARE);
-    let (f0, fh, fz, fa, fd) = (
+    let pfx = str_global(code, p.str_t, "PlayerColor");
+    let (ko, ku, kc) = (
+        string_ref(code, "o"),
+        string_ref(code, "u"),
+        string_ref(code, "c"),
+    );
+    let (f0, fh, fz, fa, fd, f255) = (
         float_const(code, 0.0),
         float_const(code, 0.5),
         float_const(code, 0.01),
         float_const(code, ALPHA),
         float_const(code, DURATION),
+        float_const(code, 1.0 / 255.0),
     );
-    let i0 = int_const(code, 0);
-    let mut r = Regs(vec![p.ctrl_t, p.f64_, p.f64_]);
-    let (ctrl, x, y) = (Reg(0), Reg(1), Reg(2));
-    let (game, battle, grid, cs, zf, q, i, j, zero, lim, cx, cy, half) = (
+    let (i0, i1, i8, i16, i255) = (
+        int_const(code, 0),
+        int_const(code, 1),
+        int_const(code, 8),
+        int_const(code, 16),
+        int_const(code, 255),
+    );
+    let mut r = Regs(vec![p.ctrl_t, p.f64_, p.f64_, p.player_t]);
+    let (ctrl, x, y, player) = (Reg(0), Reg(1), Reg(2), Reg(3));
+    let res = r.r(p.bool_);
+    let (game, battle, grid, cs, zf, q, i, j, zero, lim, cx, cy, half, sc) = (
         r.r(p.c_game.1),
         r.r(p.g_battle.1),
         r.r(p.b_grid.1),
@@ -699,11 +1209,37 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
         r.r(p.f64_),
         r.r(p.f64_),
         r.r(p.f64_),
+        r.r(p.f64_),
     );
-    let (exc, loader, ps, cls, hres, res, z, rot, alpha, ob, ev, dur, rm, bl, v) = (
+    let (color, exc, nul_arr, nul_ref, u, n, one, pt, nf, hn, l) = (
+        r.r(p.i32_),
         r.r(p.dyn_t),
-        r.r(p.loader_t),
+        r.r(p.arr_t),
+        r.r(p.ref_bool),
+        r.r(p.unit_t),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.gr_pt.1),
+        r.r(p.f64_),
+        r.r(p.f64_),
+        r.r(p.i32_),
+    );
+    let (ps, cc, rcc, bys, s2, key, cv, oc, ci, sh, msk) = (
         r.r(p.str_t),
+        r.r(p.i32_),
+        r.r(p.ref_i32),
+        r.r(p.bytes_t),
+        r.r(p.str_t),
+        r.r(p.str_t),
+        r.r(p.const_t),
+        r.r(p.cv_color.1),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.i32_),
+    );
+    let (red, green, blue, k255) = (r.r(p.f64_), r.r(p.f64_), r.r(p.f64_), r.r(p.f64_));
+    let (loader, cls, hres, rs, z, rot, alpha, ob) = (
+        r.r(p.loader_t),
         r.r(p.res_cls_t),
         r.r(p.hres_t),
         r.r(p.res_t),
@@ -711,6 +1247,27 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
         r.r(p.f64_),
         r.r(p.f64_),
         r.r(p.obj_t),
+    );
+    let (vec, rr, rg, rb, tb, rtb, mats, ki, len, raw, dv, m, pass, ccls, shd, cset) = (
+        r.r(p.vec_t),
+        r.r(p.ref_f64),
+        r.r(p.ref_f64),
+        r.r(p.ref_f64),
+        r.r(p.bool_),
+        r.r(p.ref_bool),
+        r.r(p.arr_t),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.raw_arr_t),
+        r.r(p.dyn_t),
+        r.r(p.mat_t),
+        r.r(p.m_pass.1),
+        r.r(p.cset_cls_t),
+        r.r(p.shader_t),
+        r.r(p.cset_t),
+    );
+    let (stv, ev, dur, rm, bl, v) = (
+        r.r(p.dynobj_t),
         r.r(p.g_event.1),
         r.r(p.f64_),
         r.r(p.wait_cb_t),
@@ -718,6 +1275,17 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
         r.r(p.void_),
     );
     let mut a = Asm::new();
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(false),
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: player,
+            offset: 0,
+        },
+        "end",
+    );
     a.op(Opcode::Field {
         dst: game,
         obj: ctrl,
@@ -834,7 +1402,7 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
         },
         "end",
     );
-    // cell center (i + .5) * cs, (j + .5) * cs
+    // one cell: center (i + .5) * cs, (j + .5) * cs, size cs
     a.op(Opcode::ToSFloat { dst: cx, src: i });
     a.op(Opcode::Add {
         dst: cx,
@@ -857,7 +1425,172 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
         a: cy,
         b: cs,
     });
+    a.op(Opcode::Mov { dst: sc, src: cs });
+    a.op(Opcode::Call1 {
+        dst: color,
+        fun: p.get_color,
+        arg0: player,
+    });
     a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
+    // A unit on the cell (visible, alive): its whole footprint instead.
+    a.op(Opcode::Null { dst: nul_arr });
+    a.op(Opcode::Null { dst: nul_ref });
+    a.op(Opcode::CallN {
+        dst: u,
+        fun: p.unit_there,
+        args: vec![battle, i, j, nul_arr, nul_ref],
+    });
+    a.jmp(Opcode::JNull { reg: u, offset: 0 }, "square");
+    a.op(Opcode::CallMethod {
+        dst: n,
+        field: p.socle_pindex,
+        args: vec![u],
+    });
+    a.op(Opcode::Int { dst: one, ptr: i1 });
+    a.jmp(
+        Opcode::JSLt {
+            a: n,
+            b: one,
+            offset: 0,
+        },
+        "square",
+    );
+    a.op(Opcode::Field {
+        dst: pt,
+        obj: grid,
+        field: p.gr_pt.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: pt,
+        fun: p.get_pos,
+        arg0: u,
+        arg1: pt,
+    });
+    a.jmp(Opcode::JNull { reg: pt, offset: 0 }, "square");
+    a.op(Opcode::ToSFloat { dst: nf, src: n });
+    a.op(Opcode::Mul {
+        dst: hn,
+        a: nf,
+        b: half,
+    });
+    a.op(Opcode::Call1 {
+        dst: lim,
+        fun: p.floor,
+        arg0: hn,
+    });
+    // left = floor(p.x / cs) - floor(n / 2); cx = (left + n / 2) * cs
+    for (f, c) in [(p.pt_x, cx), (p.pt_y, cy)] {
+        a.op(Opcode::Field {
+            dst: q,
+            obj: pt,
+            field: f,
+        });
+        a.op(Opcode::SDiv {
+            dst: q,
+            a: q,
+            b: cs,
+        });
+        a.op(Opcode::Call1 {
+            dst: l,
+            fun: p.floor,
+            arg0: q,
+        });
+        a.op(Opcode::Sub {
+            dst: l,
+            a: l,
+            b: lim,
+        });
+        a.op(Opcode::ToSFloat { dst: c, src: l });
+        a.op(Opcode::Add {
+            dst: c,
+            a: c,
+            b: hn,
+        });
+        a.op(Opcode::Mul {
+            dst: c,
+            a: c,
+            b: cs,
+        });
+    }
+    a.op(Opcode::Mul {
+        dst: sc,
+        a: nf,
+        b: cs,
+    });
+    a.label("square");
+    // oc = getConst("PlayerColor" + color).color
+    a.op(Opcode::GetGlobal {
+        dst: ps,
+        global: pfx,
+    });
+    a.op(Opcode::Mov {
+        dst: cc,
+        src: color,
+    });
+    a.op(Opcode::Ref { dst: rcc, src: cc });
+    a.op(Opcode::Call2 {
+        dst: bys,
+        fun: p.itos,
+        arg0: cc,
+        arg1: rcc,
+    });
+    a.op(Opcode::Call2 {
+        dst: s2,
+        fun: p.alloc_str,
+        arg0: bys,
+        arg1: cc,
+    });
+    a.op(Opcode::Call2 {
+        dst: key,
+        fun: p.add_str,
+        arg0: ps,
+        arg1: s2,
+    });
+    a.op(Opcode::Call1 {
+        dst: cv,
+        fun: p.get_const,
+        arg0: key,
+    });
+    a.jmp(Opcode::JNull { reg: cv, offset: 0 }, "untrap");
+    a.op(Opcode::Field {
+        dst: oc,
+        obj: cv,
+        field: p.cv_color.0,
+    });
+    a.jmp(Opcode::JNull { reg: oc, offset: 0 }, "untrap");
+    a.op(Opcode::SafeCast { dst: ci, src: oc });
+    a.op(Opcode::Float {
+        dst: k255,
+        ptr: f255,
+    });
+    a.op(Opcode::Int {
+        dst: msk,
+        ptr: i255,
+    });
+    for (shift, ch) in [(Some(i16), red), (Some(i8), green), (None, blue)] {
+        match shift {
+            Some(s) => {
+                a.op(Opcode::Int { dst: sh, ptr: s });
+                a.op(Opcode::SShr {
+                    dst: sh,
+                    a: ci,
+                    b: sh,
+                });
+            }
+            None => a.op(Opcode::Mov { dst: sh, src: ci }),
+        }
+        a.op(Opcode::And {
+            dst: sh,
+            a: sh,
+            b: msk,
+        });
+        a.op(Opcode::ToSFloat { dst: ch, src: sh });
+        a.op(Opcode::Mul {
+            dst: ch,
+            a: ch,
+            b: k255,
+        });
+    }
     a.op(Opcode::Call0 {
         dst: loader,
         fun: p.get_loader,
@@ -877,17 +1610,8 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
         arg1: ps,
         arg2: cls,
     });
-    a.op(Opcode::SafeCast {
-        dst: res,
-        src: hres,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: res,
-            offset: 0,
-        },
-        "untrap",
-    );
+    a.op(Opcode::SafeCast { dst: rs, src: hres });
+    a.jmp(Opcode::JNull { reg: rs, offset: 0 }, "untrap");
     a.op(Opcode::Float { dst: z, ptr: fz });
     a.op(Opcode::Float { dst: rot, ptr: f0 });
     a.op(Opcode::Float {
@@ -897,15 +1621,143 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
     a.op(Opcode::CallN {
         dst: ob,
         fun: p.add_socle,
-        args: vec![battle, res, cx, cy, z, cs, rot, alpha],
+        args: vec![battle, rs, cx, cy, z, sc, rot, alpha],
     });
     a.jmp(Opcode::JNull { reg: ob, offset: 0 }, "untrap");
+    // tint: every ColorSet shader of the square's materials gets the color
+    a.op(Opcode::New { dst: vec });
+    a.op(Opcode::Ref { dst: rr, src: red });
+    a.op(Opcode::Ref {
+        dst: rg,
+        src: green,
+    });
+    a.op(Opcode::Ref { dst: rb, src: blue });
+    a.op(Opcode::Call4 {
+        dst: v,
+        fun: p.vec_ctor,
+        arg0: vec,
+        arg1: rr,
+        arg2: rg,
+        arg3: rb,
+    });
+    a.op(Opcode::Null { dst: nul_arr });
+    a.op(Opcode::Bool {
+        dst: tb,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ref { dst: rtb, src: tb });
+    a.op(Opcode::Call3 {
+        dst: mats,
+        fun: p.get_mats,
+        arg0: ob,
+        arg1: nul_arr,
+        arg2: rtb,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: mats,
+            offset: 0,
+        },
+        "tinted",
+    );
+    a.op(Opcode::Int { dst: ki, ptr: i0 });
+    a.loop_head("mat");
+    a.op(Opcode::Field {
+        dst: len,
+        obj: mats,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: ki,
+            b: len,
+            offset: 0,
+        },
+        "tinted",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: mats,
+        field: p.a_arr,
+    });
+    a.op(Opcode::GetArray {
+        dst: dv,
+        array: raw,
+        index: ki,
+    });
+    a.op(Opcode::Incr { dst: ki });
+    a.op(Opcode::UnsafeCast { dst: m, src: dv });
+    a.jmp(Opcode::JNull { reg: m, offset: 0 }, "mat");
+    a.op(Opcode::Field {
+        dst: pass,
+        obj: m,
+        field: p.m_pass.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: pass,
+            offset: 0,
+        },
+        "mat",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: ccls,
+        global: p.cset_cls,
+    });
+    a.op(Opcode::Call2 {
+        dst: shd,
+        fun: p.get_shader,
+        arg0: pass,
+        arg1: ccls,
+    });
+    a.op(Opcode::SafeCast {
+        dst: cset,
+        src: shd,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: cset,
+            offset: 0,
+        },
+        "mat",
+    );
+    a.op(Opcode::SetField {
+        obj: cset,
+        field: p.cs_color,
+        src: vec,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "mat");
+    a.label("tinted");
+    // blink state { o, u, c }; removed after DURATION, blinking until then
+    a.op(Opcode::New { dst: stv });
+    a.op(Opcode::DynSet {
+        obj: stv,
+        field: ko,
+        src: ob,
+    });
+    a.op(Opcode::DynSet {
+        obj: stv,
+        field: ku,
+        src: u,
+    });
+    a.op(Opcode::DynSet {
+        obj: stv,
+        field: kc,
+        src: oc,
+    });
     a.op(Opcode::Field {
         dst: ev,
         obj: game,
         field: p.g_event.0,
     });
-    a.jmp(Opcode::JNull { reg: ev, offset: 0 }, "untrap");
+    a.jmp(Opcode::JNotNull { reg: ev, offset: 0 }, "timed");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.remove,
+        arg0: ob,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "untrap");
+    a.label("timed");
     a.op(Opcode::Float { dst: dur, ptr: fd });
     a.op(Opcode::InstanceClosure {
         dst: rm,
@@ -922,7 +1774,7 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
     a.op(Opcode::InstanceClosure {
         dst: bl,
         fun: blink,
-        obj: ob,
+        obj: stv,
     });
     a.op(Opcode::Call2 {
         dst: v,
@@ -930,16 +1782,27 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
         arg0: ev,
         arg1: bl,
     });
+    a.op(Opcode::EndTrap { exc });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: sound,
+        arg0: ctrl,
+    });
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: res });
     a.label("untrap");
     a.op(Opcode::EndTrap { exc });
     a.label("end");
-    a.op(Opcode::Ret { ret: v });
+    a.op(Opcode::Ret { ret: res });
     a.label("catch");
-    a.op(Opcode::Ret { ret: v });
+    a.op(Opcode::Ret { ret: res });
     push_fn(
         code,
-        vec![p.ctrl_t, p.f64_, p.f64_],
-        p.void_,
+        vec![p.ctrl_t, p.f64_, p.f64_, p.player_t],
+        p.bool_,
         r.0,
         a.finish(),
         p.dbg_file,
@@ -947,29 +1810,49 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun) -> Result<RefFun> 
 }
 
 fn cell_apply(code: &mut Bytecode, p: &CellPlan) -> Result<()> {
+    let sound = add_sound(code, p)?;
     let blink = add_blink(code, p)?;
-    let cell = add_cell(code, p, blink)?;
+    let cell = add_cell(code, p, blink, sound)?;
+    let bool_ = p.bool_;
     let f = &mut code.functions[p.impl_fi];
+    // vanilla ui.sfx("Ping") -> the throttled ping sound
+    f.ops[p.sfx_at] = Opcode::Call1 {
+        dst: p.ret_reg,
+        fun: sound,
+        arg0: Reg(0),
+    };
+    // if (pingCell(this, x, y, player)) return;
+    f.regs.push(bool_);
+    let hb = Reg((f.regs.len() - 1) as u32);
     insert_ops(
         f,
-        p.ret_at,
-        vec![Opcode::Call3 {
-            dst: p.ret_reg,
-            fun: cell,
-            arg0: Reg(0),
-            arg1: Reg(1),
-            arg2: Reg(2),
-        }],
+        0,
+        vec![
+            Opcode::Call4 {
+                dst: hb,
+                fun: cell,
+                arg0: Reg(0),
+                arg1: Reg(1),
+                arg2: Reg(2),
+                arg3: Reg(4),
+            },
+            Opcode::JFalse {
+                cond: hb,
+                offset: 1,
+            },
+            Opcode::Ret { ret: p.ret_reg },
+        ],
     );
     eprintln!(
-        "patched ping fn@{} op {}: the pinged battle cell blinks orange (pingCell fn@{}, blink fn@{})",
-        f.findex.0, p.ret_at, cell.0, blink.0
+        "patched ping fn@{}: battle pings mark the cell / unit footprint in the player color \
+         instead of the vanilla fx (pingCell fn@{}, blink fn@{}, sound fn@{})",
+        f.findex.0, cell.0, blink.0, sound.0
     );
     Ok(())
 }
 
-/// Fixes the ping's depth sample and makes the pinged battle cell blink orange
-/// on every peer; each half that does not validate is skipped and logged.
+/// Fixes the ping's depth sample and replaces the battle ping marker; each half
+/// that does not validate is skipped and logged.
 pub(crate) fn patch_ping_cell(code: &mut Bytecode) {
     match depth_plan(code) {
         Ok(p) => depth_apply(code, &p),
@@ -988,8 +1871,8 @@ mod tests {
     use super::*;
     use crate::asm::testutil::*;
 
-    /// Game.ping: 7 ops replaced + 1 inserted; ping__impl: one call before Ret;
-    /// two well-typed functions appended; a second pass is a no-op.
+    /// Game.ping: 7 ops replaced + 1 inserted; ping__impl: 3 ops in front, the
+    /// sfx call swapped; three well-typed functions appended; a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
         let Ok(image) = std::fs::read(HLBOOT) else {
@@ -1004,7 +1887,7 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        assert_eq!(back.functions.len(), orig.functions.len() + 2);
+        assert_eq!(back.functions.len(), orig.functions.len() + 3);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
             assert_eq!(
@@ -1015,7 +1898,11 @@ mod tests {
             );
         }
         let n = back.functions.len();
-        let (blink, cell) = (&back.functions[n - 2], &back.functions[n - 1]);
+        let (sound, blink, cell) = (
+            &back.functions[n - 3],
+            &back.functions[n - 2],
+            &back.functions[n - 1],
+        );
 
         // Game.ping
         let (a, b) = (&orig.functions[dp.fi], &back.functions[dp.fi]);
@@ -1038,26 +1925,86 @@ mod tests {
         check_types(&back, b, dp.at..dp.at + 8);
         check_flow(b);
 
-        // ping__impl
+        // ping__impl: the vanilla fx only runs when pingCell declined
         let (a, b) = (&orig.functions[cp.impl_fi], &back.functions[cp.impl_fi]);
-        assert_eq!(a.regs, b.regs);
-        shifted(a, b, cp.ret_at, 1);
+        assert_eq!(b.regs.len(), a.regs.len() + 1);
+        assert_eq!(b.regs[..a.regs.len()], a.regs[..]);
+        assert_eq!(b.regs[a.regs.len()], cp.bool_);
+        let mut want = a.clone();
+        want.ops[cp.sfx_at] = Opcode::Call1 {
+            dst: cp.ret_reg,
+            fun: sound.findex,
+            arg0: Reg(0),
+        };
+        want.regs = b.regs.clone();
+        shifted(&want, b, 0, 3);
         assert!(matches!(
-            b.ops[cp.ret_at],
-            Opcode::Call3 { fun, arg0: Reg(0), arg1: Reg(1), arg2: Reg(2), .. } if fun == cell.findex
+            b.ops[0],
+            Opcode::Call4 { fun, arg0: Reg(0), arg1: Reg(1), arg2: Reg(2), arg3: Reg(4), .. }
+                if fun == cell.findex
         ));
-        check_types(&back, b, cp.ret_at..cp.ret_at + 1);
+        assert_eq!(jump_targets(b, 1), vec![3]);
+        assert!(matches!(b.ops[2], Opcode::Ret { ret } if ret == cp.ret_reg));
+        check_types(&back, b, 0..3);
+        check_types(&back, b, cp.sfx_at + 3..cp.sfx_at + 4);
+        check_flow(b);
 
-        for f in [blink, cell] {
+        for f in [sound, blink, cell] {
             check_types(&back, f, 0..f.ops.len());
             check_flow(f);
         }
+        // pingCell asks for the unit there, tints ColorSet, and plays the sound
+        // only on success.
+        let calls = |f: &Function, g: RefFun| {
+            f.ops
+                .iter()
+                .filter(|o| match o {
+                    Opcode::Call1 { fun, .. }
+                    | Opcode::Call2 { fun, .. }
+                    | Opcode::Call3 { fun, .. }
+                    | Opcode::Call4 { fun, .. }
+                    | Opcode::CallN { fun, .. } => *fun == g,
+                    _ => false,
+                })
+                .count()
+        };
+        assert_eq!(calls(cell, cp.unit_there), 1);
+        assert_eq!(calls(cell, cp.get_shader), 1);
+        assert_eq!(calls(cell, sound.findex), 1);
+        assert_eq!(calls(blink, cp.set_outline), 3);
+        assert_eq!(calls(sound, cp.sfx), 1);
+        assert!(cell
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::CallMethod { field, args, .. } if *field == cp.socle_pindex && args.len() == 1)));
 
         let mut again = read(&patched);
         assert!(depth_plan(&again).is_err());
         assert!(cell_plan(&again).is_err());
         patch_ping_cell(&mut again);
         assert!(write(&again) == patched);
+    }
+
+    /// The color source is the one the nickname uses, and the sound id exists.
+    #[test]
+    fn color_and_sound_sources() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let code = read(&image);
+        let cp = cell_plan(&code).expect("cell plan");
+        assert_eq!(any_name(&code, cp.get_color), "getColor");
+        assert_eq!(any_name(&code, cp.get_const), "getConst");
+        assert_eq!(any_name(&code, cp.set_outline), "setOutline");
+        assert_eq!(any_name(&code, cp.unit_there), "getUnitThere");
+        assert!(code.strings.iter().any(|s| s.as_str() == "PlayerColor1"));
+        // the game itself plays SOUND (chat box), so the id resolves
+        assert!(code.strings.iter().any(|s| s.as_str() == SOUND));
+        // the socle size is battle.Unit's virtual getSocleSize
+        let (f, pi) = vproto(&code, cp.unit_t, "getSocleSize").unwrap();
+        assert_eq!(pi as usize, cp.socle_pindex.0);
+        assert_eq!(any_name(&code, f), "getSocleSize");
     }
 
     /// Unexpected shapes skip the half they belong to and leave it as it was.
@@ -1078,11 +2025,11 @@ mod tests {
         let fi_ops = format!("{:?}", code.functions[dp.fi].ops);
         patch_ping_cell(&mut code);
         assert_eq!(format!("{:?}", code.functions[dp.fi].ops), fi_ops);
-        assert_eq!(code.functions.len(), orig.functions.len() + 2);
+        assert_eq!(code.functions.len(), orig.functions.len() + 3);
 
         // Cell: no sfx call before the final Ret.
         let mut code = read(&image);
-        code.functions[cp.impl_fi].ops[cp.ret_at - 1] = Opcode::Nop;
+        code.functions[cp.impl_fi].ops[cp.sfx_at] = Opcode::Nop;
         assert!(cell_plan(&code).is_err());
         let impl_ops = format!("{:?}", code.functions[cp.impl_fi].ops);
         let (nt, nf, ns, ng) = (
