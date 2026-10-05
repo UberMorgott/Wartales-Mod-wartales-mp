@@ -468,6 +468,38 @@ players need this build (an older one shows a far-away ping with its sound).
 Archery and the UnitAction kinds are not mirrored yet. Skipped (logged) on
 mismatch.
 
+**Co-op spectating** (`src/coop_spectate.rs`): a shared mini-game (data.cdb
+`props.coop`: fishing, mining, wood cutting, lock picking, singing, gambling,
+the ruins puzzles) no longer takes over the other players' screens. Vanilla
+starts a coop activity on the host (`a_startActivity` passes `game.me`), so
+`ui.win.Activity` is host-owned (`persist = CurrentMode`) and replicated; its
+`setUnit` / `start` RPCs run on every machine and `_start` has no owner test:
+every player's inventory was hidden, `mode.lockCamera` / `padCursor.locked`
+set, the camera faded to the activity camera, the mini-game window opened
+(`setWindow`) with a help icon (the `addHelpIcon` RPC, sent by every
+machine), and the end faded everyone (`ctrl.netFade(coop)`). The windows
+already support spectators (input only for `unit.owner == game.me`; the
+worker's anims / props / effects come from replicated state; the host's copy
+stays authoritative), so they are kept but hidden. A spectator is a machine
+where `spect(act)`: the activity is replicated (`__host != null`), has a unit,
+and `unit.owner != game.me`. `_start` gets `m = spectPre(this)` at its entry
+(spectator: `changeCamera = false`, so no fade or camera move;
+m = 1 | old lockCamera << 1 | old padCursor.locked << 2) and `spectPost(this,
+m)` before its Ret (old lockCamera / padCursor.locked back, `cameraSave =
+null` so `_cancel` moves no camera, `showInventory(prevInventory)`, chooseUnit's
+full-screen wait Interactive removed); the start cost, GC entry and trait
+level stay vanilla. onReady's `showTutorial` -> `spectTut` (no tutorial, the
+callback runs at once); the window closure's `setWindow` -> `spectWin` (the
+window and its windowRoot invisible: not drawn, no Interactive events, not the
+mode's current window, still updated and networked) and `addHelpIcon` ->
+`spectHelp` (not sent); `addHelpIcon__impl` returns at once on a spectator;
+onActionDone's end `netFade` -> `spectFade` (not replicated when the activity
+has a unit with an owner). shim.log: `mp: spectate <id> <m>` on each spectator.
+Unit-less activities (BoardPuzzle, a solved NinePuzzle) stay shared as in
+vanilla. Not covered: the unit choice before the start (the host's shared
+ChooseUnit, the clients' wait Interactive): which player starts it is known on
+the host only (`conds` is not synced). All players need this build. Skipped
+(logged) on mismatch.
 ## Install
 
 Two ways, pick one:

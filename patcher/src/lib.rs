@@ -63,6 +63,7 @@ mod career_plan;
 mod censer_tip;
 mod chest_buttons;
 mod coop_gates;
+mod coop_spectate;
 mod customize_slots;
 mod debrief_cure;
 mod debrief_diag;
@@ -88,6 +89,8 @@ mod skill_cost;
 mod slot4_diag;
 mod style_guard;
 mod take_all;
+#[cfg(test)]
+mod testsim;
 mod tavern_resume;
 mod timeline_hud;
 mod tip_overflow;
@@ -150,6 +153,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     censer_tip::patch_censer_tip(&mut code);
     ping_cell::patch_ping_cell(&mut code);
     forge_mirror::patch_forge_mirror(&mut code);
+    coop_spectate::patch_coop_spectate(&mut code);
     timeline_hud::patch_timeline_hud(&mut code);
     activity_injury::patch_activity_injury(&mut code);
     style_guard::patch_style_guard(&mut code);

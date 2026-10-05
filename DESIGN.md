@@ -538,6 +538,29 @@ ForgeAction. Ничего не создаётся у зрителя, кроме 
 возвращаются в idle. Не сделано: Archery и UnitAction (Study, MoneyLaundering, Dismantling,
 Altering, Snaring, Tracking) — другие окна, свои точки событий. При несовпадении проход пропускается
 (лог).
+Зрители общих мини-игр (`src/coop_spectate.rs`): у кооп-активностей (`props.coop`: рыбалка, добыча,
+рубка, взлом, пение, азартные игры, головоломки руин) `ui.win.Activity` живёт на хосте
+(`a_startActivity` на хосте: `player = game.me`, `persist = CurrentMode`) и реплицируется всем;
+RPC `setUnit` / `start` идут на все машины, а `start__impl` -> `_start` не проверяет владельца:
+у каждого игрока прятался инвентарь, ставились `mode.lockCamera` и `padCursor.locked`, камера
+уезжала (fade + activityCamera), открывалось окно мини-игры (`setWindow`) и иконка помощи (RPC
+`addHelpIcon` от каждой машины), а в конце `ctrl.netFade(coop)` затемнял всех. Окна сами умеют быть
+зрителями (ввод только у `unit.owner == game.me`, анимации/реквизит/эффекты работника из
+реплицированного состояния), а на хосте их логика авторитетна. Зритель = `spect(act)`: активность
+реплицирована (`__host != null`), есть `unit`, `unit.owner != game.me`. `_start`: вход
+`m = spectPre(this)` (зритель: `changeCamera = false` — без fade и смены камеры; m = 1 | старый
+lockCamera << 1 | старый padCursor.locked << 2), её Ret -> `spectPost(this, m)`: старые lockCamera /
+padCursor.locked, `cameraSave = null` (`_cancel` не двигает камеру), `showInventory(prevInventory)`,
+снят полноэкранный Interactive ожидания из `chooseUnit`. Остальное в `_start` (оплата старта на
+хосте, GC, уровень черты) — ваниль. onReady: `showTutorial` -> `spectTut` (зрителю без туториала,
+cb сразу); замыкание окна: `setWindow` -> `spectWin` (окно и его windowRoot невидимы — без отрисовки и
+событий Interactive, не текущее окно режима, но в списке окон, обновляется и синхронизируется),
+`addHelpIcon` -> `spectHelp` (зритель не вызывает); `addHelpIcon__impl` у зрителя сразу return;
+конец `onActionDone`: `netFade` -> `spectFade` (без реплицированного затемнения, если есть unit с
+owner). Лог: `mp: spectate <id> <m>` у каждого зрителя. Безюнитные (BoardPuzzle, решённая
+NinePuzzle) остаются общими как в ванили. Не сделано: выбор юнита до старта (общий ChooseUnit на
+хосте, Interactive ожидания у клиентов) — кто начал, знает только хост (`conds` не синхронизируется).
+Нужна эта сборка у всех. При несовпадении проход пропускается (лог).
 Кнопки общего сундука (`src/chest_buttons.rs`): в панели общего сундука коопа
 (`GameInventory.chestInventory`) слева сверху ряд иконок. Сортировка — то же меню, что у панели
 игрока (`SortButton`, пункты `Texts.tips.inventory_sort`), но применяется к сундуку лагеря через
