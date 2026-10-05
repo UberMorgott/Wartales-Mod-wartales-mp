@@ -360,6 +360,34 @@ itself, battle control, item actions and the unit sheet keep their owner
 checks. Sites are found by debug position; exactly four are required, else the
 pass is skipped (logged).
 
+**Draggable windows** (`src/window_drag.rs`): popup windows and the chest /
+inventory side panels can be moved with the mouse; positions are kept. Local
+UI only, nothing goes over the network. Vanilla already has a window drag
+(Window.hx:525-575) that `Window.init` installs only when `canDragWindow()` is
+true (just the map); for every other window the test now jumps to an appended
+install: the window's own interactive gets an `onPush` that starts a drag when
+the window is modal (`modal != WindowModalMode.None`, so HUDs, title / loading
+screens and notifications stay put), the push is in the top 70 px of the
+window (header strip) and the window is narrower than 90 % of the screen.
+Buttons and the unit sheet's 3D portrait keep their clicks (they sit above the
+window's interactive). The `GameInventory` constructor gives the chest and
+inventory panels the same drag on their "title" header row (each panel moves
+on its own; hiding the chest lets the inventory slide up in the column, keeping
+its own offset). Drag sets the offset in the parent flow's `FlowProperties`
+(applied after layout, like vanilla), the mouse clamped to the screen; a second
+push within 0.35 s resets to the layout position. Release saves the offset with
+`mpman.Storage.setUserData("mpWinPos:" + key, ((dx + 32768) << 16) | ((dy +
+32768) & 0xFFFF))` (key: the window's class name, e.g. `ui.win.UnitInfo`, or
+`GameInventory#chest` / `GameInventory#inv`; removed at 0,0); a window or
+panel gets it back when it is built. After every reflow (window resize
+included) a moved window / panel is pushed back so 48 px of it stay on screen
+and its top edge stays reachable. The map keeps its vanilla whole-body drag
+(no saving). Windows whose own `init` replaces `interactive.onPush` after the
+base init stay fixed. Every appended function runs under a trap (exceptions
+logged as `mp: drag: ...`). The shared functions (`mpDragBegin`,
+`mpDragRestore`, `mpDragClamp`, `mpDragPanel`) are reusable for more panels.
+Each part is skipped (logged) on mismatch.
+
 ## Install
 
 Two ways, pick one:

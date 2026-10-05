@@ -47,7 +47,8 @@
 // an exception inside a domkit style pass no longer leaves every later UI action throwing
 // "Infinite loop in apply style", and a failing game-over window is logged and replaced by
 // the pause menu (see style_guard.rs), and so in co-op camp any player may move any party unit, assign it to a
-// camp tool and send it between camp and reserve (see camp_any_unit.rs).
+// camp tool and send it between camp and reserve (see camp_any_unit.rs), and so modal windows drag by their header
+// strip and the chest / inventory panels by their title, positions kept per window class / panel (see window_drag.rs).
 
 mod activity_diag;
 mod activity_injury;
@@ -88,6 +89,7 @@ mod timeline_hud;
 mod tip_overflow;
 mod tooltip_input;
 mod window_close;
+mod window_drag;
 
 use anyhow::{bail, Context, Result};
 use hlbc::opcodes::Opcode;
@@ -133,6 +135,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     debrief_diag::patch(&mut code);
     debrief_enable::patch_debrief_enable(&mut code);
     window_close::patch_window_close(&mut code);
+    window_drag::patch_window_drag(&mut code);
     take_all::patch_take_all(&mut code);
     tavern_resume::patch_tavern_resume(&mut code);
     mod_version::patch_mod_version(&mut code);
