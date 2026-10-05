@@ -7,6 +7,25 @@
 use super::*;
 use std::collections::HashMap;
 
+/// A value of this type already carries its runtime type (HL `is_dynamic`): it
+/// goes to a Dyn register or argument as is. `ToDyn` on it would allocate a
+/// box around the pointer itself, which Std.string / Sys.println then read as
+/// garbage. `ToDyn` is only for plain values (Int, Float, Bool, Bytes, ...).
+pub(crate) fn self_describing(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::Dyn
+            | Type::Fun(_)
+            | Type::Obj(_)
+            | Type::Struct(_)
+            | Type::Array
+            | Type::Virtual { .. }
+            | Type::DynObj
+            | Type::Null(_)
+            | Type::Enum { .. }
+    )
+}
+
 /// Function-local assembler with symbolic jump labels.
 pub(crate) struct Asm {
     ops: Vec<Opcode>,
@@ -332,6 +351,8 @@ pub(crate) mod testutil {
                     _ => false,
                 },
                 Opcode::DynSet { obj, .. } => is(obj, |t| matches!(t, Type::DynObj | Type::Dyn)),
+                // Boxing a String/object prints garbage (see self_describing).
+                Opcode::ToDyn { src, .. } => !super::self_describing(&code.types[rt(src).0]),
                 Opcode::Ret { ret } => {
                     let fr = f.t.as_fun(code).expect("fun").ret;
                     assignable(code, rt(ret), fr) || matches!(code.types[fr.0], Type::Void)

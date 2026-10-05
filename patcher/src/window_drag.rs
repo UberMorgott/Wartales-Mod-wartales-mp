@@ -1994,12 +1994,13 @@ fn add_win_reflow(code: &mut Bytecode, c: &Ctx, report: RefFun, clamp: RefFun) -
 }
 
 /// `name = Type.getClassName(Type.getClass(win))`; jumps to `out` on null.
-fn class_key(a: &mut Asm, c: &Ctx, win: Reg, dw: Reg, cl: Reg, name: Reg) {
-    a.op(Opcode::ToDyn { dst: dw, src: win });
+/// The window goes to getClass's Dyn argument as is: a ToDyn box would carry
+/// the register's static type (ui.Window), so every window shared one key.
+fn class_key(a: &mut Asm, c: &Ctx, win: Reg, cl: Reg, name: Reg) {
     a.op(Opcode::Call1 {
         dst: cl,
         fun: c.get_class,
-        arg0: dw,
+        arg0: win,
     });
     a.jmp(Opcode::JNull { reg: cl, offset: 0 }, "out");
     a.op(Opcode::Call1 {
@@ -2034,7 +2035,7 @@ fn add_win_push(code: &mut Bytecode, c: &Ctx, report: RefFun, begin: RefFun) -> 
         r.r(c.f64_t),
         r.r(c.f64_t),
     );
-    let (dw, cl, name, ff) = (r.r(c.dyn_t), r.r(c.cls_t), r.r(c.str_t), r.r(c.flow_t));
+    let (cl, name, ff) = (r.r(c.cls_t), r.r(c.str_t), r.r(c.flow_t));
     let gd = Guard { exc, v };
     let mut a = Asm::new();
     guard_open(&mut a, &gd);
@@ -2134,7 +2135,7 @@ fn add_win_push(code: &mut Bytecode, c: &Ctx, report: RefFun, begin: RefFun) -> 
         },
         "out",
     );
-    class_key(&mut a, c, win, dw, cl, name);
+    class_key(&mut a, c, win, cl, name);
     a.op(Opcode::Field {
         dst: ff,
         obj: win,
@@ -2169,12 +2170,11 @@ fn add_win_install(
 ) -> Result<RefFun> {
     let mut r = Regs(vec![c.win_t]);
     let win = Reg(0);
-    let (v, exc, it, pc, dw, cl, name, ff, root, rc) = (
+    let (v, exc, it, pc, cl, name, ff, root, rc) = (
         r.r(c.void_t),
         r.r(c.dyn_t),
         r.r(c.inter_t),
         r.r(c.push_t),
-        r.r(c.dyn_t),
         r.r(c.cls_t),
         r.r(c.str_t),
         r.r(c.flow_t),
@@ -2201,7 +2201,7 @@ fn add_win_install(
         src: pc,
     });
     a.label("restore");
-    class_key(&mut a, c, win, dw, cl, name);
+    class_key(&mut a, c, win, cl, name);
     a.op(Opcode::Field {
         dst: ff,
         obj: win,

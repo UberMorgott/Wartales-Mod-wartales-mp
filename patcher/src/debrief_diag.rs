@@ -317,15 +317,34 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     })
 }
 
-fn append_value(a: &mut Asm, p: &Plan, msg: Reg, tmp: Reg, boxed: Reg, result: Reg, value: Reg) {
-    a.op(Opcode::ToDyn {
-        dst: boxed,
-        src: value,
-    });
+#[allow(clippy::too_many_arguments)]
+fn append_value(
+    a: &mut Asm,
+    code: &Bytecode,
+    regs: &Regs,
+    p: &Plan,
+    msg: Reg,
+    tmp: Reg,
+    boxed: Reg,
+    result: Reg,
+    value: Reg,
+) {
+    // Only plain values (Int, Float, Bool) are boxed. A String or other
+    // object reaches the Dyn argument as is, the way the compiler passes it;
+    // ToDyn would box the pointer itself and print garbage (see diag.rs).
+    let arg = if asm::self_describing(&code.types[regs.0[value.0 as usize].0]) {
+        value
+    } else {
+        a.op(Opcode::ToDyn {
+            dst: boxed,
+            src: value,
+        });
+        boxed
+    };
     a.op(Opcode::Call1 {
         dst: tmp,
         fun: p.stringify,
-        arg0: boxed,
+        arg0: arg,
     });
     a.op(Opcode::Call2 {
         dst: result,
@@ -625,7 +644,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                 obj: current,
                 field: field(code, p.debrief, name)?.0,
             });
-            append_value(&mut a, p, msg, tmp, boxed, result, value);
+            append_value(&mut a, code, &r, p, msg, tmp, boxed, result, value);
         }
         for (i, (label, _)) in site.values.iter().enumerate() {
             a.op(Opcode::GetGlobal {
@@ -642,7 +661,17 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                 dst: msg,
                 src: result,
             });
-            append_value(&mut a, p, msg, tmp, boxed, result, Reg((i + 1) as u32));
+            append_value(
+                &mut a,
+                code,
+                &r,
+                p,
+                msg,
+                tmp,
+                boxed,
+                result,
+                Reg((i + 1) as u32),
+            );
         }
         if site.tag == "[mp debrief] repair-mismatch" {
             // The repair branch holds a hasItemWithChest boolean, not the
@@ -700,7 +729,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                 dst: msg,
                 src: result,
             });
-            append_value(&mut a, p, msg, tmp, boxed, result, qty);
+            append_value(&mut a, code, &r, p, msg, tmp, boxed, result, qty);
         }
         if site.element {
             a.op(Opcode::GetGlobal {
@@ -717,7 +746,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                 dst: msg,
                 src: result,
             });
-            append_value(&mut a, p, msg, tmp, boxed, result, Reg(0));
+            append_value(&mut a, code, &r, p, msg, tmp, boxed, result, Reg(0));
             for (label, name) in [(" name=", "name"), (" x=", "absX"), (" y=", "absY")] {
                 let (fl, ty) = field(code, p.element, name)?;
                 let value = r.r(ty);
@@ -740,7 +769,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                     obj: Reg(0),
                     field: fl,
                 });
-                append_value(&mut a, p, msg, tmp, boxed, result, value);
+                append_value(&mut a, code, &r, p, msg, tmp, boxed, result, value);
             }
             // Record the actual top target after OVER creates its tooltip, or
             // before OUT removes it. A tooltip overlay is visible in this field.
@@ -784,7 +813,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                 dst: msg,
                 src: result,
             });
-            append_value(&mut a, p, msg, tmp, boxed, result, top);
+            append_value(&mut a, code, &r, p, msg, tmp, boxed, result, top);
         }
         let mut tail: Vec<(&'static str, Reg)> = vec![];
         if site.tag == RATE {
@@ -808,16 +837,13 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
                 dst: msg,
                 src: result,
             });
-            append_value(&mut a, p, msg, tmp, boxed, result, value);
+            append_value(&mut a, code, &r, p, msg, tmp, boxed, result, value);
         }
-        a.op(Opcode::ToDyn {
-            dst: boxed,
-            src: msg,
-        });
+        // A String goes to println's Dyn argument as is (see append_value).
         a.op(Opcode::Call1 {
             dst: v,
             fun: p.println,
-            arg0: boxed,
+            arg0: msg,
         });
         a.label("done");
         a.op(Opcode::EndTrap { exc });
@@ -973,6 +999,202 @@ mod tests {
             let logger = full.functions.iter().find(|f| f.ops.iter().any(|op| matches!(op, Opcode::GetGlobal { global, .. } if tag_globals.contains(global)))).expect("full-chain diagnostic logger");
             check_types(&full, logger, 0..logger.ops.len());
             check_flow(logger);
+        }
+    }
+
+    /// Runs every appended logger once in a small interpreter that boxes like
+    /// the HL runtime: ToDyn wraps the value with the register's static type,
+    /// so a boxed String/object prints garbage instead of its text.
+    #[test]
+    fn loggers_print_readable_text() {
+        use std::collections::HashMap;
+        #[derive(Clone, Debug, PartialEq)]
+        enum V {
+            Null,
+            I(i32),
+            F(f64),
+            B(bool),
+            S(String),
+            O(usize),
+            Boxed(Box<V>),
+        }
+        fn text(v: &V) -> String {
+            match v {
+                V::Null => "null".into(),
+                V::I(x) => x.to_string(),
+                V::F(x) => x.to_string(),
+                V::B(x) => x.to_string(),
+                V::S(s) => s.clone(),
+                V::O(i) => format!("obj{i}"),
+                V::Boxed(inner) => match **inner {
+                    V::I(_) | V::F(_) | V::B(_) => text(inner),
+                    _ => "<garbage>".into(),
+                },
+            }
+        }
+        let image = std::fs::read(HLBOOT).expect("installed game fixture");
+        let mut code = read(&image);
+        crate::party_inventory::patch_party_counts(&mut code);
+        crate::party_inventory::patch_party_lists(&mut code);
+        crate::debrief_cure::patch_debrief_cure(&mut code);
+        let nf = code.functions.len();
+        let p = plan(&code).expect("plan");
+        patch(&mut code);
+        let code = read(&write(&code));
+        let strs: HashMap<usize, String> = code
+            .constants
+            .iter()
+            .flatten()
+            .filter_map(|c| {
+                let si = *c.fields.first()?;
+                Some((c.global.0, code.strings[si].as_str().to_string()))
+            })
+            .collect();
+        let count_wc = code
+            .functions
+            .iter()
+            .find(|f| s(&code, f.name) == "countWithChest")
+            .unwrap()
+            .findex;
+        let top = method(
+            &code,
+            obj_type(&code, "ui.BaseUI").unwrap(),
+            "getTopInteractiveElement",
+        )
+        .unwrap()
+        .findex;
+        let default = |t: RefType, objs: &mut usize| -> V {
+            match &code.types[t.0] {
+                Type::I32 => V::I(5),
+                Type::F64 => V::F(1.5),
+                Type::Bool => V::B(true),
+                _ if t == p.string => V::S("x".into()),
+                Type::Obj(_) => {
+                    *objs += 1;
+                    V::O(*objs)
+                }
+                _ => V::Null,
+            }
+        };
+        for (ordinal, site) in p.sites.iter().enumerate() {
+            let f = &code.functions[nf + ordinal];
+            let mut objs = 0usize;
+            let mut globals: HashMap<usize, V> = HashMap::new();
+            let mut r: Vec<V> = f.regs.iter().map(|_| V::Null).collect();
+            let nargs = f.t.as_fun(&code).unwrap().args.len();
+            for i in 0..nargs {
+                r[i] = default(f.regs[i], &mut objs);
+            }
+            let mut printed = vec![];
+            let mut pc = 0;
+            loop {
+                let op = &f.ops[pc];
+                let mut next = pc + 1;
+                let jump = |off: i32| (pc as i64 + 1 + off as i64) as usize;
+                let x = |reg: &Reg| reg.0 as usize;
+                let num = |v: &V| match v {
+                    V::I(i) => *i as f64,
+                    V::F(f) => *f,
+                    o => panic!("not a number {o:?}"),
+                };
+                match op {
+                    Opcode::Trap { .. } | Opcode::EndTrap { .. } => {}
+                    Opcode::Ret { .. } => break,
+                    Opcode::Mov { dst, src } | Opcode::UnsafeCast { dst, src } => {
+                        r[x(dst)] = r[x(src)].clone()
+                    }
+                    Opcode::ToDyn { dst, src } => r[x(dst)] = V::Boxed(Box::new(r[x(src)].clone())),
+                    Opcode::Int { dst, ptr } => r[x(dst)] = V::I(code.ints[ptr.0]),
+                    Opcode::Float { dst, ptr } => r[x(dst)] = V::F(code.floats[ptr.0]),
+                    Opcode::Null { dst } => r[x(dst)] = V::Null,
+                    Opcode::Incr { dst } => r[x(dst)] = V::I(num(&r[x(dst)]) as i32 + 1),
+                    Opcode::Sub { dst, a, b } => r[x(dst)] = V::F(num(&r[x(a)]) - num(&r[x(b)])),
+                    Opcode::GetGlobal { dst, global } => {
+                        r[x(dst)] = match strs.get(&global.0) {
+                            Some(s) => V::S(s.clone()),
+                            None => globals.get(&global.0).cloned().unwrap_or_else(|| {
+                                match code.types[code.globals[global.0].0] {
+                                    Type::I32 => V::I(0),
+                                    Type::F64 => V::F(0.0),
+                                    _ => V::Null,
+                                }
+                            }),
+                        }
+                    }
+                    Opcode::SetGlobal { global, src } => {
+                        globals.insert(global.0, r[x(src)].clone());
+                    }
+                    Opcode::Field { dst, .. } => r[x(dst)] = default(f.regs[x(dst)], &mut objs),
+                    Opcode::JNull { reg, offset } if r[x(reg)] == V::Null => next = jump(*offset),
+                    Opcode::JFalse { cond, offset } if r[x(cond)] != V::B(true) => {
+                        next = jump(*offset)
+                    }
+                    Opcode::JEq { a, b, offset } if r[x(a)] == r[x(b)] => next = jump(*offset),
+                    Opcode::JNull { .. } | Opcode::JFalse { .. } | Opcode::JEq { .. } => {}
+                    Opcode::JSLt { a, b, offset } if num(&r[x(a)]) < num(&r[x(b)]) => {
+                        next = jump(*offset)
+                    }
+                    Opcode::JSGte { a, b, offset } if num(&r[x(a)]) >= num(&r[x(b)]) => {
+                        next = jump(*offset)
+                    }
+                    Opcode::JSLt { .. } | Opcode::JSGte { .. } => {}
+                    Opcode::Call0 { dst, fun } if *fun == p.sys_time => r[x(dst)] = V::F(100.0),
+                    Opcode::Call1 { dst, fun, arg0 } => {
+                        let a = r[x(arg0)].clone();
+                        r[x(dst)] = if *fun == p.stringify {
+                            V::S(text(&a))
+                        } else if *fun == p.println {
+                            printed.push(match a {
+                                V::S(s) => s,
+                                o => format!("<garbage {}>", text(&o)),
+                            });
+                            V::Null
+                        } else if *fun == p.get_window {
+                            V::O(1)
+                        } else {
+                            panic!("unexpected call fn@{}", fun.0)
+                        }
+                    }
+                    Opcode::Call2 {
+                        dst,
+                        fun,
+                        arg0,
+                        arg1,
+                    } => {
+                        let (a, b) = (r[x(arg0)].clone(), r[x(arg1)].clone());
+                        r[x(dst)] = if *fun == p.add {
+                            let (V::S(a), V::S(b)) = (&a, &b) else {
+                                panic!("String.__add__ on {a:?} {b:?}")
+                            };
+                            V::S(format!("{a}{b}"))
+                        } else if *fun == p.check {
+                            V::B(true)
+                        } else if *fun == count_wc {
+                            V::I(3)
+                        } else if *fun == top {
+                            V::O(99)
+                        } else {
+                            panic!("unexpected call fn@{}", fun.0)
+                        }
+                    }
+                    o => panic!("{}: unsupported {o:?}", site.tag),
+                }
+                pc = next;
+            }
+            if site.tag == RATE {
+                // The first update only starts the one-second window.
+                assert!(printed.is_empty(), "{printed:?}");
+                continue;
+            }
+            assert_eq!(printed.len(), 1, "{}: {printed:?}", site.tag);
+            let line = &printed[0];
+            assert!(line.starts_with(site.tag), "{}: {line}", site.tag);
+            assert!(!line.contains("garbage"), "{line}");
+            assert!(line.contains(" repairTot=5 cureTot=5"), "{line}");
+            assert!(line.ends_with(" t=100"), "{line}");
+            if site.element {
+                assert!(line.contains(" name=x "), "{line}");
+            }
         }
     }
 
