@@ -13,8 +13,8 @@
 // switches jobs (see job_xp.rs) and the switch needs no confirm window (see
 // job_confirm.rs), and so every error the game reports is also
 // printed for the shim log with a trace of the co-op mode-switch barrier (see diag.rs),
-// and so a co-op caravan follows the moving player while its owner is in a menu
-// or toggled follow with F (see follow.rs), and so skill tooltips outside a battle show
+// and so a co-op caravan follows the player who last moved by their own input (the host when several
+// move), on by default, paused by its owner's own moves, F to opt out (see follow.rs), and so skill tooltips outside a battle show
 // the skill's Valor cost for units that are not (yet) the player's (see skill_cost.rs),
 // and so the co-op shared chest panel
 // gets sort / quick stack / take similar buttons (see chest_buttons.rs), and so

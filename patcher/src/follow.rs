@@ -22,22 +22,35 @@
 //   World.dispose (quit / load):                         followReset()
 //
 //   followUpdate(world, dt):
-//     fIssuing = false;
-//     if (Key.isPressed(F) && sevents.getFocus() == null && game.isMulti) {
-//         fOn = !fOn; fManual = false; fNext = 0; notify(fOn ? "Follow: ON" : "Follow: OFF");
+//     fIssuing = false;  now = sys_time();
+//     inactive (fActive = false, fLeader = null) unless isMulti;
+//     once per session: fLoaded = true; followLoad()   // fOff = Storage "mpFollowOff" != null
+//     if (Key.isPressed(F) && sevents.getFocus() == null) {
+//         fOff = !fOff; fManual = false; fNext = 0; followSave(fOff);
+//         notify(fOff ? "Follow: OFF" : "Follow: ON");
 //     }
-//     inactive (fActive = false, fLeader = null; fOn = false when not multi) unless:
-//       isMulti, game.mode == world, game.battle == null, !cinematicMode,
-//       state.currentCity == null, (fOn || ui.hasWindowOpened()),
-//       no own manual move pending (fManual: until me.target == null and MANUAL_HOLD s passed),
-//       me.lockedWith, me.waitActionIcon, me.scriptedMoveData, world.currentWindow all null,
-//       !me.onWater, a leader exists and is not on water;
+//     host own move: host = state.player; if (host.target != null &&
+//       (playerMovePriority == null || == host || now - fHostOwnAt <= OWN_HOLD))
+//       fHostOwnAt = now;   // the host's own move, kept while its target lasts
+//     gated (if fManual: fArrivedAt = now; then inactive) unless:
+//       game.mode == world, game.battle == null, !cinematicMode,
+//       state.currentCity == null, me.lockedWith, me.waitActionIcon,
+//       me.scriptedMoveData, world.currentWindow all null, !me.onWater;
+//     inactive while fOff (F: personal opt-out; ON by default, kept in Storage);
+//     own manual move (fManual) pending:
+//       me.target != null -> fSawTarget = true, fArrivedAt = 0, inactive;
+//       !fSawTarget && now < fManualAt + MANUAL_HOLD -> inactive (client target
+//         appears only after the host round trip);
+//       fArrivedAt == 0 -> fArrivedAt = now;  now < fArrivedAt + IDLE -> inactive;
+//       else fManual = false;
 //     leader = state.playerMovePriority (the last player who moved by their own
 //       input: the host sets it on a ground click, mouse hold, pad move and, via
 //       followCancel, an entity click; a follow move never takes it), or
-//       state.player (host) while it is null; none if that is me (I lead) or it
-//       is offline / hidden. Never "whoever moves": that picked other followers
-//       and chained the caravans (A -> B -> C);
+//       state.player (host) while it is null; but the host while the host's own
+//       move is still going (now - fHostOwnAt <= OWN_HOLD: two players moving
+//       by their own input -> the host leads); none if that is me (I lead) or
+//       it is offline / hidden / on water. Never "whoever moves": that picked
+//       other followers and chained the caravans (A -> B -> C);
 //     fActive = true; fLeader = leader; at most every TICK s (sys_time):
 //       want = leader.target != null && leader.flags & 8 != 0;  // a resting leader: walk
 //       if (want != (me.flags & 8 != 0)) ctrl.playerSetShift(want);
@@ -49,13 +62,16 @@
 //           me.resetSoftTarget(&true);   // like a click, without taking playerMovePriority
 //       }
 //   followCancel(game, claim): if (!fIssuing) { fManual = true; fManualAt = now;
-//       if (claim && me != null) me.resetSoftTarget(null);  // entity click: take priority
-//       if (fOn) { fOn = false; notify OFF } }
-//   followReset(): fOn = fManual = fIssuing = fActive = false; fLeader = null.
+//       fSawTarget = false; fArrivedAt = 0;   // pauses follow, F stays as it is
+//       if (claim && me != null) me.resetSoftTarget(null); }  // entity click: take priority
+//   followReset(): fManual = fIssuing = fActive = fSawTarget = fLoaded = false;
+//       fArrivedAt = fHostOwnAt = 0; fLeader = null (fOff stays: a preference).
+//   followLoad() / followSave(off): mpman.Storage get/setUserData("mpFollowOff",
+//       off ? true : null), each under a trap (a throw keeps the current value).
 //
 // Only the RPCs a click and the sprint key already send are used: the host
 // validates and moves the caravan as for a click. State lives in new globals
-// (zero-initialised), local to each machine. The toast is
+// (zero-initialised: fOff = false is ON), local to each machine. The toast is
 // `GameUI.localNotify("ArenaNotif", {title: ...})` (`NotifyData.getTitle` returns
 // `opts.title`; cdb ArenaNotif: log line, not in the journal). Hotkey F: no
 // world-map binding uses it (cdb `input`); the only hard-coded uses are admin
@@ -80,8 +96,15 @@ const START: f64 = 9.0;
 const GAP: f64 = 5.0;
 /// Do not re-send a goto whose point is this close to the current target.
 const REISSUE: f64 = 1.5;
-/// A manual move suppresses follow at least this long (its RPC round trip).
+/// A manual move whose target never shows up (unreachable, refused, lost RPC)
+/// counts as arrived after this long (its RPC round trip).
 const MANUAL_HOLD: f64 = 1.5;
+/// Follow resumes this long after an own manual move arrived.
+const IDLE: f64 = 1.0;
+/// The host's own move counts as ongoing while its target lasts, with gaps up to this long.
+const OWN_HOLD: f64 = 1.0;
+/// mpman.Storage key of the personal opt-out (present = OFF).
+pub(crate) const PREF_KEY: &str = "mpFollowOff";
 const SHIFT_BIT: i32 = 8;
 
 fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
@@ -197,7 +220,8 @@ impl Asm {
                 | Opcode::JSLte { offset, .. }
                 | Opcode::JEq { offset, .. }
                 | Opcode::JNotEq { offset, .. }
-                | Opcode::JAlways { offset } => *offset = off,
+                | Opcode::JAlways { offset }
+                | Opcode::Trap { offset, .. } => *offset = off,
                 o => panic!("not a jump: {o:?}"),
             }
             if off < 0 {
@@ -278,7 +302,9 @@ struct Plan {
     key_pressed: RefFun,
     get_focus: (RefFun, RefType),
     is_multi: RefFun,
-    has_window: RefFun,
+    get_ud: RefFun,
+    set_ud: RefFun,
+    dyn_t: RefType,
     local_notify: RefFun,
     notify_opts_t: RefType,
     on_water: RefFun,
@@ -376,9 +402,14 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if sig(code, is_multi)? != (vec![game_t], t.bool_) {
         bail!("unexpected Game.get_isMulti signature");
     }
-    let has_window = method(code, ui_t, "hasWindowOpened")?.findex;
-    if sig(code, has_window)? != (vec![ui_t], t.bool_) {
-        bail!("unexpected GameUI.hasWindowOpened signature");
+    let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
+    let get_ud = crate::diag::static_fn(code, "mpman.$Storage", "getUserData")?.findex;
+    if sig(code, get_ud)? != (vec![t.str_, dyn_t], dyn_t) {
+        bail!("unexpected Storage.getUserData signature");
+    }
+    let set_ud = crate::diag::static_fn(code, "mpman.$Storage", "setUserData")?.findex;
+    if sig(code, set_ud)? != (vec![t.str_, dyn_t], t.void) {
+        bail!("unexpected Storage.setUserData signature");
     }
     let local_notify = method(code, ui_t, "localNotify")?.findex;
     let (ln_args, _) = sig(code, local_notify)?;
@@ -537,7 +568,9 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         key_pressed,
         get_focus,
         is_multi,
-        has_window,
+        get_ud,
+        set_ud,
+        dyn_t,
         local_notify,
         notify_opts_t,
         on_water,
@@ -554,13 +587,17 @@ fn plan(code: &Bytecode) -> Result<Plan> {
 }
 
 struct Globals {
-    on: RefGlobal,
+    off: RefGlobal,
     manual: RefGlobal,
     manual_at: RefGlobal,
     issuing: RefGlobal,
     active: RefGlobal,
     next: RefGlobal,
     leader: RefGlobal,
+    arrived_at: RefGlobal,
+    saw_target: RefGlobal,
+    loaded: RefGlobal,
+    host_own_at: RefGlobal,
 }
 
 fn add_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
@@ -658,10 +695,12 @@ fn add_notify(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     push_fn(code, p, vec![p.game_t, p.t.bool_], r.0, a.finish())
 }
 
-/// `followCancel(game, claim)`: a manual move by this machine's player.
-/// `claim`: the move does not take `playerMovePriority` by itself (entity
-/// click), so take it here with `me.resetSoftTarget(null)`, as a ground click does.
-fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Result<RefFun> {
+/// `followCancel(game, claim)`: a manual move by this machine's player pauses
+/// follow (F stays as it is). `claim`: the move does not take
+/// `playerMovePriority` by itself (entity click), so take it here with
+/// `me.resetSoftTarget(null)`, as a ground click does.
+fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
+    let f0 = float_const(code, 0.0);
     let mut r = Regs(vec![p.game_t, p.t.bool_]);
     let (b, now, v, me, rb) = (
         r.r(p.t.bool_),
@@ -684,6 +723,14 @@ fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         global: g.manual,
         src: b,
     });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.saw_target,
+        src: b,
+    });
     a.op(Opcode::Call0 {
         dst: now,
         fun: p.sys_time,
@@ -692,19 +739,24 @@ fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         global: g.manual_at,
         src: now,
     });
+    a.op(Opcode::Float { dst: now, ptr: f0 });
+    a.op(Opcode::SetGlobal {
+        global: g.arrived_at,
+        src: now,
+    });
     a.jmp(
         Opcode::JFalse {
             cond: Reg(1),
             offset: 0,
         },
-        "noclaim",
+        "end",
     );
     a.op(Opcode::Field {
         dst: me,
         obj: Reg(0),
         field: p.game_me,
     });
-    a.jmp(Opcode::JNull { reg: me, offset: 0 }, "noclaim");
+    a.jmp(Opcode::JNull { reg: me, offset: 0 }, "end");
     a.op(Opcode::Null { dst: rb });
     a.op(Opcode::Call2 {
         dst: v,
@@ -712,39 +764,109 @@ fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         arg0: me,
         arg1: rb,
     });
-    a.label("noclaim");
-    a.op(Opcode::GetGlobal {
-        dst: b,
-        global: g.on,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "end");
-    a.op(Opcode::Bool {
-        dst: b,
-        value: ValBool(false),
-    });
-    a.op(Opcode::SetGlobal {
-        global: g.on,
-        src: b,
-    });
-    a.op(Opcode::Call2 {
-        dst: v,
-        fun: notify,
-        arg0: Reg(0),
-        arg1: b,
-    });
     a.label("end");
     a.op(Opcode::Ret { ret: v });
     push_fn(code, p, vec![p.game_t, p.t.bool_], r.0, a.finish())
 }
 
+/// `followLoad()`: `fOff = Storage.getUserData(PREF_KEY, null) != null`; a throw keeps fOff.
+fn add_load(code: &mut Bytecode, p: &Plan, g: &Globals, key: RefGlobal) -> Result<RefFun> {
+    let mut r = Regs(vec![]);
+    let (v, exc, k, nd, d, b) = (
+        r.r(p.t.void),
+        r.r(p.dyn_t),
+        r.r(p.t.str_),
+        r.r(p.dyn_t),
+        r.r(p.dyn_t),
+        r.r(p.t.bool_),
+    );
+    let mut a = Asm::new();
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
+    a.op(Opcode::GetGlobal {
+        dst: k,
+        global: key,
+    });
+    a.op(Opcode::Null { dst: nd });
+    a.op(Opcode::Call2 {
+        dst: d,
+        fun: p.get_ud,
+        arg0: k,
+        arg1: nd,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.jmp(Opcode::JNull { reg: d, offset: 0 }, "set");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.label("set");
+    a.op(Opcode::SetGlobal {
+        global: g.off,
+        src: b,
+    });
+    a.op(Opcode::EndTrap { exc });
+    a.op(Opcode::Ret { ret: v });
+    a.label("catch");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, p, vec![], r.0, a.finish())
+}
+
+/// `followSave(off)`: `Storage.setUserData(PREF_KEY, off ? true : null)`; a throw is dropped.
+fn add_save(code: &mut Bytecode, p: &Plan, key: RefGlobal) -> Result<RefFun> {
+    let mut r = Regs(vec![p.t.bool_]);
+    let (v, exc, k, d) = (r.r(p.t.void), r.r(p.dyn_t), r.r(p.t.str_), r.r(p.dyn_t));
+    let mut a = Asm::new();
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
+    a.op(Opcode::GetGlobal {
+        dst: k,
+        global: key,
+    });
+    a.op(Opcode::Null { dst: d });
+    a.jmp(
+        Opcode::JFalse {
+            cond: Reg(0),
+            offset: 0,
+        },
+        "go",
+    );
+    a.op(Opcode::ToDyn {
+        dst: d,
+        src: Reg(0),
+    });
+    a.label("go");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: p.set_ud,
+        arg0: k,
+        arg1: d,
+    });
+    a.op(Opcode::EndTrap { exc });
+    a.op(Opcode::Ret { ret: v });
+    a.label("catch");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, p, vec![p.t.bool_], r.0, a.finish())
+}
+
 /// `followUpdate(world, dt)`, see the module comment.
-fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Result<RefFun> {
+fn add_update(
+    code: &mut Bytecode,
+    p: &Plan,
+    g: &Globals,
+    notify: RefFun,
+    load: RefFun,
+    save: RefFun,
+) -> Result<RefFun> {
     let i0 = int_const(code, 0);
     let ikey = int_const(code, KEY_F);
     let imask = int_const(code, SHIFT_BIT);
     let f0 = float_const(code, 0.0);
     let ftick = float_const(code, TICK);
     let fhold = float_const(code, MANUAL_HOLD);
+    let fidle = float_const(code, IDLE);
+    let fown = float_const(code, OWN_HOLD);
     let fstart2 = float_const(code, START * START);
     let fgap = float_const(code, GAP);
     let freissue2 = float_const(code, REISSUE * REISSUE);
@@ -758,10 +880,9 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         r.r(t.void),
     );
     let (k, i, n, ki) = (r.r(t.i32_), r.r(t.i32_), r.r(t.i32_), r.r(t.i32_));
-    let (sev, focus, ui, mode, battle, city) = (
+    let (sev, focus, mode, battle, city) = (
         r.r(p.game_sevents.1),
         r.r(p.get_focus.1),
-        r.r(p.game_ui.1),
         r.r(p.game_mode.1),
         r.r(p.game_battle.1),
         r.r(p.state_city.1),
@@ -774,6 +895,7 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         r.r(p.bp_scripted.1),
     );
     let best = r.r(p.bp_t);
+    let (host, prio) = (r.r(p.state_player.1), r.r(p.state_priority.1));
     let (ctrl, flags, want, mine, inertia, pt, rb) = (
         r.r(p.game_ctrl.1),
         r.r(p.bp_flags.1),
@@ -811,6 +933,10 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         global: g.issuing,
         src: b,
     });
+    a.op(Opcode::Call0 {
+        dst: now,
+        fun: p.sys_time,
+    });
     a.op(Opcode::Field {
         dst: game,
         obj: Reg(0),
@@ -840,9 +966,26 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         fun: p.is_multi,
         arg0: game,
     });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "solo");
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "inactive");
 
-    // ---- hotkey F
+    // ---- the saved opt-out, once per session
+    a.op(Opcode::GetGlobal {
+        dst: b,
+        global: g.loaded,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "loaded");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.loaded,
+        src: b,
+    });
+    a.op(Opcode::Call0 { dst: v, fun: load });
+    a.label("loaded");
+
+    // ---- hotkey F: personal opt-out
     a.op(Opcode::Int { dst: ki, ptr: ikey });
     a.op(Opcode::Call1 {
         dst: b,
@@ -876,11 +1019,11 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
     );
     a.op(Opcode::GetGlobal {
         dst: b,
-        global: g.on,
+        global: g.off,
     });
     a.op(Opcode::Not { dst: b, src: b });
     a.op(Opcode::SetGlobal {
-        global: g.on,
+        global: g.off,
         src: b,
     });
     a.op(Opcode::Bool {
@@ -896,15 +1039,92 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         global: g.next,
         src: fa,
     });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: save,
+        arg0: b,
+    });
+    a.op(Opcode::Not { dst: want, src: b });
     a.op(Opcode::Call2 {
         dst: v,
         fun: notify,
         arg0: game,
-        arg1: b,
+        arg1: want,
     });
     a.label("afterkey");
 
-    // ---- preconditions
+    // ---- the host's own move: started while it held playerMovePriority (or
+    // nobody did), kept while its target lasts (gaps up to OWN_HOLD)
+    a.op(Opcode::Field {
+        dst: host,
+        obj: st,
+        field: p.state_player.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: host,
+            offset: 0,
+        },
+        "tracked",
+    );
+    a.op(Opcode::Field {
+        dst: tgt,
+        obj: host,
+        field: p.bp_target.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: tgt,
+            offset: 0,
+        },
+        "tracked",
+    );
+    a.op(Opcode::Field {
+        dst: prio,
+        obj: st,
+        field: p.state_priority.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: prio,
+            offset: 0,
+        },
+        "own",
+    );
+    a.jmp(
+        Opcode::JEq {
+            a: prio,
+            b: host,
+            offset: 0,
+        },
+        "own",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: fa,
+        global: g.host_own_at,
+    });
+    a.op(Opcode::Sub {
+        dst: fa,
+        a: now,
+        b: fa,
+    });
+    a.op(Opcode::Float { dst: fb, ptr: fown });
+    a.jmp(
+        Opcode::JSGt {
+            a: fa,
+            b: fb,
+            offset: 0,
+        },
+        "tracked",
+    );
+    a.label("own");
+    a.op(Opcode::SetGlobal {
+        global: g.host_own_at,
+        src: now,
+    });
+    a.label("tracked");
+
+    // ---- gates (a pending manual move restarts its idle time while gated)
     a.op(Opcode::Field {
         dst: mode,
         obj: game,
@@ -916,7 +1136,7 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
             b: Reg(0),
             offset: 0,
         },
-        "inactive",
+        "gated",
     );
     a.op(Opcode::Field {
         dst: battle,
@@ -928,14 +1148,14 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
             reg: battle,
             offset: 0,
         },
-        "inactive",
+        "gated",
     );
     a.op(Opcode::Field {
         dst: b,
         obj: st,
         field: p.state_cine,
     });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "inactive");
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "gated");
     a.op(Opcode::Field {
         dst: city,
         obj: st,
@@ -946,8 +1166,57 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
             reg: city,
             offset: 0,
         },
-        "inactive",
+        "gated",
     );
+    a.op(Opcode::Field {
+        dst: lw,
+        obj: me,
+        field: p.bp_locked.0,
+    });
+    a.jmp(Opcode::JNotNull { reg: lw, offset: 0 }, "gated");
+    a.op(Opcode::Field {
+        dst: wait,
+        obj: me,
+        field: p.bp_wait.0,
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: wait,
+            offset: 0,
+        },
+        "gated",
+    );
+    a.op(Opcode::Field {
+        dst: cw,
+        obj: Reg(0),
+        field: p.world_cur_win.0,
+    });
+    a.jmp(Opcode::JNotNull { reg: cw, offset: 0 }, "gated");
+    a.op(Opcode::Field {
+        dst: smd,
+        obj: me,
+        field: p.bp_scripted.0,
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: smd,
+            offset: 0,
+        },
+        "gated",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.on_water,
+        arg0: me,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "gated");
+    a.op(Opcode::GetGlobal {
+        dst: b,
+        global: g.off,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "inactive");
+
+    // ---- own manual move: paused until it arrived and IDLE s passed
     a.op(Opcode::GetGlobal {
         dst: b,
         global: g.manual,
@@ -959,16 +1228,33 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         field: p.bp_target.0,
     });
     a.jmp(
-        Opcode::JNotNull {
+        Opcode::JNull {
             reg: tgt,
             offset: 0,
         },
-        "inactive",
+        "stopped",
     );
-    a.op(Opcode::Call0 {
-        dst: now,
-        fun: p.sys_time,
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
     });
+    a.op(Opcode::SetGlobal {
+        global: g.saw_target,
+        src: b,
+    });
+    a.op(Opcode::Float { dst: fa, ptr: f0 });
+    a.op(Opcode::SetGlobal {
+        global: g.arrived_at,
+        src: fa,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "inactive");
+    a.label("stopped");
+    a.op(Opcode::GetGlobal {
+        dst: b,
+        global: g.saw_target,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "arrived");
+    // no target yet: the host round trip, or the click was not walkable
     a.op(Opcode::GetGlobal {
         dst: fa,
         global: g.manual_at,
@@ -976,6 +1262,43 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
     a.op(Opcode::Float {
         dst: fb,
         ptr: fhold,
+    });
+    a.op(Opcode::Add {
+        dst: fa,
+        a: fa,
+        b: fb,
+    });
+    a.jmp(
+        Opcode::JSLt {
+            a: now,
+            b: fa,
+            offset: 0,
+        },
+        "inactive",
+    );
+    a.label("arrived");
+    a.op(Opcode::GetGlobal {
+        dst: fa,
+        global: g.arrived_at,
+    });
+    a.op(Opcode::Float { dst: fb, ptr: f0 });
+    a.jmp(
+        Opcode::JSGt {
+            a: fa,
+            b: fb,
+            offset: 0,
+        },
+        "idle",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.arrived_at,
+        src: now,
+    });
+    a.op(Opcode::Mov { dst: fa, src: now });
+    a.label("idle");
+    a.op(Opcode::Float {
+        dst: fb,
+        ptr: fidle,
     });
     a.op(Opcode::Add {
         dst: fa,
@@ -999,73 +1322,15 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         src: b,
     });
     a.label("nomanual");
-    a.op(Opcode::GetGlobal {
-        dst: b,
-        global: g.on,
-    });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "wanted");
-    a.op(Opcode::Field {
-        dst: ui,
-        obj: game,
-        field: p.game_ui.0,
-    });
-    a.jmp(Opcode::JNull { reg: ui, offset: 0 }, "inactive");
-    a.op(Opcode::Call1 {
-        dst: b,
-        fun: p.has_window,
-        arg0: ui,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "inactive");
-    a.label("wanted");
-    a.op(Opcode::Field {
-        dst: lw,
-        obj: me,
-        field: p.bp_locked.0,
-    });
-    a.jmp(Opcode::JNotNull { reg: lw, offset: 0 }, "inactive");
-    a.op(Opcode::Field {
-        dst: wait,
-        obj: me,
-        field: p.bp_wait.0,
-    });
-    a.jmp(
-        Opcode::JNotNull {
-            reg: wait,
-            offset: 0,
-        },
-        "inactive",
-    );
-    a.op(Opcode::Field {
-        dst: cw,
-        obj: Reg(0),
-        field: p.world_cur_win.0,
-    });
-    a.jmp(Opcode::JNotNull { reg: cw, offset: 0 }, "inactive");
-    a.op(Opcode::Field {
-        dst: smd,
-        obj: me,
-        field: p.bp_scripted.0,
-    });
-    a.jmp(
-        Opcode::JNotNull {
-            reg: smd,
-            offset: 0,
-        },
-        "inactive",
-    );
-    a.op(Opcode::Call1 {
-        dst: b,
-        fun: p.on_water,
-        arg0: me,
-    });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "inactive");
 
-    // ---- leader: only the player who last moved by their own input
+    // ---- leader: the player who last moved by their own input
     // (GameState.playerMovePriority: the host sets it on a click, mouse hold,
     // pad move or, via followCancel, an entity click; a follow move never
-    // takes it), or the host before anyone has moved. Nobody, ourselves
-    // (we lead), offline, hidden or on water: stay put. Never "whoever is
-    // moving": that picked other followers and chained the caravans.
+    // takes it), or the host before anyone has moved; the host instead while
+    // the host's own move is still going (several players moving: the host
+    // leads). Ourselves (we lead), offline, hidden or on water: stay put.
+    // Never "whoever is moving": that picked other followers and chained the
+    // caravans.
     a.op(Opcode::Field {
         dst: best,
         obj: st,
@@ -1091,6 +1356,41 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
         "inactive",
     );
     a.label("haslead");
+    a.op(Opcode::Field {
+        dst: host,
+        obj: st,
+        field: p.state_player.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: host,
+            offset: 0,
+        },
+        "chosen",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: fa,
+        global: g.host_own_at,
+    });
+    a.op(Opcode::Sub {
+        dst: fa,
+        a: now,
+        b: fa,
+    });
+    a.op(Opcode::Float { dst: fb, ptr: fown });
+    a.jmp(
+        Opcode::JSGt {
+            a: fa,
+            b: fb,
+            offset: 0,
+        },
+        "chosen",
+    );
+    a.op(Opcode::Mov {
+        dst: best,
+        src: host,
+    });
+    a.label("chosen");
     a.jmp(
         Opcode::JEq {
             a: best,
@@ -1131,10 +1431,6 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
     });
 
     // ---- throttle
-    a.op(Opcode::Call0 {
-        dst: now,
-        fun: p.sys_time,
-    });
     a.op(Opcode::GetGlobal {
         dst: fa,
         global: g.next,
@@ -1488,14 +1784,17 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
     });
     a.label("ret");
     a.op(Opcode::Ret { ret: v });
-    a.label("solo");
-    a.op(Opcode::Bool {
+    // a gate while an own manual move is pending: its idle time restarts
+    // when the gate clears (dialog, trade, POI after an entity click)
+    a.label("gated");
+    a.op(Opcode::GetGlobal {
         dst: b,
-        value: ValBool(false),
+        global: g.manual,
     });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "inactive");
     a.op(Opcode::SetGlobal {
-        global: g.on,
-        src: b,
+        global: g.arrived_at,
+        src: now,
     });
     a.label("inactive");
     a.op(Opcode::Bool {
@@ -1516,17 +1815,23 @@ fn add_update(code: &mut Bytecode, p: &Plan, g: &Globals, notify: RefFun) -> Res
 }
 
 /// `followReset()`: World.dispose (quit to the menu or load) forgets the session.
-/// The leader is an object of that session and must not outlive it.
+/// The leader is an object of that session and must not outlive it. fOff is a
+/// preference and stays; fLoaded = false re-reads it next session.
 fn add_reset(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
+    let f0 = float_const(code, 0.0);
     let mut r = Regs(vec![]);
-    let (b, pl, v) = (r.r(p.t.bool_), r.r(p.bp_t), r.r(p.t.void));
+    let (b, f, pl, v) = (r.r(p.t.bool_), r.r(p.t.f64_), r.r(p.bp_t), r.r(p.t.void));
     let mut a = Asm::new();
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(false),
     });
-    for gl in [g.on, g.manual, g.issuing, g.active] {
+    for gl in [g.manual, g.issuing, g.active, g.saw_target, g.loaded] {
         a.op(Opcode::SetGlobal { global: gl, src: b });
+    }
+    a.op(Opcode::Float { dst: f, ptr: f0 });
+    for gl in [g.arrived_at, g.host_own_at] {
+        a.op(Opcode::SetGlobal { global: gl, src: f });
     }
     a.op(Opcode::Null { dst: pl });
     a.op(Opcode::SetGlobal {
@@ -1540,17 +1845,24 @@ fn add_reset(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
 fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
     let (bool_t, f64_t) = (p.t.bool_, p.t.f64_);
     let g = Globals {
-        on: add_global(code, bool_t),
+        off: add_global(code, bool_t),
         manual: add_global(code, bool_t),
         manual_at: add_global(code, f64_t),
         issuing: add_global(code, bool_t),
         active: add_global(code, bool_t),
         next: add_global(code, f64_t),
         leader: add_global(code, p.bp_t),
+        arrived_at: add_global(code, f64_t),
+        saw_target: add_global(code, bool_t),
+        loaded: add_global(code, bool_t),
+        host_own_at: add_global(code, f64_t),
     };
     let notify = add_notify(code, &p)?;
-    let cancel = add_cancel(code, &p, &g, notify)?;
-    let update = add_update(code, &p, &g, notify)?;
+    let key = str_global(code, p.t.str_, PREF_KEY);
+    let load = add_load(code, &p, &g, key)?;
+    let save = add_save(code, &p, key)?;
+    let cancel = add_cancel(code, &p, &g)?;
+    let update = add_update(code, &p, &g, notify, load, save)?;
     let reset = add_reset(code, &p, &g)?;
 
     // World.dispose: forget the session (toggle, leader object).
@@ -1635,14 +1947,14 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
             ],
         );
         eprintln!(
-            "patched follow fn@{}: {what} cancels follow{}",
+            "patched follow fn@{}: {what} pauses follow{}",
             f.findex.0,
             if *claim { ", takes move priority" } else { "" }
         );
     }
     eprintln!(
-        "follow: notify fn@{}, cancel fn@{}, update fn@{}, reset fn@{}; hotkey F, start {START}, gap {GAP}, tick {TICK}s",
-        notify.0, cancel.0, update.0, reset.0
+        "follow: notify fn@{}, load fn@{}, save fn@{}, cancel fn@{}, update fn@{}, reset fn@{}; on by default, F opts out ({PREF_KEY}), start {START}, gap {GAP}, tick {TICK}s, idle {IDLE}s, host own move {OWN_HOLD}s",
+        notify.0, load.0, save.0, cancel.0, update.0, reset.0
     );
     Ok(())
 }
@@ -1875,7 +2187,7 @@ mod tests {
     }
 
     /// Patches a copy of the installed game's bytecode (skipped when absent):
-    /// four functions are appended and well typed, only World.update,
+    /// six functions are appended and well typed, only World.update,
     /// World.updateSprint, World.dispose and the three manual-move entries change (ops inserted,
     /// every original jump kept), the image round-trips, and a second pass
     /// changes nothing.
@@ -1894,27 +2206,31 @@ mod tests {
         let back = read(&patched);
 
         let nf = orig.functions.len();
-        assert_eq!(back.functions.len(), nf + 4);
-        assert_eq!(back.types.len(), orig.types.len() + 4);
+        assert_eq!(back.functions.len(), nf + 6);
+        assert_eq!(back.types.len(), orig.types.len() + 6);
         assert_eq!(back.types[..orig.types.len()], orig.types[..]);
         assert_eq!(back.strings[..orig.strings.len()], orig.strings[..]);
         assert_eq!(back.ints[..orig.ints.len()], orig.ints[..]);
         assert_eq!(back.floats[..orig.floats.len()], orig.floats[..]);
         assert_eq!(back.globals[..orig.globals.len()], orig.globals[..]);
-        // 7 state globals (zero-initialised: no constant) + the two toast texts.
-        assert_eq!(back.globals.len(), orig.globals.len() + 9);
-        let added = &back.globals[orig.globals.len()..orig.globals.len() + 7];
-        assert_eq!(
-            added,
-            [p.t.bool_, p.t.bool_, p.t.f64_, p.t.bool_, p.t.bool_, p.t.f64_, p.bp_t]
-        );
-        for g in orig.globals.len()..orig.globals.len() + 7 {
+        // 11 state globals (zero-initialised: no constant; fOff = false is ON)
+        // + the two toast texts + the Storage key.
+        const NG: usize = 11;
+        assert_eq!(back.globals.len(), orig.globals.len() + NG + 3);
+        let base = orig.globals.len();
+        let added = &back.globals[base..base + NG];
+        let (b, f) = (p.t.bool_, p.t.f64_);
+        assert_eq!(added, [b, b, f, b, b, f, p.bp_t, f, b, b, f]);
+        for g in base..base + NG {
             assert!(!back.globals_initializers.contains_key(&RefGlobal(g)));
         }
-        let texts: Vec<Option<&str>> = (orig.globals.len() + 7..back.globals.len())
+        let texts: Vec<Option<&str>> = (base + NG..back.globals.len())
             .map(|g| const_str(&back, RefGlobal(g)))
             .collect();
-        assert_eq!(texts, [Some(FOLLOW_ON), Some(FOLLOW_OFF)]);
+        assert_eq!(texts, [Some(FOLLOW_ON), Some(FOLLOW_OFF), Some(PREF_KEY)]);
+        let gl = |i: usize| RefGlobal(base + i);
+        let (g_off, g_manual, g_manual_at, g_active) = (gl(0), gl(1), gl(2), gl(4));
+        let (g_arrived, g_saw, g_loaded, g_host_own) = (gl(7), gl(8), gl(9), gl(10));
 
         let mut touched = vec![(p.update_fi, p.update_at, 1), (p.sprint_fi, p.sprint_at, 2)];
         touched.extend(p.hooks.iter().map(|(fi, _, _, _)| (*fi, 0, 4)));
@@ -1933,27 +2249,116 @@ mod tests {
                 ),
             }
         }
-        let (notify, cancel, update, reset) = (
+        let (notify, load, save, cancel, update, reset) = (
             &back.functions[nf],
             &back.functions[nf + 1],
             &back.functions[nf + 2],
             &back.functions[nf + 3],
+            &back.functions[nf + 4],
+            &back.functions[nf + 5],
         );
-        // World.dispose starts with followReset(), which clears the toggle and the leader.
+        let sets = |f: &Function, g: RefGlobal| {
+            f.ops
+                .iter()
+                .any(|o| matches!(o, Opcode::SetGlobal { global, .. } if *global == g))
+        };
+        let reads = |f: &Function, g: RefGlobal| {
+            f.ops
+                .iter()
+                .any(|o| matches!(o, Opcode::GetGlobal { global, .. } if *global == g))
+        };
+        let count = |f: &Function, fun: RefFun| {
+            f.ops
+                .iter()
+                .filter(|o| match o {
+                    Opcode::Call0 { fun: x, .. }
+                    | Opcode::Call1 { fun: x, .. }
+                    | Opcode::Call2 { fun: x, .. }
+                    | Opcode::Call4 { fun: x, .. } => *x == fun,
+                    _ => false,
+                })
+                .count()
+        };
+        // World.dispose starts with followReset(): session state and the leader
+        // are cleared, the F preference (fOff) is kept and re-read next session.
         assert!(
             matches!(back.functions[p.dispose_fi].ops[0], Opcode::Call0 { fun, .. } if fun == reset.findex)
         );
-        let base = orig.globals.len();
-        for gi in [0, 1, 3, 4, 6] {
-            assert!(reset
-                .ops
-                .iter()
-                .any(|o| matches!(o, Opcode::SetGlobal { global, .. } if global.0 == base + gi)));
+        for gi in [1, 3, 4, 6, 7, 8, 9, 10] {
+            assert!(sets(reset, gl(gi)), "reset leaves global {gi}");
         }
-        for f in [notify, cancel, update, reset] {
+        assert!(!sets(reset, g_off));
+        for f in [notify, load, save, cancel, update, reset] {
             check_flow(f);
             check_types(&back, f, 0..f.ops.len());
         }
+        // Storage: load reads the key into fOff, save writes it; both trapped.
+        assert_eq!(count(load, p.get_ud), 1);
+        assert!(sets(load, g_off));
+        assert_eq!(count(save, p.set_ud), 1);
+        for f in [load, save] {
+            assert!(matches!(f.ops[0], Opcode::Trap { .. }));
+            assert_eq!(
+                f.ops
+                    .iter()
+                    .filter(|o| matches!(o, Opcode::EndTrap { .. }))
+                    .count(),
+                1
+            );
+        }
+        // followUpdate loads once per session (fLoaded), saves and toasts on F only.
+        assert_eq!(count(update, load.findex), 1);
+        assert_eq!(count(update, save.findex), 1);
+        assert_eq!(count(update, notify.findex), 1);
+        assert!(reads(update, g_loaded) && sets(update, g_loaded));
+        // Default ON: nothing but F (and followLoad) writes fOff; no window trigger.
+        assert!(sets(update, g_off));
+        assert!(!sets(cancel, g_off) && !sets(reset, g_off));
+        let has_window = method(
+            &back,
+            obj_type(&back, "ui.GameUI").unwrap(),
+            "hasWindowOpened",
+        )
+        .unwrap()
+        .findex;
+        assert_eq!(count(update, has_window), 0);
+        // A manual move pauses (no toast, F untouched) and restarts arrival tracking.
+        assert_eq!(count(cancel, notify.findex), 0);
+        for g in [g_manual, g_manual_at, g_saw, g_arrived] {
+            assert!(sets(cancel, g));
+        }
+        // Resume: saw-target and arrival time are tracked; MANUAL_HOLD and IDLE used.
+        for g in [g_saw, g_arrived, g_manual] {
+            assert!(reads(update, g) && sets(update, g));
+        }
+        let floats: Vec<f64> = update
+            .ops
+            .iter()
+            .filter_map(|o| match o {
+                Opcode::Float { ptr, .. } => Some(back.floats[ptr.0]),
+                _ => None,
+            })
+            .collect();
+        for c in [MANUAL_HOLD, IDLE, OWN_HOLD] {
+            assert!(floats.contains(&c), "constant {c} unused");
+        }
+        // Leader: playerMovePriority, else the host; the host while its own move
+        // lasts (fHostOwnAt, refreshed only while the host holds the priority or
+        // its own move is still going).
+        assert!(reads(update, g_host_own) && sets(update, g_host_own));
+        assert!(update.ops.iter().any(|o| matches!(o,
+            Opcode::Field { field, .. } if *field == p.state_priority.0)));
+        assert!(update.ops.iter().any(|o| matches!(o,
+            Opcode::Field { field, .. } if *field == p.state_player.0)));
+        let mov_host = update.ops.iter().any(|o| match o {
+            Opcode::Mov { dst, src } => {
+                update.regs[dst.0 as usize] == p.bp_t
+                    && update.regs[src.0 as usize] == p.state_player.1
+            }
+            _ => false,
+        });
+        assert!(mov_host, "no `leader = host` override");
+        assert!(sets(update, g_active));
 
         // World.update calls followUpdate(this, dt) right before updateSprint().
         let u = &back.functions[p.update_fi];
@@ -2057,5 +2462,533 @@ mod tests {
         let mut twice = Vec::new();
         again.serialize(&mut twice).expect("write");
         assert!(twice == patched);
+    }
+
+    // ---------- behaviour: a tiny interpreter for followUpdate / followCancel ----------
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum V {
+        Null,
+        B(bool),
+        I(i32),
+        F(f64),
+        O(usize),
+    }
+
+    struct Sim<'a> {
+        code: &'a Bytecode,
+        p: &'a Plan,
+        globals: HashMap<usize, V>,
+        heap: Vec<HashMap<usize, V>>,
+        now: f64,
+        key_f: bool,
+        cancel: RefFun,
+        load: RefFun,
+        save: RefFun,
+        notify: RefFun,
+        /// (callee, args) of every side-effect call.
+        log: Vec<(&'static str, Vec<V>)>,
+    }
+
+    impl<'a> Sim<'a> {
+        fn obj(&mut self, fields: &[(usize, V)]) -> V {
+            self.heap.push(fields.iter().cloned().collect());
+            V::O(self.heap.len() - 1)
+        }
+        fn set(&mut self, o: &V, f: usize, v: V) {
+            let V::O(i) = o else { panic!("set on {o:?}") };
+            self.heap[*i].insert(f, v);
+        }
+        fn get(&self, o: &V, f: usize) -> V {
+            let V::O(i) = o else {
+                panic!("null access field {f}")
+            };
+            self.heap[*i].get(&f).cloned().unwrap_or(V::Null)
+        }
+        fn global(&self, g: RefGlobal) -> V {
+            self.globals.get(&g.0).cloned().unwrap_or_else(|| {
+                match self.code.types[self.code.globals[g.0].0] {
+                    Type::Bool => V::B(false),
+                    Type::F64 => V::F(0.0),
+                    _ => V::Null,
+                }
+            })
+        }
+        fn fun(&self, f: RefFun) -> &'a Function {
+            self.code.functions.iter().find(|x| x.findex == f).unwrap()
+        }
+
+        fn call(&mut self, f: RefFun, args: Vec<V>) -> V {
+            let p = self.p;
+            let b = |x: bool| V::B(x);
+            if f == p.sys_time {
+                return V::F(self.now);
+            }
+            if f == p.is_multi || f == p.is_visible || f == p.reachable {
+                return b(true);
+            }
+            if f == p.key_pressed {
+                return b(self.key_f);
+            }
+            if f == p.get_focus.0 {
+                return V::Null;
+            }
+            if f == p.on_water {
+                return b(false);
+            }
+            if f == p.sqrt {
+                let V::F(x) = args[0] else { panic!() };
+                return V::F(x.sqrt());
+            }
+            let name = if f == self.load {
+                "load"
+            } else if f == self.save {
+                "save"
+            } else if f == self.notify {
+                "notify"
+            } else if f == p.set_shift {
+                "shift"
+            } else if f == p.reset_soft.0 {
+                "resetSoft"
+            } else if f == p.player_goto {
+                // the hooked Controller.playerGoto: followCancel(game, false) first
+                let game = self.get(&args[0], p.hooks[0].1 .0);
+                self.run(self.cancel, vec![game, V::B(false)]);
+                "goto"
+            } else if f == self.cancel {
+                return self.run(f, args);
+            } else {
+                panic!("unexpected call fn@{}", f.0)
+            };
+            self.log.push((name, args));
+            V::Null
+        }
+
+        fn run(&mut self, f: RefFun, args: Vec<V>) -> V {
+            let fun = self.fun(f);
+            let mut r = vec![V::Null; fun.regs.len()];
+            for (i, a) in args.into_iter().enumerate() {
+                r[i] = a;
+            }
+            let mut pc = 0usize;
+            let num = |v: &V| match v {
+                V::F(x) => *x,
+                V::I(x) => *x as f64,
+                o => panic!("not a number: {o:?}"),
+            };
+            loop {
+                let op = &fun.ops[pc];
+                let mut next = pc + 1;
+                let jump = |off: i32| (pc as i64 + 1 + off as i64) as usize;
+                let rr = |x: &Reg| x.0 as usize;
+                match op {
+                    Opcode::Bool { dst, value } => r[rr(dst)] = V::B(value.0),
+                    Opcode::Int { dst, ptr } => r[rr(dst)] = V::I(self.code.ints[ptr.0]),
+                    Opcode::Float { dst, ptr } => r[rr(dst)] = V::F(self.code.floats[ptr.0]),
+                    Opcode::Null { dst } => r[rr(dst)] = V::Null,
+                    Opcode::Mov { dst, src } => r[rr(dst)] = r[rr(src)].clone(),
+                    Opcode::Not { dst, src } => {
+                        r[rr(dst)] = V::B(r[rr(src)] != V::B(true));
+                    }
+                    Opcode::GetGlobal { dst, global } => r[rr(dst)] = self.global(*global),
+                    Opcode::SetGlobal { global, src } => {
+                        self.globals.insert(global.0, r[rr(src)].clone());
+                    }
+                    Opcode::Field { dst, obj, field } => {
+                        r[rr(dst)] = self.get(&r[rr(obj)], field.0);
+                    }
+                    Opcode::SetField { obj, field, src } => {
+                        let (o, v) = (r[rr(obj)].clone(), r[rr(src)].clone());
+                        self.set(&o, field.0, v);
+                    }
+                    Opcode::New { dst } => r[rr(dst)] = self.obj(&[]),
+                    Opcode::Ref { dst, .. } => r[rr(dst)] = V::Null,
+                    Opcode::Add { dst, a, b }
+                    | Opcode::Sub { dst, a, b }
+                    | Opcode::Mul { dst, a, b }
+                    | Opcode::SDiv { dst, a, b } => {
+                        let (x, y) = (num(&r[rr(a)]), num(&r[rr(b)]));
+                        let v = match op {
+                            Opcode::Add { .. } => x + y,
+                            Opcode::Sub { .. } => x - y,
+                            Opcode::Mul { .. } => x * y,
+                            _ => x / y,
+                        };
+                        r[rr(dst)] = match r[rr(a)] {
+                            V::I(_) => V::I(v as i32),
+                            _ => V::F(v),
+                        };
+                    }
+                    Opcode::And { dst, a, b } => {
+                        let (V::I(x), V::I(y)) = (&r[rr(a)], &r[rr(b)]) else {
+                            panic!()
+                        };
+                        r[rr(dst)] = V::I(x & y);
+                    }
+                    Opcode::JAlways { offset } => next = jump(*offset),
+                    Opcode::JTrue { cond, offset } if r[rr(cond)] == V::B(true) => {
+                        next = jump(*offset)
+                    }
+                    Opcode::JFalse { cond, offset } if r[rr(cond)] != V::B(true) => {
+                        next = jump(*offset)
+                    }
+                    Opcode::JNull { reg, offset } if r[rr(reg)] == V::Null => next = jump(*offset),
+                    Opcode::JNotNull { reg, offset } if r[rr(reg)] != V::Null => {
+                        next = jump(*offset)
+                    }
+                    Opcode::JEq { a, b, offset } if r[rr(a)] == r[rr(b)] => next = jump(*offset),
+                    Opcode::JNotEq { a, b, offset } if r[rr(a)] != r[rr(b)] => next = jump(*offset),
+                    Opcode::JSLt { a, b, offset }
+                    | Opcode::JSGt { a, b, offset }
+                    | Opcode::JSLte { a, b, offset }
+                    | Opcode::JSGte { a, b, offset } => {
+                        let (x, y) = (num(&r[rr(a)]), num(&r[rr(b)]));
+                        let t = match op {
+                            Opcode::JSLt { .. } => x < y,
+                            Opcode::JSGt { .. } => x > y,
+                            Opcode::JSLte { .. } => x <= y,
+                            _ => x >= y,
+                        };
+                        if t {
+                            next = jump(*offset);
+                        }
+                    }
+                    Opcode::JTrue { .. }
+                    | Opcode::JFalse { .. }
+                    | Opcode::JNull { .. }
+                    | Opcode::JNotNull { .. }
+                    | Opcode::JEq { .. }
+                    | Opcode::JNotEq { .. } => {}
+                    Opcode::Call0 { dst, fun } => r[rr(dst)] = self.call(*fun, vec![]),
+                    Opcode::Call1 { dst, fun, arg0 } => {
+                        let a = vec![r[rr(arg0)].clone()];
+                        r[rr(dst)] = self.call(*fun, a);
+                    }
+                    Opcode::Call2 {
+                        dst,
+                        fun,
+                        arg0,
+                        arg1,
+                    } => {
+                        let a = vec![r[rr(arg0)].clone(), r[rr(arg1)].clone()];
+                        r[rr(dst)] = self.call(*fun, a);
+                    }
+                    Opcode::Call4 {
+                        dst,
+                        fun,
+                        arg0,
+                        arg1,
+                        arg2,
+                        arg3,
+                    } => {
+                        let a = [arg0, arg1, arg2, arg3]
+                            .iter()
+                            .map(|x| r[rr(x)].clone())
+                            .collect();
+                        r[rr(dst)] = self.call(*fun, a);
+                    }
+                    Opcode::Ret { ret } => return r[rr(ret)].clone(),
+                    o => panic!("interpreter: unsupported {o:?}"),
+                }
+                pc = next;
+            }
+        }
+    }
+
+    /// A co-op world: `me` plus `others` (host first when `me` is not the host).
+    struct World {
+        world: V,
+        game: V,
+        state: V,
+        update: RefFun,
+    }
+
+    fn player(sim: &mut Sim, x: f64) -> V {
+        let p = sim.p;
+        let flags = sim.obj(&[(p.flags_value.0, V::I(0))]);
+        sim.obj(&[
+            (p.bp_x.0, V::F(x)),
+            (p.bp_y.0, V::F(0.0)),
+            (p.bp_flags.0 .0, flags),
+            (p.bp_connected.0, V::B(true)),
+        ])
+    }
+
+    fn world(sim: &mut Sim, me: &V, host: &V, update: RefFun) -> World {
+        let p = sim.p;
+        let state = sim.obj(&[
+            (p.state_player.0 .0, host.clone()),
+            (p.state_cine.0, V::B(false)),
+        ]);
+        let sev = sim.obj(&[]);
+        let ctrl = sim.obj(&[]);
+        let game = sim.obj(&[
+            (p.game_me.0, me.clone()),
+            (p.game_state.0 .0, state.clone()),
+            (p.game_sevents.0 .0, sev),
+        ]);
+        sim.set(&ctrl, p.hooks[0].1 .0, game.clone());
+        sim.set(&game, p.game_ctrl.0 .0, ctrl);
+        let world = sim.obj(&[(p.world_game.0, game.clone())]);
+        sim.set(&game, p.game_mode.0 .0, world.clone());
+        World {
+            world,
+            game,
+            state,
+            update,
+        }
+    }
+
+    impl World {
+        /// One followUpdate at `t`; returns the x of the goto it issued, if any.
+        fn tick(&self, sim: &mut Sim, t: f64) -> Option<f64> {
+            sim.now = t;
+            sim.log.clear();
+            sim.run(self.update, vec![self.world.clone(), V::F(0.016)]);
+            sim.key_f = false;
+            sim.log
+                .iter()
+                .find(|(n, _)| *n == "goto")
+                .map(|(_, a)| match a[1] {
+                    V::F(x) => x,
+                    _ => panic!(),
+                })
+        }
+        fn target(&self, sim: &mut Sim, pl: &V, x: Option<f64>) {
+            let p = sim.p;
+            let t = match x {
+                Some(x) => sim.obj(&[(p.target_x.0, V::F(x)), (p.target_y.0, V::F(0.0))]),
+                None => V::Null,
+            };
+            sim.set(pl, p.bp_target.0 .0, t);
+        }
+        fn prio(&self, sim: &mut Sim, pl: V) {
+            let f = sim.p.state_priority.0 .0;
+            sim.set(&self.state, f, pl);
+        }
+        fn manual(&self, sim: &mut Sim, t: f64) {
+            sim.now = t;
+            sim.run(sim.cancel, vec![self.game.clone(), V::B(false)]);
+        }
+    }
+
+    /// Default ON, the F opt-out, the pause on an own move and its resume
+    /// (saw-target, unreachable fallback, gate), and the leader rule: the most
+    /// recent own-input mover, the host while its own move lasts, never oneself.
+    #[test]
+    fn follow_behaviour() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let p = plan(&orig).expect("plan");
+        let mut code = read(&image);
+        patch_follow(&mut code);
+        let nf = orig.functions.len();
+        let f = |i: usize| code.functions[nf + i].findex;
+        let (notify, load, save, cancel, update) = (f(0), f(1), f(2), f(3), f(4));
+        assert_eq!(p.hooks[0].3, "Controller.playerGoto");
+        let new_sim = || Sim {
+            code: &code,
+            p: &p,
+            globals: HashMap::new(),
+            heap: vec![],
+            now: 100.0,
+            key_f: false,
+            cancel,
+            load,
+            save,
+            notify,
+            log: vec![],
+        };
+        let g_off = orig.globals.len();
+        let g_manual = orig.globals.len() + 1;
+
+        // -- a client, the host 50 to the right, nobody moved yet: follows the host.
+        let mut sim = new_sim();
+        let (me, host, other) = (
+            player(&mut sim, 0.0),
+            player(&mut sim, 50.0),
+            player(&mut sim, -50.0),
+        );
+        let w = world(&mut sim, &me, &host, update);
+        let x = w
+            .tick(&mut sim, 100.0)
+            .expect("default ON follows the host");
+        assert!((x - 45.0).abs() < 1e-9, "GAP short of the leader: {x}");
+        assert!(
+            sim.log.iter().any(|(n, _)| *n == "load"),
+            "opt-out read once"
+        );
+        // the follow goto went through the hooked playerGoto without pausing follow
+        assert_ne!(sim.global(RefGlobal(g_manual)), V::B(true));
+        // F: OFF (saved, toast), no goto; F again: ON.
+        sim.key_f = true;
+        assert_eq!(w.tick(&mut sim, 101.0), None);
+        assert_eq!(sim.global(RefGlobal(g_off)), V::B(true));
+        assert!(sim.log.contains(&("save", vec![V::B(true)])));
+        assert!(sim
+            .log
+            .iter()
+            .any(|(n, a)| *n == "notify" && a[1] == V::B(false)));
+        assert_eq!(w.tick(&mut sim, 102.0), None, "OFF stays off");
+        sim.key_f = true;
+        assert!(w.tick(&mut sim, 103.0).is_some(), "F again: ON");
+        assert!(
+            !sim.log.iter().any(|(n, _)| *n == "load"),
+            "loaded once per session"
+        );
+
+        // -- own move: paused until the target showed up, arrival, then IDLE.
+        w.manual(&mut sim, 110.0);
+        assert_eq!(w.tick(&mut sim, 110.5), None, "round trip pending");
+        w.target(&mut sim, &me, Some(-20.0));
+        assert_eq!(w.tick(&mut sim, 112.0), None, "walking");
+        assert_eq!(w.tick(&mut sim, 115.0), None, "still walking");
+        w.target(&mut sim, &me, None);
+        assert_eq!(w.tick(&mut sim, 115.5), None, "arrived, idle starts");
+        assert_eq!(w.tick(&mut sim, 116.4), None, "idle < 1 s");
+        assert!(
+            w.tick(&mut sim, 116.6).is_some(),
+            "resumes 1 s after arrival"
+        );
+
+        // -- an unwalkable click (no target ever): MANUAL_HOLD, then IDLE.
+        w.manual(&mut sim, 120.0);
+        assert_eq!(w.tick(&mut sim, 121.4), None);
+        assert_eq!(w.tick(&mut sim, 121.6), None, "counts as arrived at 1.6");
+        assert_eq!(w.tick(&mut sim, 122.5), None);
+        assert!(
+            w.tick(&mut sim, 122.7).is_some(),
+            "resumes ~2.5 s after the click"
+        );
+
+        // -- an interaction gate after an entity click restarts the idle time.
+        let locked = sim.obj(&[]);
+        w.manual(&mut sim, 130.0);
+        w.target(&mut sim, &me, Some(-5.0));
+        assert_eq!(w.tick(&mut sim, 130.5), None);
+        w.target(&mut sim, &me, None);
+        sim.set(&me, p.bp_locked.0 .0, locked);
+        assert_eq!(w.tick(&mut sim, 135.0), None, "in the dialog");
+        sim.set(&me, p.bp_locked.0 .0, V::Null);
+        assert_eq!(w.tick(&mut sim, 135.8), None, "1 s after the dialog");
+        assert!(w.tick(&mut sim, 136.1).is_some());
+
+        // -- leader: the most recent own-input mover.
+        w.prio(&mut sim, other.clone());
+        let x = w.tick(&mut sim, 140.0).expect("follows the other client");
+        assert!(x < 0.0);
+        // never oneself
+        w.prio(&mut sim, me.clone());
+        assert_eq!(w.tick(&mut sim, 141.0), None);
+        assert_eq!(sim.global(RefGlobal(orig.globals.len() + 4)), V::B(false));
+
+        // -- the host moves by its own input, then another client clicks while
+        // the host is still walking: the host keeps leading.
+        w.prio(&mut sim, host.clone());
+        w.target(&mut sim, &host, Some(80.0));
+        assert!(w.tick(&mut sim, 150.0).unwrap() > 0.0);
+        w.prio(&mut sim, other.clone());
+        assert!(
+            w.tick(&mut sim, 150.6).unwrap() > 0.0,
+            "host still moving: host leads"
+        );
+        assert!(
+            w.tick(&mut sim, 151.2).unwrap() > 0.0,
+            "kept while its target lasts"
+        );
+        assert!(w.tick(&mut sim, 152.0).unwrap() > 0.0);
+        // the host stops: the other (most recent) mover leads after OWN_HOLD
+        w.target(&mut sim, &host, None);
+        assert!(w.tick(&mut sim, 152.6).unwrap() > 0.0, "gap < OWN_HOLD");
+        assert!(
+            w.tick(&mut sim, 153.2).unwrap() < 0.0,
+            "now the other mover"
+        );
+        // a host target that is a follow move (host not holding the priority,
+        // its own move over) does not make it the leader again
+        w.target(&mut sim, &host, Some(-40.0));
+        assert!(w.tick(&mut sim, 154.0).unwrap() < 0.0);
+
+        // -- on the host's machine: the host never follows itself while its own
+        // move lasts, and follows the most recent mover afterwards.
+        let mut sim = new_sim();
+        let (hme, cl) = (player(&mut sim, 0.0), player(&mut sim, -50.0));
+        let w = world(&mut sim, &hme, &hme, update);
+        assert_eq!(
+            w.tick(&mut sim, 100.0),
+            None,
+            "nobody moved: the host leads"
+        );
+        w.prio(&mut sim, hme.clone());
+        w.target(&mut sim, &hme, Some(30.0));
+        assert_eq!(w.tick(&mut sim, 101.0), None);
+        w.prio(&mut sim, cl.clone());
+        assert_eq!(
+            w.tick(&mut sim, 101.5),
+            None,
+            "own move lasts: still the leader"
+        );
+        w.target(&mut sim, &hme, None);
+        assert!(
+            w.tick(&mut sim, 103.0).unwrap() < 0.0,
+            "then follows the client"
+        );
+    }
+
+    /// A second updateSprint() call in World.update, a second playerSetShift
+    /// send, or a jump onto a hook's op 0: skipped, the image untouched.
+    #[test]
+    fn refuses_unexpected_shapes() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let p = plan(&orig).expect("plan");
+        let ser = |c: &Bytecode| {
+            let mut v = Vec::new();
+            c.serialize(&mut v).expect("write");
+            v
+        };
+        let base = ser(&orig);
+        let hook = p.hooks[0].0;
+        type Edit<'a> = (usize, Box<dyn Fn(&mut Function) + 'a>);
+        let edits: Vec<Edit> = vec![
+            (
+                p.update_fi,
+                Box::new(|f: &mut Function| {
+                    let c = f.ops[p.update_at].clone();
+                    f.ops[p.update_at - 1] = c;
+                }),
+            ),
+            (
+                p.sprint_fi,
+                Box::new(|f: &mut Function| {
+                    let c = f.ops[p.sprint_at].clone();
+                    f.ops[p.sprint_at - 1] = c;
+                }),
+            ),
+            (
+                hook,
+                Box::new(|f: &mut Function| {
+                    let last = f.ops.len() - 1;
+                    f.ops[last - 1] = Opcode::JAlways {
+                        offset: -(last as i32),
+                    };
+                }),
+            ),
+        ];
+        for (k, (fi, edit)) in edits.iter().enumerate() {
+            let mut code = read(&image);
+            edit(&mut code.functions[*fi]);
+            let before = ser(&code);
+            assert!(before != base, "edit {k} was a no-op");
+            assert!(plan(&code).is_err(), "edit {k} still planned");
+            patch_follow(&mut code);
+            assert!(ser(&code) == before, "edit {k} changed the code");
+        }
     }
 }

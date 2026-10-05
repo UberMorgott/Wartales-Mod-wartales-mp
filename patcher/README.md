@@ -226,10 +226,11 @@ Trapped and null-guarded; skipped (logged) on mismatch.
 
 **Co-op auto-follow** (`src/follow.rs`): in co-op an open window does not pause
 the world map, so `World.update` gets a new `followUpdate` right before
-`updateSprint()`. While the local player has a window open
-(`GameUI.hasWindowOpened`: character sheet, inventory, ...) or has toggled
-follow with **F** (no world-map binding uses it; a log toast says
-"Follow: ON/OFF"), every 0.5 s their caravan sends the same RPC a ground click
+`updateSprint()`. Follow is ON by default for every co-op player; **F** is a
+personal opt-out (no world-map binding uses it; a log toast says
+"Follow: ON/OFF"; OFF is kept across sessions in
+`mpman.Storage` user data `mpFollowOff`, read once per session and written on
+F, both under a trap). While following, every 0.5 s the caravan sends the same RPC a ground click
 sends, `Controller.playerGoto`, to a point 5 units short of the leader once the
 leader is more than 9 away (the leader's own position when that point is not
 walkable), then `resetSoftTarget(&true)` like a click without taking the move
@@ -238,15 +239,22 @@ leader's synced `flags` bit 8; a resting leader means walk); `updateSprint`
 does not send its key-driven shift meanwhile. Leader: only vanilla's synced
 `GameState.playerMovePriority`, the player who last moved by their own input
 (ground click, mouse hold, pad; an entity click takes it too via
-`resetSoftTarget(null)`), or the host while it is unset; never another
-follower or just whoever is moving (that chained the caravans). The holder
-itself does not follow. A manual move (`Controller.playerGoto` not sent by follow, `playerGotoEntity`,
-`BasePlayer.updateMoveHold`) turns F off and pauses following until it ends (at
-least 1.5 s). No follow in battle, in a
+`resetSoftTarget(null)`), or the host while it is unset; but the host while
+the host's own move is still going (its target set since it held the priority,
+gaps up to 1 s): when several players move by their own input the host leads,
+otherwise the most recent mover. Never another follower or just whoever is
+moving (that chained the caravans): follow moves never take the priority nor
+count as the host's own move. The leader itself does not follow. A manual move
+(`Controller.playerGoto` not sent by follow, `playerGotoEntity`,
+`BasePlayer.updateMoveHold`) pauses following without touching F: it resumes
+1 s after the move arrived (own target seen, then cleared; a client's target
+appears only after the host round trip) or, when no target ever shows up
+(unwalkable click), 1.5 s + 1 s after the click. No follow in battle, in a
 city, on water, in a cutscene, or while the player is locked with an NPC/chest,
-waits to enter/camp or has an interaction window. Host logic is untouched: only
+waits to enter/camp or has an interaction window; such a gate during a pending
+manual move restarts the 1 s idle when it clears. Host logic is untouched: only
 vanilla client RPCs; the state is new zero-initialised globals on each machine,
-cleared by `World.dispose` (quit or load). Skipped (logged) on mismatch.
+cleared by `World.dispose` (quit or load) except the F choice. Skipped (logged) on mismatch.
 
 **Nicknames on player markers** (`src/marker_names.rs`): the co-op world-map
 locator (`ui.comp.PlayerMarker`, clamped to the screen edge) and the minimap
