@@ -38,6 +38,17 @@
 //      is logged and the call's result reads as its type's default (0, false,
 //      0.0, null; an RPC with result answers that default). Otherwise it is
 //      rethrown: vanilla behaviour.
+//   A. Inside the trap, right before the handler call, a guest (Game.isAuth
+//      false; Game.inst, Game.state set, not reloading: Game.update's own
+//      conditions) runs `Game.initAlive()`. Vanilla makes objects received in a
+//      batch alive (hxbit makeAlive -> State.alive -> Game.aliveStates ->
+//      init, which sets battle.Entity.battle) only on the next Game.update,
+//      while RPCs of the same batch already ran: e.g. Rat Matriarch's
+//      ThroatyHowl spawns rats and damages them in one host flush, the guest's
+//      feedbackDamages / battleNextTurn then hit `Null access .grid`. initAlive
+//      is a few length checks when nothing is pending; GameUI.netUpdatePick
+//      already calls makeAlive on demand the same way. lockAlives is honoured
+//      by initAlive itself.
 // Everything else stays vanilla: argument decode errors, property sync, object
 // registration, full sync, RPC result callbacks, protocol errors.
 //
@@ -104,6 +115,18 @@ struct Common {
     c_pid: RefField,
     s_in_pos: RefField,
     s_input: RefField,
+    /// `$Game` class global and its type; `inst`.
+    g_cls: RefGlobal,
+    g_cls_t: RefType,
+    g_inst: RefField,
+    game_t: RefType,
+    /// Game.isAuth, Game.state (and its type), Game.reloading.
+    g_auth: RefField,
+    g_state: RefField,
+    g_state_t: RefType,
+    g_reloading: RefField,
+    /// Game.initAlive (static, `Game -> Void`).
+    init_alive: RefFun,
 }
 
 /// The value an interrupted call's result register gets.
@@ -240,7 +263,34 @@ fn common(code: &Bytecode) -> Result<Common> {
         }
         Ok(f)
     };
+    let game_t = obj_type(code, "Game")?;
+    let g_cls = RefGlobal(
+        obj(code, game_t)?
+            .global
+            .0
+            .checked_sub(1)
+            .context("Game: no class global")?,
+    );
+    let g_cls_t = code.globals[g_cls.0];
+    let g_inst = typed(g_cls_t, "inst", game_t)?;
+    let (g_state, g_state_t) = field(code, game_t, "state")?;
+    if obj(code, g_state_t).is_err() {
+        bail!("Game.state is not an object");
+    }
+    let init = method(code, game_t, "initAlive")?;
+    if fun_args(code, init) != [game_t] || init.t.as_fun(code).map(|t| t.ret) != Some(void_t) {
+        bail!("unexpected Game.initAlive signature");
+    }
     Ok(Common {
+        g_cls,
+        g_cls_t,
+        g_inst,
+        game_t,
+        g_auth: typed(game_t, "isAuth", bool_t)?,
+        g_state,
+        g_state_t,
+        g_reloading: typed(game_t, "reloading", bool_t)?,
+        init_alive: init.findex,
         str_t,
         dyn_t,
         void_t,
@@ -590,6 +640,9 @@ struct Regs {
     acc: Reg,
     t: Reg,
     v: Reg,
+    gcls: Reg,
+    game: Reg,
+    gstate: Reg,
 }
 
 fn regs(f: &mut Function, c: &Common) -> Regs {
@@ -622,11 +675,81 @@ fn regs(f: &mut Function, c: &Common) -> Regs {
         acc: r(c.str_t),
         t: r(c.str_t),
         v: r(c.void_t),
+        gcls: r(c.g_cls_t),
+        game: r(c.game_t),
+        gstate: r(c.g_state_t),
     }
 }
 
+/// On a guest, `Game.initAlive()` as `Game.update` would run it (Game.inst set,
+/// a state, not reloading): objects that arrived earlier in the same network
+/// batch get `alive()` / `init()` before a handler uses them. A host (isAuth)
+/// skips it. Every exit lands on the op after the block (the handler call).
+fn init_alive_ops(c: &Common, r: &Regs) -> Vec<Opcode> {
+    let mut a = Asm::new();
+    a.op(Opcode::GetGlobal {
+        dst: r.gcls,
+        global: c.g_cls,
+    });
+    a.op(Opcode::Field {
+        dst: r.game,
+        obj: r.gcls,
+        field: c.g_inst,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: r.game,
+            offset: 0,
+        },
+        "skip",
+    );
+    a.op(Opcode::Field {
+        dst: r.flag,
+        obj: r.game,
+        field: c.g_auth,
+    });
+    a.jmp(
+        Opcode::JTrue {
+            cond: r.flag,
+            offset: 0,
+        },
+        "skip",
+    );
+    a.op(Opcode::Field {
+        dst: r.gstate,
+        obj: r.game,
+        field: c.g_state,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: r.gstate,
+            offset: 0,
+        },
+        "skip",
+    );
+    a.op(Opcode::Field {
+        dst: r.flag,
+        obj: r.game,
+        field: c.g_reloading,
+    });
+    a.jmp(
+        Opcode::JTrue {
+            cond: r.flag,
+            offset: 0,
+        },
+        "skip",
+    );
+    a.op(Opcode::Call1 {
+        dst: r.v,
+        fun: c.init_alive,
+        arg0: r.game,
+    });
+    a.label("skip");
+    a.finish()
+}
+
 /// Saves the state the handler must leave alone, then opens the trap whose
-/// handler starts 3 ops after it (call, EndTrap, JAlways).
+/// handler starts after the init-alive block, the call, EndTrap and JAlways.
 fn prefix(c: &Common, k: &Consts, r: &Regs, client: Reg) -> Vec<Opcode> {
     let mut a = Asm::new();
     a.op(Opcode::Null { dst: r.host_b });
@@ -700,11 +823,16 @@ fn prefix(c: &Common, k: &Consts, r: &Regs, client: Reg) -> Vec<Opcode> {
         dst: r.gen_b,
         global: k.gen,
     });
+    let init = init_alive_ops(c, r);
     a.op(Opcode::Trap {
         exc: r.exc,
-        offset: 3,
+        offset: 3 + init.len() as i32,
     });
-    a.finish()
+    let mut ops = a.finish();
+    // Inside the trap: an exception from alive()/init() is handled like one
+    // from the handler (the handler call is then skipped).
+    ops.extend(init);
+    ops
 }
 
 /// Capped, best-effort `Sys.println(parts... + Std.string(exc) + "\n" + stack)`;
@@ -1120,6 +1248,8 @@ mod tests {
             )
             .len()
         };
+        let init_n = init_alive_ops(&p.c, &r).len();
+        assert_eq!(init_n, 10);
         const BUMP: usize = 4;
 
         let mut code = read(&image);
@@ -1173,9 +1303,33 @@ mod tests {
             }
             for s in &g.sites {
                 let at = map(s.at);
-                // Trap right before the call, its handler right after EndTrap + JAlways.
-                assert!(matches!(b.ops[at - 1], Opcode::Trap { .. }));
-                assert_eq!(jump_targets(b, at - 1), [at + 3]);
+                // Trap right before the init-alive block, its handler right
+                // after the call, EndTrap and JAlways.
+                let trap = at - 1 - init_n;
+                assert!(matches!(b.ops[trap], Opcode::Trap { .. }));
+                assert_eq!(jump_targets(b, trap), [at + 3]);
+                // The block: one Game.initAlive(Game.inst) call, right before
+                // the handler call; each guard skips straight to the handler.
+                let blk = trap + 1..at;
+                let calls: Vec<&Opcode> = b.ops[blk.clone()]
+                    .iter()
+                    .filter(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == p.c.init_alive))
+                    .collect();
+                assert_eq!(calls.len(), 1, "fn@{} site {}", a.findex.0, s.at);
+                let Opcode::Call1 { arg0, .. } = b.ops[at - 1] else {
+                    panic!("fn@{}: initAlive is not last", a.findex.0)
+                };
+                assert!(matches!(b.ops[trap + 1], Opcode::GetGlobal { global, .. } if global == p.c.g_cls));
+                assert!(matches!(b.ops[trap + 2], Opcode::Field { dst, field, .. } if dst == arg0 && field == p.c.g_inst));
+                let guards: Vec<usize> = blk.clone().filter(|&j| !jump_targets(b, j).is_empty()).collect();
+                assert_eq!(guards.len(), 4);
+                for j in guards {
+                    assert_eq!(jump_targets(b, j), [at], "fn@{} op {j}", a.findex.0);
+                }
+                let auth_read = b.ops[blk]
+                    .iter()
+                    .any(|o| matches!(o, Opcode::Field { field, .. } if *field == p.c.g_auth));
+                assert!(auth_read);
                 assert!(matches!(b.ops[at + 1], Opcode::EndTrap { .. }));
                 assert_eq!(jump_targets(b, at + 2), [at + 1 + suf(s)]);
                 // The handler ends with the jump back and the rethrow.
