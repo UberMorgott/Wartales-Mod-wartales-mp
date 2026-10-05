@@ -77,6 +77,9 @@ mod force_leave;
 mod forge_mirror;
 mod friendly_fire;
 mod hold_speed;
+// A call to a patch-added function right after a NullCheck on its first argument makes the
+// HashLink JIT hash a NULL function name and crash at startup; a Nop breaks that (see jit_names.rs).
+mod jit_names;
 mod job_confirm;
 mod job_xp;
 mod loot_all;
@@ -164,6 +167,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     style_guard::patch_style_guard(&mut code);
     all_inv::patch_all_inv(&mut code);
     alt_world::patch_alt_world(&mut code);
+    jit_names::patch_jit_names(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
