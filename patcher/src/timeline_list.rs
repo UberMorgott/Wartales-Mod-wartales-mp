@@ -4,8 +4,8 @@
 // of the timeline's first diamond, one row per human player with living units:
 //
 //   » Name     acting   (marker and nickname in the player's colour)
-//   × Name     done     (grey marker, nickname in the player's colour)
-//   · Name     waiting
+//   [ok] Name  done     (green check icon, nickname in the player's colour)
+//   [x] Name   waiting  (red cross icon)
 //
 // Status, per player p (battle.Player, its ent.BasePlayer `bp = p.player`):
 // - acting:  `state.startedPlaying.data.owner == bp`. Battle.doExecuteSkill
@@ -18,15 +18,18 @@
 // - waiting: neither.
 // Players without a living unit in `state.units` are left out.
 //
-// The "default" font (eb_garamond_medium.fnt) has no ▶ ✓ • … glyphs, so the
-// markers are » × · (U+00BB, U+00D7, U+00B7, all in its charset) and a long
-// nickname is cut with "...".
+// No game font has ✓ • … glyphs, so done / waiting are icons: the label's
+// loadImage (a dynamic method; vanilla returns null) is set to
+// FmtText.loadImgText, which resolves <img src="icon/Ok"/> / "icon/Cancel" from
+// the icon sheet at 20 px. Acting keeps » (U+00BB, in eb_garamond_medium's
+// charset) and a long nickname is cut with "...".
 //
 // `timelineHudList(ev)`, called from TimelineEvent.sync after timelineHud, on
 // Player diamonds only, inside try/catch:
 //
 //   if (!game.isMulti || ev is not the Timeline's first diamond) { mpList?.visible = false; return; }
-//   if (mpList == null) create it (HtmlText, font "default", drop shadow, absolute);
+//   if (mpList == null) create it (HtmlText, font "default", loadImage = FmtText.loadImgText,
+//                                  drop shadow, absolute);
 //   sig = round; for (u in state.units) sig = sig * 31 + (1 | alive << 1 | played << 2);
 //   if (created || sig != mpListSig || startedPlaying != mpListUnit) rebuild the text;
 //   if (rebuilt || outerWidth != mpListW || absX != mpListAx) place it:
@@ -92,8 +95,8 @@ const MAX_NAME: i32 = 16;
 const GAP: f64 = 6.0;
 const EDGE: f64 = 4.0;
 const ACTING: &str = "\u{bb} ";
-const DONE: &str = "<font color=\"#8C8C8C\">\u{d7}</font> ";
-const WAITING: &str = "\u{b7} ";
+const DONE: &str = "<img src=\"icon/Ok\"/> ";
+const WAITING: &str = "<img src=\"icon/Cancel\"/> ";
 const CUT: &str = "...";
 const BR: &str = "<br/>";
 
@@ -122,6 +125,9 @@ pub(super) struct ListPlan {
     str_last_index: RefFun,
     ni32_t: RefType,
     str_len: RefField,
+    load_img: RefFun,
+    load_img_t: RefType,
+    h_load_image: RefField,
 }
 
 pub(super) fn plan(code: &Bytecode, p: &Plan) -> Result<ListPlan> {
@@ -221,6 +227,30 @@ pub(super) fn plan(code: &Bytecode, p: &Plan) -> Result<ListPlan> {
         bail!("unexpected String.lastIndexOf signature");
     }
     let str_len = typed(p.str_t, "length", p.i32_)?;
+    // Vanilla HtmlText.loadImage (a dynamic method) returns null: no <img>.
+    // FmtText.loadImgText resolves "icon/<id>" from the icon sheet, 20 px.
+    let tile_t = obj_type(code, "h2d.Tile")?;
+    let fmt_file = debug_file(code, "src/ui/comp/FmtText.hx")?;
+    let hits: Vec<&Function> = code
+        .functions
+        .iter()
+        .filter(|f| {
+            s(code, f.name) == "loadImgText"
+                && f.debug_info
+                    .as_ref()
+                    .and_then(|d| d.first())
+                    .is_some_and(|&(file, _)| file == fmt_file)
+        })
+        .collect();
+    let [load_img_fn] = hits[..] else {
+        bail!("expected one FmtText.loadImgText, found {}", hits.len());
+    };
+    let load_img = load_img_fn.findex;
+    if sig(code, load_img)? != (vec![p.str_t], tile_t) {
+        bail!("unexpected FmtText.loadImgText signature");
+    }
+    let load_img_t = load_img_fn.t;
+    let h_load_image = typed(p.html_t, "loadImage", load_img_t)?;
     Ok(ListPlan {
         s_units,
         s_players,
@@ -246,6 +276,9 @@ pub(super) fn plan(code: &Bytecode, p: &Plan) -> Result<ListPlan> {
         str_last_index,
         ni32_t,
         str_len,
+        load_img,
+        load_img_t,
+        h_load_image,
     })
 }
 
@@ -351,6 +384,7 @@ pub(super) fn add_list(
         r.r(lp.ni32_t),
     );
     let (inner, line, tmp) = (r.r(p.str_t), r.r(p.str_t), r.r(p.str_t));
+    let loader = r.r(lp.load_img_t);
     let (wi, w_old, ax, ax_old, mat, x, xmin, tw, th, lh, fz) = (
         r.r(p.i32_),
         r.r(p.i32_),
@@ -495,6 +529,16 @@ pub(super) fn add_list(
         arg0: lbl,
         arg1: font,
         arg2: ev,
+    });
+    // lbl.loadImage = FmtText.loadImgText: <img src="icon/Ok"/> etc.
+    a.op(Opcode::StaticClosure {
+        dst: loader,
+        fun: lp.load_img,
+    });
+    a.op(Opcode::SetField {
+        obj: lbl,
+        field: lp.h_load_image,
+        src: loader,
     });
     a.op(Opcode::Call2 {
         dst: props,
@@ -1064,7 +1108,7 @@ pub(super) fn add_list(
     });
     concat(&mut a, line, line, tmp);
 
-    // Marker: acting is inside the colour already; done grey ×; waiting ·.
+    // Marker: acting is inside the colour already; done green check; waiting red cross.
     a.label("marker");
     a.jmp(
         Opcode::JEq {
@@ -1313,12 +1357,37 @@ mod tests {
     use super::*;
     use crate::asm::testutil::*;
 
-    /// The markers and the cut suffix are in the "default" font's charset
-    /// (eb_garamond_medium.fnt has U+00BB, U+00D7, U+00B7, no U+25B6 / U+2713 / U+2022 / U+2026).
+    /// The text markers are in the "default" font's charset (eb_garamond_medium.fnt
+    /// has U+00BB, no U+2713 / U+2022 / U+2026); done / waiting are icon <img> tags.
     #[test]
     fn markers_are_latin1() {
         for m in [ACTING, DONE, WAITING, CUT] {
             assert!(m.chars().all(|c| (c as u32) < 0x100), "{m}");
+        }
+        assert!(DONE.contains("\"icon/Ok\""), "{DONE}");
+        assert!(WAITING.contains("\"icon/Cancel\""), "{WAITING}");
+    }
+
+    /// The list label gets FmtText.loadImgText as its loadImage, and the icon
+    /// markers are emitted.
+    #[test]
+    fn list_loads_icons() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let mut code = read(&image);
+        let p = super::super::plan(&code).expect("base plan");
+        let lp = plan(&code, &p).expect("list plan");
+        super::super::patch_timeline_hud(&mut code);
+        assert!(code.functions.iter().any(|f| {
+            f.ops.windows(2).any(|w| {
+                matches!(w[0], Opcode::StaticClosure { fun, .. } if fun == lp.load_img)
+                    && matches!(w[1], Opcode::SetField { field, .. } if field == lp.h_load_image)
+            })
+        }));
+        for m in [DONE, WAITING] {
+            assert!(code.strings.iter().any(|x| x.as_str() == m), "{m}");
         }
     }
 
