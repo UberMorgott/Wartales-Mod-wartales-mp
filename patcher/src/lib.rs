@@ -32,7 +32,8 @@
 // lists a shared helper once (see tip_overflow.rs), and so transient item/skill tooltip decorations
 // cannot intercept their anchor's mouse events (see tooltip_input.rs), and so a censer's item tooltip without a unit no
 // longer throws every frame and stalls the inventory grid (see censer_tip.rs), and so a co-op ping lands where
-// the pinging player's cursor is and, in battle, makes the pinged cell blink orange for everyone (see
+// the pinging player's cursor is and, in battle, makes the pinged cell (or the pinged unit's footprint and outline)
+// blink in the pinging player's nickname color for everyone instead of the vanilla ripple fx (see
 // ping_cell.rs), and so in battle the timeline's first diamond shows the acting player unit's portrait under its
 // player's nickname, with a co-op player status list (acting / done / waiting) above and left of it
 // (see timeline_hud.rs, timeline_list.rs), and so the customize screen logs its 2D
