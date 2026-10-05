@@ -345,6 +345,21 @@ session is not bricked. The shim now writes every line of a multi-line game
 message (exception + "Called from" stack) and continues long lines instead of
 cutting them at 300 characters. Skipped (logged) per part on mismatch.
 
+**Camp: any unit** (`src/camp_any_unit.rs`): in co-op camp only a unit's
+owner could drag it, assign it to a camp tool or move it between camp and
+reserve: four client-side UI gates call `st.Unit.isControllable()`, which
+outside battle is `isOwnedBy(game.me)`. Those four calls
+(`CampEntryEntity.canDrag`, CampEntryEntity.hx:739; the camp window's reserve
+thumbnail tip and click closures, CampMode.hx:115 and :137; `Camp.removeUnit`,
+Camp.hx:1338) now call `isPlayer()` (owner != null), so any player may move,
+assign or reserve any party unit. The host RPCs behind them
+(`GridData.netMoveEntry`, `Camp.sendToCamp` / `sendToReserve`) check no
+ownership, so nothing changes on the host side; ownership itself is unchanged.
+Single player is unaffected (`me` owns every party unit). `isControllable`
+itself, battle control, item actions and the unit sheet keep their owner
+checks. Sites are found by debug position; exactly four are required, else the
+pass is skipped (logged).
+
 ## Install
 
 Two ways, pick one:

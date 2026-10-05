@@ -46,12 +46,14 @@
 // never waits forever for a player who left before reporting ready (see ready_start.rs), and so
 // an exception inside a domkit style pass no longer leaves every later UI action throwing
 // "Infinite loop in apply style", and a failing game-over window is logged and replaced by
-// the pause menu (see style_guard.rs).
+// the pause menu (see style_guard.rs), and so in co-op camp any player may move any party unit, assign it to a
+// camp tool and send it between camp and reserve (see camp_any_unit.rs).
 
 mod activity_diag;
 mod activity_injury;
 mod asm;
 mod barrier;
+mod camp_any_unit;
 mod camp_choice;
 mod camp_talk;
 mod career_plan;
@@ -108,6 +110,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     force_leave::patch_force_leave(&mut code);
     npc_talk::patch_npc_talk(&mut code);
     camp_talk::patch_camp_talk(&mut code);
+    camp_any_unit::patch_camp_any_unit(&mut code);
     camp_choice::patch_camp_choice(&mut code);
     hold_speed::patch_hold_speed(&mut code);
     job_xp::patch_job_xp(&mut code);
