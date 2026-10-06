@@ -42,7 +42,7 @@
 //       events (this checkEvents lets them on to the scene unless cleared:
 //       moves hovered the world, the release clicked a town); a release
 //       without any move passes on as a click.
-//   Windows: on each windowRoot reflow, default-cursor interactives of the
+//   Windows: on each windowRoot reflow of a modal (draggable) window, default-cursor interactives of the
 //       title row (top HEADER_PX of the window) get propagateEvents, so a push
 //       on the title reaches the window's drag; buttons (cursor: button) stay.
 //   mpDragRestore(obj, follow, key) applies the saved offset, if any.
@@ -2311,6 +2311,7 @@ fn add_win_reflow(
     head: RefFun,
 ) -> Result<RefFun> {
     let f0 = float_const(code, 0.0);
+    let k_none = int_const(code, c.modal_none);
     let k0 = int_const(code, 0);
     let mut r = Regs(vec![c.win_t]);
     let win = Reg(0);
@@ -2354,8 +2355,35 @@ fn add_win_reflow(
         fun: clamp,
         arg0: win,
     });
-    // Title row: pushes on its non-button elements reach the drag.
-    let (zf, wit) = (r.r(c.f64_t), r.r(c.inter_t));
+    // Title row: pushes on its non-button elements reach the drag. Only for
+    // windows that can be dragged (modal): the HUD (GameUI is a ui.Window,
+    // modal None) keeps its pushes where they were.
+    let (zf, wit, md, mi, kn) = (
+        r.r(c.f64_t),
+        r.r(c.inter_t),
+        r.r(c.modal_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+    );
+    a.op(Opcode::Field {
+        dst: md,
+        obj: win,
+        field: c.modal,
+    });
+    a.jmp(Opcode::JNull { reg: md, offset: 0 }, "nohead");
+    a.op(Opcode::EnumIndex { dst: mi, value: md });
+    a.op(Opcode::Int {
+        dst: kn,
+        ptr: k_none,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: mi,
+            b: kn,
+            offset: 0,
+        },
+        "nohead",
+    );
     a.op(Opcode::Float { dst: zf, ptr: f0 });
     a.op(Opcode::Field {
         dst: wit,
@@ -2369,6 +2397,7 @@ fn add_win_reflow(
         arg1: zf,
         arg2: wit,
     });
+    a.label("nohead");
     a.op(Opcode::Field {
         dst: ff,
         obj: win,
