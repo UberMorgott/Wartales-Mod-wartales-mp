@@ -54,7 +54,8 @@
 //              c = getConst("PlayerColor" + player.getColor()).color;
 //              o = b.addSocle(load("prefabs/huds/orangeSquare.prefab"), center,
 //                             0.01, size, 0, 0.85);
-//              every ColorSet shader of o's materials: color__ = rgb(c);
+//              every pass p of o's materials holding a ColorSet:
+//                  p.removeShaders(ColorSet); p.addShader(new ColorSet(c));
 //              game.globalEvent.wait(3, o.remove);
 //              game.globalEvent.waitUntil(pingBlink.bind({o: o, u: u, c: c}));
 //          } catch (_) { return false; }
@@ -71,7 +72,12 @@
 //      peers agree. orangeSquare.prefab is the game's own (unused) one-cell
 //      overlay: an Overlay pass with depthTest Always and a ColorSet shader
 //      (gfx/shader/ColorSet.hx), so the square shows over terrain, props and
-//      units from any camera and takes any color. addSocle is how the game
+//      units from any camera and takes any color. That ColorSet must not be
+//      tinted in place: the prefab is cached, its DynamicShader clones copy
+//      `template`, makeShader returns template.shader.clone(), and
+//      hxsl.Shader.clone is `return this` (ColorSet has no override), so ONE
+//      instance, synced to the prefab's orange, sits in every square. Each
+//      square gets its own ColorSet(c) (amount 1) instead. addSocle is how the game
 //      places its other cell squares, as its own object: the player's move /
 //      attack previews are untouched.
 //
@@ -481,22 +487,23 @@ struct CellPlan {
     socle_pindex: RefField,
     get_pos: RefFun,
     set_outline: RefFun,
-    // tint: ColorSet shader of the square's materials
+    // tint: each pass holding the prefab's (shared) ColorSet gets its own
+    // new ColorSet(color) instead
     get_mats: RefFun,
     raw_arr_t: RefType,
     a_len: RefField,
     a_arr: RefField,
     mat_t: RefType,
     m_pass: (RefField, RefType),
+    p_next: RefField,
     get_shader: RefFun,
+    remove_shaders: RefFun,
+    add_shader: RefFun,
     shader_t: RefType,
     cset_t: RefType,
+    cset_ctor: RefFun,
     cset_cls: RefGlobal,
     cset_cls_t: RefType,
-    cs_color: RefField,
-    vec_t: RefType,
-    vec_ctor: RefFun,
-    ref_f64: RefType,
     dbg_file: usize,
 }
 
@@ -518,11 +525,6 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
         "ref<bool>",
         |t| matches!(t, Type::Ref(x) if *x == bool_),
     )?;
-    let ref_f64 = prim_type(
-        code,
-        "ref<f64>",
-        |t| matches!(t, Type::Ref(x) if *x == f64_),
-    )?;
     let str_t = obj_type(code, "String")?;
     let ctrl_t = obj_type(code, "st.Controller")?;
     let player_t = obj_type(code, "ent.BasePlayer")?;
@@ -538,7 +540,6 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     let mat_t = obj_type(code, "h3d.mat.Material")?;
     let shader_t = obj_type(code, "hxsl.Shader")?;
     let cset_t = obj_type(code, "gfx.shader.ColorSet")?;
-    let vec_t = obj_type(code, "h3d.VectorImpl")?;
 
     let c_game = field(code, ctrl_t, "game")?;
     let g_battle = field(code, game_t, "battle")?;
@@ -568,9 +569,9 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     }
     let raw_arr_t = at;
     let m_pass = field(code, mat_t, "passes")?;
-    let (cs_color, cct) = field(code, cset_t, "color__")?;
-    if cct != vec_t {
-        bail!("ColorSet.color__ is not a vector");
+    let (p_next, nt) = field(code, m_pass.1, "nextPass")?;
+    if nt != m_pass.1 {
+        bail!("Pass.nextPass is not a Pass");
     }
 
     let want = |f: RefFun, what: &str, args: &[RefType], ret: RefType| -> Result<()> {
@@ -623,6 +624,13 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
         bail!("unexpected Pass.getShader signature");
     }
     let (cset_cls, cset_cls_t) = class_global(code, "gfx.shader.ColorSet")?;
+    let remove_shaders = proto(code, m_pass.1, "removeShaders")?;
+    want(remove_shaders, "Pass.removeShaders", &[m_pass.1, ga[1]], void_)?;
+    let add_shader = proto(code, m_pass.1, "addShader")?;
+    want(add_shader, "Pass.addShader", &[m_pass.1, shader_t], shader_t)?;
+    // new ColorSet(?color: Int): color__ = rgb(color), amount = 1
+    let cset_ctor = method(code, cset_t, "__constructor__")?.findex;
+    want(cset_ctor, "ColorSet.__constructor__", &[cset_t, ref_i32], void_)?;
     let wait = proto(code, ev_t, "wait")?;
     let (wa, wr) = sig(code, wait)?;
     let wait_until = proto(code, ev_t, "waitUntil")?;
@@ -776,31 +784,6 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     if fname(code, *load_cache) != "loadCache" {
         bail!("ping__impl: the fx load is not loadCache");
     }
-    // The vanilla tint vectors: new h3d.VectorImpl(&r, &g, &b).
-    let ctors: Vec<RefFun> = o
-        .iter()
-        .filter_map(|x| match x {
-            Opcode::Call4 { fun, arg0, .. }
-                if imp.regs[arg0.0 as usize] == vec_t && fname(code, *fun) == "__constructor__" =>
-            {
-                Some(*fun)
-            }
-            _ => None,
-        })
-        .collect();
-    let Some(&vec_ctor) = ctors.first() else {
-        bail!("ping__impl: no h3d.VectorImpl constructor call");
-    };
-    if ctors.iter().any(|c| *c != vec_ctor) {
-        bail!("ping__impl: vector constructor calls differ");
-    }
-    want(
-        vec_ctor,
-        "VectorImpl.__constructor__",
-        &[vec_t, ref_f64, ref_f64, ref_f64],
-        void_,
-    )?;
-
     let ret_at = o.len() - 1;
     let Opcode::Ret { ret: ret_reg } = o[ret_at] else {
         bail!("ping__impl does not end in Ret");
@@ -902,13 +885,13 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
         m_pass,
         get_shader,
         shader_t,
+        p_next,
+        remove_shaders,
+        add_shader,
         cset_t,
+        cset_ctor,
         cset_cls,
         cset_cls_t,
-        cs_color,
-        vec_t,
-        vec_ctor,
-        ref_f64,
         dbg_file: debug_file(code, "src/st/Controller.hx")?,
     })
 }
@@ -1177,21 +1160,14 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         string_ref(code, "u"),
         string_ref(code, "c"),
     );
-    let (f0, fh, fz, fa, fd, f255) = (
+    let (f0, fh, fz, fa, fd) = (
         float_const(code, 0.0),
         float_const(code, 0.5),
         float_const(code, 0.01),
         float_const(code, ALPHA),
         float_const(code, DURATION),
-        float_const(code, 1.0 / 255.0),
     );
-    let (i0, i1, i8, i16, i255) = (
-        int_const(code, 0),
-        int_const(code, 1),
-        int_const(code, 8),
-        int_const(code, 16),
-        int_const(code, 255),
-    );
+    let (i0, i1) = (int_const(code, 0), int_const(code, 1));
     let mut r = Regs(vec![p.ctrl_t, p.f64_, p.f64_, p.player_t]);
     let (ctrl, x, y, player) = (Reg(0), Reg(1), Reg(2), Reg(3));
     let res = r.r(p.bool_);
@@ -1224,7 +1200,7 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         r.r(p.f64_),
         r.r(p.i32_),
     );
-    let (ps, cc, rcc, bys, s2, key, cv, oc, ci, sh, msk) = (
+    let (ps, cc, rcc, bys, s2, key, cv, oc, ci) = (
         r.r(p.str_t),
         r.r(p.i32_),
         r.r(p.ref_i32),
@@ -1234,10 +1210,7 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         r.r(p.const_t),
         r.r(p.cv_color.1),
         r.r(p.i32_),
-        r.r(p.i32_),
-        r.r(p.i32_),
     );
-    let (red, green, blue, k255) = (r.r(p.f64_), r.r(p.f64_), r.r(p.f64_), r.r(p.f64_));
     let (loader, cls, hres, rs, z, rot, alpha, ob) = (
         r.r(p.loader_t),
         r.r(p.res_cls_t),
@@ -1248,11 +1221,7 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         r.r(p.f64_),
         r.r(p.obj_t),
     );
-    let (vec, rr, rg, rb, tb, rtb, mats, ki, len, raw, dv, m, pass, ccls, shd, cset) = (
-        r.r(p.vec_t),
-        r.r(p.ref_f64),
-        r.r(p.ref_f64),
-        r.r(p.ref_f64),
+    let (tb, rtb, mats, ki, len, raw, dv, m, pass, ccls, shd, cset) = (
         r.r(p.bool_),
         r.r(p.ref_bool),
         r.r(p.arr_t),
@@ -1559,38 +1528,6 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
     });
     a.jmp(Opcode::JNull { reg: oc, offset: 0 }, "untrap");
     a.op(Opcode::SafeCast { dst: ci, src: oc });
-    a.op(Opcode::Float {
-        dst: k255,
-        ptr: f255,
-    });
-    a.op(Opcode::Int {
-        dst: msk,
-        ptr: i255,
-    });
-    for (shift, ch) in [(Some(i16), red), (Some(i8), green), (None, blue)] {
-        match shift {
-            Some(s) => {
-                a.op(Opcode::Int { dst: sh, ptr: s });
-                a.op(Opcode::SShr {
-                    dst: sh,
-                    a: ci,
-                    b: sh,
-                });
-            }
-            None => a.op(Opcode::Mov { dst: sh, src: ci }),
-        }
-        a.op(Opcode::And {
-            dst: sh,
-            a: sh,
-            b: msk,
-        });
-        a.op(Opcode::ToSFloat { dst: ch, src: sh });
-        a.op(Opcode::Mul {
-            dst: ch,
-            a: ch,
-            b: k255,
-        });
-    }
     a.op(Opcode::Call0 {
         dst: loader,
         fun: p.get_loader,
@@ -1624,22 +1561,9 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         args: vec![battle, rs, cx, cy, z, sc, rot, alpha],
     });
     a.jmp(Opcode::JNull { reg: ob, offset: 0 }, "untrap");
-    // tint: every ColorSet shader of the square's materials gets the color
-    a.op(Opcode::New { dst: vec });
-    a.op(Opcode::Ref { dst: rr, src: red });
-    a.op(Opcode::Ref {
-        dst: rg,
-        src: green,
-    });
-    a.op(Opcode::Ref { dst: rb, src: blue });
-    a.op(Opcode::Call4 {
-        dst: v,
-        fun: p.vec_ctor,
-        arg0: vec,
-        arg1: rr,
-        arg2: rg,
-        arg3: rb,
-    });
+    // tint: every pass of the square's materials that holds a ColorSet (the
+    // prefab's, one instance shared by all squares) gets its own
+    // new ColorSet(color) in its place
     a.op(Opcode::Null { dst: nul_arr });
     a.op(Opcode::Bool {
         dst: tb,
@@ -1693,6 +1617,7 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         obj: m,
         field: p.m_pass.0,
     });
+    a.loop_head("pass");
     a.jmp(
         Opcode::JNull {
             reg: pass,
@@ -1710,23 +1635,35 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         arg0: pass,
         arg1: ccls,
     });
-    a.op(Opcode::SafeCast {
-        dst: cset,
-        src: shd,
+    a.jmp(Opcode::JNull { reg: shd, offset: 0 }, "next");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: p.remove_shaders,
+        arg0: pass,
+        arg1: ccls,
     });
-    a.jmp(
-        Opcode::JNull {
-            reg: cset,
-            offset: 0,
-        },
-        "mat",
-    );
-    a.op(Opcode::SetField {
-        obj: cset,
-        field: p.cs_color,
-        src: vec,
+    a.op(Opcode::New { dst: cset });
+    a.op(Opcode::Mov { dst: cc, src: ci });
+    a.op(Opcode::Ref { dst: rcc, src: cc });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: p.cset_ctor,
+        arg0: cset,
+        arg1: rcc,
     });
-    a.jmp(Opcode::JAlways { offset: 0 }, "mat");
+    a.op(Opcode::Call2 {
+        dst: shd,
+        fun: p.add_shader,
+        arg0: pass,
+        arg1: cset,
+    });
+    a.label("next");
+    a.op(Opcode::Field {
+        dst: pass,
+        obj: pass,
+        field: p.p_next,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "pass");
     a.label("tinted");
     // blink state { o, u, c }; removed after DURATION, blinking until then
     a.op(Opcode::New { dst: stv });
@@ -1970,6 +1907,9 @@ mod tests {
         };
         assert_eq!(calls(cell, cp.unit_there), 1);
         assert_eq!(calls(cell, cp.get_shader), 1);
+        assert_eq!(calls(cell, cp.remove_shaders), 1);
+        assert_eq!(calls(cell, cp.cset_ctor), 1);
+        assert_eq!(calls(cell, cp.add_shader), 1);
         assert_eq!(calls(cell, sound.findex), 1);
         assert_eq!(calls(blink, cp.set_outline), 3);
         assert_eq!(calls(sound, cp.sfx), 1);
@@ -1983,6 +1923,133 @@ mod tests {
         assert!(cell_plan(&again).is_err());
         patch_ping_cell(&mut again);
         assert!(write(&again) == patched);
+    }
+
+    /// pingCell run in the interpreter, for pingers 1..4: each square's pass
+    /// that holds the prefab's (shared) ColorSet gets it removed and its own
+    /// new ColorSet(PlayerColor<n>) added; passes without one are untouched;
+    /// the shared instance is never written.
+    #[test]
+    fn square_gets_own_color_per_pinger() {
+        use crate::testsim::{Sim, V};
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let cp = cell_plan(&orig).expect("cell plan");
+        let orig_n = orig.functions.len();
+        let mut code = read(&image);
+        patch_ping_cell(&mut code);
+        let n = code.functions.len();
+        let (sound, cell) = (code.functions[n - 3].findex, code.functions[n - 1].findex);
+        let floor = cp.floor;
+        // data.cdb PlayerColor1..4
+        let colors = [0x85c1e3, 0xd3b25e, 0xafc073, 0xb5aade];
+        for (k, want) in colors.into_iter().enumerate() {
+            let pinger = k as i32 + 1;
+            let p = &cp;
+            let mut sim = Sim::new(
+                &code,
+                orig_n,
+                move |c, f, a| {
+                    let name = |s: &'static str, a: &[V], c: &mut crate::testsim::Core| {
+                        c.log.push((s, a.to_vec()));
+                    };
+                    Some(if f == floor {
+                        let V::F(x) = a[0] else { panic!("floor {a:?}") };
+                        V::I(x.floor() as i32)
+                    } else if f == p.get_color {
+                        V::I(pinger)
+                    } else if f == p.itos {
+                        let V::I(x) = a[0] else { panic!("itos") };
+                        V::S(x.to_string())
+                    } else if f == p.alloc_str {
+                        a[0].clone()
+                    } else if f == p.add_str {
+                        let (V::S(x), V::S(y)) = (&a[0], &a[1]) else { panic!("add {a:?}") };
+                        V::S(format!("{x}{y}"))
+                    } else if f == p.get_const {
+                        let V::S(key) = &a[0] else { panic!("getConst") };
+                        let i = key.strip_prefix("PlayerColor").unwrap().parse::<usize>().unwrap();
+                        let cv = c.obj(&[(p.cv_color.0, V::I(colors[i - 1]))]);
+                        name("getConst", a, c);
+                        cv
+                    } else if f == p.unit_there {
+                        V::Null
+                    } else if f == p.get_loader || f == p.load_cache {
+                        c.obj(&[])
+                    } else if f == p.add_socle {
+                        // material: overlay pass (shared ColorSet) -> second pass (none)
+                        let shared = c.map("t", "shared");
+                        let p2 = c.obj(&[]);
+                        let p1 = c.obj(&[(p.p_next, p2.clone())]);
+                        c.key_set(&p1, "cs".into(), shared);
+                        let m = c.obj(&[(p.m_pass.0, p1.clone())]);
+                        let mats = c.arr(p.a_len, p.a_arr, vec![m]);
+                        let o = c.obj(&[]);
+                        c.put("t", "mats", mats);
+                        c.put("t", "p1", p1);
+                        c.put("t", "p2", p2);
+                        o
+                    } else if f == p.get_mats {
+                        c.map("t", "mats")
+                    } else if f == p.get_shader {
+                        c.key_get(&a[0], "cs")
+                    } else if f == p.remove_shaders {
+                        name("removeShaders", a, c);
+                        c.key_set(&a[0], "cs".into(), V::Null);
+                        V::Null
+                    } else if f == p.cset_ctor {
+                        name("ColorSet", a, c);
+                        c.key_set(&a[0], "color".into(), a[1].clone());
+                        V::Null
+                    } else if f == p.add_shader {
+                        name("addShader", a, c);
+                        c.key_set(&a[0], "cs".into(), a[1].clone());
+                        a[1].clone()
+                    } else if f == p.wait || f == p.wait_until || f == sound {
+                        V::Null
+                    } else {
+                        return None;
+                    })
+                },
+                |_, _, _| panic!("no virtual call expected"),
+            );
+            let shared = sim.c.obj(&[]);
+            sim.c.put("t", "shared", shared.clone());
+            let grid = sim.c.obj(&[
+                (cp.gr_cell, V::F(1.0)),
+                (cp.gr_w, V::I(10)),
+                (cp.gr_h, V::I(10)),
+            ]);
+            let battle = sim.c.obj(&[(cp.b_grid.0, grid)]);
+            let ev = sim.c.obj(&[]);
+            let game = sim.c.obj(&[(cp.g_battle.0, battle), (cp.g_event.0, ev)]);
+            let ctrl = sim.c.obj(&[(cp.c_game.0, game)]);
+            let player = sim.c.obj(&[]);
+            let r = sim.run(cell, vec![ctrl, V::F(2.5), V::F(3.5), player]);
+            assert_eq!(r, V::B(true), "pinger {pinger}");
+
+            let key = sim.c.take("getConst");
+            assert_eq!(key, vec![vec![V::S(format!("PlayerColor{pinger}"))]]);
+            let (p1, p2) = (sim.c.map("t", "p1"), sim.c.map("t", "p2"));
+            assert_eq!(sim.c.take("removeShaders").len(), 1);
+            let made = sim.c.take("ColorSet");
+            assert_eq!(made.len(), 1, "pinger {pinger}");
+            assert_eq!(made[0][1], V::I(want), "pinger {pinger}: color passed");
+            let own = made[0][0].clone();
+            assert_ne!(own, shared);
+            assert_eq!(sim.c.take("addShader"), vec![vec![p1.clone(), own.clone()]]);
+            assert_eq!(sim.c.key_get(&p1, "cs"), own);
+            assert_eq!(sim.c.key_get(&p2, "cs"), V::Null);
+            // the shared prefab instance is never written
+            assert!(sim.c.heap[match shared {
+                V::O(i) => i,
+                _ => unreachable!(),
+            }]
+            .is_empty());
+        }
     }
 
     /// The color source is the one the nickname uses, and the sound id exists.

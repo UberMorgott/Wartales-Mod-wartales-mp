@@ -189,7 +189,12 @@ impl<'a> Sim<'a> {
                     let V::F(x) = r[rr(src)] else { panic!("ToInt") };
                     r[rr(dst)] = V::I(x as i32)
                 }
-                Opcode::ToSFloat { dst, src } => r[rr(dst)] = V::F(num(&r[rr(src)]) as f64),
+                Opcode::ToSFloat { dst, src } => {
+                    r[rr(dst)] = match r[rr(src)] {
+                        V::F(x) => V::F(x),
+                        ref o => V::F(num(o) as f64),
+                    }
+                }
                 Opcode::GetGlobal { dst, global } => r[rr(dst)] = self.global(*global),
                 Opcode::SetGlobal { global, src } => {
                     self.c.globals.insert(global.0, r[rr(src)].clone());
@@ -226,6 +231,27 @@ impl<'a> Sim<'a> {
                     dst, value, field, ..
                 } => r[rr(dst)] = self.c.key_get(&r[rr(value)], &format!("e{}", field.0)),
                 Opcode::Incr { dst } => r[rr(dst)] = V::I(num(&r[rr(dst)]) + 1),
+                // A ref is passed by value: the callee is always a stub.
+                Opcode::Ref { dst, src } => r[rr(dst)] = r[rr(src)].clone(),
+                Opcode::Add { dst, a, b }
+                | Opcode::Sub { dst, a, b }
+                | Opcode::Mul { dst, a, b }
+                | Opcode::SDiv { dst, a, b }
+                | Opcode::SMod { dst, a, b }
+                    if matches!(r[rr(a)], V::F(_)) =>
+                {
+                    let (V::F(x), V::F(y)) = (&r[rr(a)], &r[rr(b)]) else {
+                        panic!("float op on {:?}", r[rr(b)])
+                    };
+                    r[rr(dst)] = V::F(match op {
+                        Opcode::Add { .. } => x + y,
+                        Opcode::Sub { .. } => x - y,
+                        Opcode::Mul { .. } => x * y,
+                        Opcode::SDiv { .. } => x / y,
+                        _ => x % y,
+                    })
+                }
+                Opcode::Mul { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) * num(&r[rr(b)])),
                 Opcode::Add { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) + num(&r[rr(b)])),
                 Opcode::Sub { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) - num(&r[rr(b)])),
                 Opcode::And { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) & num(&r[rr(b)])),
@@ -287,7 +313,11 @@ impl<'a> Sim<'a> {
                 | Opcode::JSLte { a, b, offset }
                 | Opcode::JSLt { a, b, offset }
                 | Opcode::JSGt { a, b, offset } => {
-                    let (x, y) = (num(&r[rr(a)]), num(&r[rr(b)]));
+                    let f = |v: &V| match v {
+                        V::F(x) => *x,
+                        o => num(o) as f64,
+                    };
+                    let (x, y) = (f(&r[rr(a)]), f(&r[rr(b)]));
                     let t = match op {
                         Opcode::JSGte { .. } => x >= y,
                         Opcode::JSLte { .. } => x <= y,
