@@ -32,9 +32,19 @@
 // inventory panels keyed "AllInv#<slot>"):
 //   mpDragBegin(obj, follow, key)   on push: a second push on the same object
 //       within DOUBLE_S resets it (offset 0 on obj and follow, saved key
-//       removed); otherwise starts a scene capture. Moves set obj's (and
-//       follow's) offsets in its parent flow to mouse - start, the mouse clamped
-//       to the scene; release / release-outside stops the capture and saves.
+//       removed); otherwise starts a scene capture (with an onCancel: a capture
+//       taken over / stopped by other code drops the drag and saves). Moves set
+//       obj's (and follow's) offsets in its parent flow to mouse - start, the
+//       mouse clamped to the scene, and shift x/y by the change at once: no
+//       getProperties (its needReflow cascades a reflow up every parent flow,
+//       the whole HUD for a panel), no storage write. Release / release-outside
+//       stops the capture and saves. The capture consumes the drag's mouse
+//       events (this checkEvents lets them on to the scene unless cleared:
+//       moves hovered the world, the release clicked a town); a release
+//       without any move passes on as a click.
+//   Windows: on each windowRoot reflow, default-cursor interactives of the
+//       title row (top HEADER_PX of the window) get propagateEvents, so a push
+//       on the title reaches the window's drag; buttons (cursor: button) stay.
 //   mpDragRestore(obj, follow, key) applies the saved offset, if any.
 //   mpDragClamp(obj)  for an onAfterReflow: a visible, non-absolute `obj`
 //       with a non-zero offset in its parent flow is pushed back so at least
@@ -78,6 +88,10 @@ const N_RESTORE: &str = "mpDragRestore";
 const N_CLAMP: &str = "mpDragClamp";
 const N_PANEL: &str = "mpDragPanel";
 const N_WIN_INSTALL: &str = "mpWinInstall";
+/// Functions appended by `api()` (report, save, restore, event, cancel, begin,
+/// clamp, panel push, panel, head, win reflow, win push, win install).
+#[cfg(test)]
+pub(crate) const API_FNS: usize = 13;
 
 /// The shared drag functions (findexes).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,6 +133,7 @@ struct Ctx {
     kind_t: RefType,
     modal_t: RefType,
     inter_t: RefType,
+    cursor_t: RefType,
     // fields
     parent: RefField,
     children: RefField,
@@ -141,6 +156,9 @@ struct Ctx {
     sc_h: RefField,
     kind: RefField,
     button: RefField,
+    propagate: RefField,
+    cursor: RefField,
+    it_propagate: RefField,
     modal: RefField,
     frame_flow: RefField,
     window_root: RefField,
@@ -166,11 +184,15 @@ struct Ctx {
     get_ud: RefFun,
     set_ud: RefFun,
     sys_time: RefFun,
+    is_of_type: RefFun,
+    inter_cls: RefGlobal,
     // enum indexes
+    ev_push: i32,
     ev_release: i32,
     ev_move: i32,
     ev_release_out: i32,
     modal_none: i32,
+    cursor_default: i32,
     dbg_file: usize,
 }
 
@@ -267,10 +289,24 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
     let sc_h = typed(code, scene_t, "height", i32_t)?;
     let (kind, kind_t) = field(code, ev_t, "kind")?;
     let button = typed(code, ev_t, "button", i32_t)?;
+    let propagate = typed(code, ev_t, "propagate", bool_t)?;
     let (modal, modal_t) = field(code, win_t, "modal")?;
     let frame_flow = typed(code, win_t, "frameFlow", flow_t)?;
     let window_root = typed(code, win_t, "windowRoot", flow_t)?;
     let (on_push, push_t) = field(code, inter_t, "onPush")?;
+    let (cursor, cursor_t) = field(code, inter_t, "cursor")?;
+    let it_propagate = typed(code, inter_t, "propagateEvents", bool_t)?;
+    let cursor_default = enum_index(code, cursor_t, "Default")?;
+    let is_of_type = static_fn(code, "$Std", "isOfType")?.findex;
+    want_sig(code, is_of_type, "Std.isOfType", &[dyn_t, dyn_t], bool_t)?;
+    // HL stores an object's class global 1-based (0 = none).
+    let inter_cls = obj(code, inter_t)?
+        .global
+        .0
+        .checked_sub(1)
+        .filter(|&g| g < code.globals.len())
+        .map(RefGlobal)
+        .context("h2d.Interactive: no class global")?;
     if !matches!(push_t.as_fun(code), Some(t) if t.args == [ev_t] && t.ret == void_t) {
         bail!("Interactive.onPush is not (hxd.Event) -> void");
     }
@@ -351,6 +387,7 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
     let sys_time = native(code, "sys_time")?;
     want_sig(code, sys_time, "sys_time", &[], f64_t)?;
 
+    let ev_push = enum_index(code, kind_t, "EPush")?;
     let ev_release = enum_index(code, kind_t, "ERelease")?;
     let ev_move = enum_index(code, kind_t, "EMove")?;
     let ev_release_out = enum_index(code, kind_t, "EReleaseOutside")?;
@@ -379,6 +416,7 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         kind_t,
         modal_t,
         inter_t,
+        cursor_t,
         parent,
         children,
         x,
@@ -400,6 +438,9 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         sc_h,
         kind,
         button,
+        propagate,
+        cursor,
+        it_propagate,
         modal,
         frame_flow,
         window_root,
@@ -424,10 +465,14 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         get_ud,
         set_ud,
         sys_time,
+        is_of_type,
+        inter_cls,
+        ev_push,
         ev_release,
         ev_move,
         ev_release_out,
         modal_none,
+        cursor_default,
         dbg_file: debug_file(code, "src/ui/Window.hx")?,
     })
 }
@@ -443,6 +488,8 @@ struct Globals {
     dy: RefGlobal,
     last: RefGlobal,
     last_t: RefGlobal,
+    /// The current drag has moved (its release is consumed).
+    moved: RefGlobal,
     logs: RefGlobal,
     prefix: RefGlobal,
     err: RefGlobal,
@@ -532,6 +579,7 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         dy: new_global(code, c.f64_t),
         last: new_global(code, c.obj_t),
         last_t: new_global(code, c.f64_t),
+        moved: new_global(code, c.bool_t),
         logs: new_global(code, c.i32_t),
         prefix: str_global(code, c.str_t, PREFIX),
         err: str_global(code, c.str_t, S_ERR),
@@ -541,7 +589,8 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
     let save = add_save(code, c, &g, report)?;
     let restore = add_restore(code, c, &g, report)?;
     let event = add_event(code, c, &g, report, save)?;
-    let begin = add_begin(code, c, &g, report, save, event)?;
+    let cancel = add_cancel(code, c, &g, report, save)?;
+    let begin = add_begin(code, c, &g, report, save, event, cancel)?;
     let clamp = add_clamp(code, c, report)?;
     let panel_push = add_panel_push(code, c, begin)?;
     let panel = add_panel(
@@ -554,7 +603,8 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         panel_push.0,
         panel_push.1,
     )?;
-    let win_reflow = add_win_reflow(code, c, report, clamp)?;
+    let head = add_head(code, c)?;
+    let win_reflow = add_win_reflow(code, c, report, clamp, head)?;
     let win_push = add_win_push(code, c, report, begin)?;
     let win_install = add_win_install(code, c, report, restore, win_push, win_reflow)?;
     for (f, n) in [
@@ -939,7 +989,140 @@ fn clamp_mouse(a: &mut Asm, m: Reg, zero: Reg, size: Reg, l1: &'static str, l2: 
     a.label(l2);
 }
 
+/// `pr = fl.properties[fl.getChildIndex(obj)]`, read without `getProperties`:
+/// that one sets `needReflow`, and `set_needReflow` (Flow.hx:696) calls
+/// `parentContainer.contentChanged`, so every ancestor flow (the whole HUD for a
+/// panel) would reflow. Jumps to `out` when obj has no properties in `fl`.
+#[allow(clippy::too_many_arguments)]
+fn props_raw(
+    a: &mut Asm,
+    c: &Ctx,
+    fl: Reg,
+    obj: Reg,
+    t: (Reg, Reg, Reg, Reg, Reg, Reg),
+    pr: Reg,
+    out: &'static str,
+) {
+    let (idx, n, z, ps, raw, d) = t;
+    a.op(Opcode::Call2 {
+        dst: idx,
+        fun: c.child_index,
+        arg0: fl,
+        arg1: obj,
+    });
+    a.op(Opcode::Field {
+        dst: ps,
+        obj: fl,
+        field: c.properties,
+    });
+    a.jmp(Opcode::JNull { reg: ps, offset: 0 }, out);
+    a.op(Opcode::Field {
+        dst: n,
+        obj: ps,
+        field: c.arr_len,
+    });
+    a.jmp(
+        Opcode::JSLt {
+            a: idx,
+            b: z,
+            offset: 0,
+        },
+        out,
+    );
+    a.jmp(
+        Opcode::JSGte {
+            a: idx,
+            b: n,
+            offset: 0,
+        },
+        out,
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: ps,
+        field: c.arr_arr,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: idx,
+    });
+    a.op(Opcode::UnsafeCast { dst: pr, src: d });
+    a.jmp(Opcode::JNull { reg: pr, offset: 0 }, out);
+}
+
+/// Moves `obj` to the offsets (ox, oy) right away: the flow offsets are set
+/// (a later reflow keeps the spot) and obj.x/y shift by the change, so the
+/// next sync draws it there without any reflow. Absolute children (the flow
+/// does not place them) jump to `skip`.
+#[allow(clippy::too_many_arguments)]
+fn shift(
+    a: &mut Asm,
+    c: &Ctx,
+    pr: Reg,
+    obj: Reg,
+    (ox, oy): (Reg, Reg),
+    (old, df, t, b): (Reg, Reg, Reg, Reg),
+    skip: &'static str,
+) {
+    a.op(Opcode::Field {
+        dst: b,
+        obj: pr,
+        field: c.is_abs,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, skip);
+    for (off, pos, o) in [(c.off_x, c.x, ox), (c.off_y, c.y, oy)] {
+        a.op(Opcode::Field {
+            dst: old,
+            obj: pr,
+            field: off,
+        });
+        a.op(Opcode::SetField {
+            obj: pr,
+            field: off,
+            src: o,
+        });
+        a.op(Opcode::Sub {
+            dst: old,
+            a: o,
+            b: old,
+        });
+        a.op(Opcode::ToSFloat { dst: df, src: old });
+        a.op(Opcode::Field {
+            dst: t,
+            obj,
+            field: pos,
+        });
+        a.op(Opcode::Add {
+            dst: t,
+            a: t,
+            b: df,
+        });
+        a.op(Opcode::SetField {
+            obj,
+            field: pos,
+            src: t,
+        });
+    }
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetField {
+        obj,
+        field: c.pos_changed,
+        src: b,
+    });
+}
+
 /// The scene capture callback `(hxd.Event) -> void`.
+///
+/// This SceneEvents.checkEvents sets `e.propagate = true` before calling the
+/// capture (SceneEvents.hx:358) and emits the event to the scene afterwards
+/// unless the callback clears it. Mouse events of a drag are consumed here:
+/// otherwise every move also reaches what lies under the cursor (world hover:
+/// raycast, accost cursor, `netOverEntity` RPC on a client) and the release
+/// lands on the world / a town as a click of its own.
 fn add_event(
     code: &mut Bytecode,
     c: &Ctx,
@@ -947,7 +1130,9 @@ fn add_event(
     report: RefFun,
     save: RefFun,
 ) -> Result<RefFun> {
-    let (k_move, k_rel, k_relo) = (
+    let (k0, k_push, k_move, k_rel, k_relo) = (
+        int_const(code, 0),
+        int_const(code, c.ev_push),
         int_const(code, c.ev_move),
         int_const(code, c.ev_release),
         int_const(code, c.ev_release_out),
@@ -965,13 +1150,14 @@ fn add_event(
         r.r(c.i32_t),
         r.r(c.i32_t),
     );
-    let (key, p, fl, pr, fp, fo) = (
+    let (key, p, fl, pr, fp, fo, b) = (
         r.r(c.str_t),
         r.r(c.obj_t),
         r.r(c.flow_t),
         r.r(c.fprops_t),
         r.r(c.fprops_t),
         r.r(c.obj_t),
+        r.r(c.bool_t),
     );
     let (mx, my, z, sz, dd, si, ox, oy) = (
         r.r(c.f64_t),
@@ -983,8 +1169,52 @@ fn add_event(
         r.r(c.i32_t),
         r.r(c.i32_t),
     );
+    let raw = (
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.arr_t),
+        r.r(c.raw_t),
+        r.r(c.dyn_t),
+    );
+    let tmp = (r.r(c.i32_t), r.r(c.f64_t), r.r(c.f64_t), b);
     let mut a = Asm::new();
     a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
+    a.op(Opcode::Field {
+        dst: kd,
+        obj: e,
+        field: c.kind,
+    });
+    a.jmp(Opcode::JNull { reg: kd, offset: 0 }, "out");
+    a.op(Opcode::EnumIndex { dst: ki, value: kd });
+    // Mouse buttons and moves stay with the drag; keys, wheel etc. pass on.
+    for (kc, to) in [
+        (k_push, "eat"),
+        (k_move, "eat"),
+        (k_rel, "eat"),
+        (k_relo, "eat"),
+    ] {
+        a.op(Opcode::Int { dst: k, ptr: kc });
+        a.jmp(
+            Opcode::JEq {
+                a: ki,
+                b: k,
+                offset: 0,
+            },
+            to,
+        );
+    }
+    a.jmp(Opcode::JAlways { offset: 0 }, "out");
+    a.label("eat");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::SetField {
+        obj: e,
+        field: c.propagate,
+        src: b,
+    });
     a.op(Opcode::GetGlobal {
         dst: obj,
         global: g.obj,
@@ -996,46 +1226,17 @@ fn add_event(
         },
         "stop",
     );
-    a.op(Opcode::Field {
-        dst: kd,
-        obj: e,
-        field: c.kind,
-    });
-    a.jmp(Opcode::JNull { reg: kd, offset: 0 }, "out");
-    a.op(Opcode::EnumIndex { dst: ki, value: kd });
-    a.op(Opcode::Int {
-        dst: k,
-        ptr: k_move,
-    });
-    a.jmp(
-        Opcode::JEq {
-            a: ki,
-            b: k,
-            offset: 0,
-        },
-        "move",
-    );
-    a.op(Opcode::Int { dst: k, ptr: k_rel });
-    a.jmp(
-        Opcode::JEq {
-            a: ki,
-            b: k,
-            offset: 0,
-        },
-        "release",
-    );
-    a.op(Opcode::Int {
-        dst: k,
-        ptr: k_relo,
-    });
-    a.jmp(
-        Opcode::JEq {
-            a: ki,
-            b: k,
-            offset: 0,
-        },
-        "release",
-    );
+    for (kc, to) in [(k_move, "move"), (k_rel, "release"), (k_relo, "release")] {
+        a.op(Opcode::Int { dst: k, ptr: kc });
+        a.jmp(
+            Opcode::JEq {
+                a: ki,
+                b: k,
+                offset: 0,
+            },
+            to,
+        );
+    }
     a.jmp(Opcode::JAlways { offset: 0 }, "out");
 
     // A capture without a drag object (should not happen): just stop it.
@@ -1044,6 +1245,22 @@ fn add_event(
     a.jmp(Opcode::JAlways { offset: 0 }, "out");
 
     a.label("release");
+    // A push without a move is a plain click: its release goes on to the scene.
+    a.op(Opcode::GetGlobal {
+        dst: b,
+        global: g.moved,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "rel");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetField {
+        obj: e,
+        field: c.propagate,
+        src: b,
+    });
+    a.label("rel");
     stop_drag(&mut a, c, g, v, nobj, sc, "save");
     a.label("save");
     a.op(Opcode::GetGlobal {
@@ -1058,14 +1275,27 @@ fn add_event(
     });
     a.jmp(Opcode::JAlways { offset: 0 }, "out");
 
+    // Move: position applied now; no reflow, nothing stored (save is on release).
     a.label("move");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.moved,
+        src: b,
+    });
     a.op(Opcode::GetGlobal {
         dst: sc,
         global: g.scene,
     });
     a.jmp(Opcode::JNull { reg: sc, offset: 0 }, "out");
     parent_flow(&mut a, c, obj, p, fl);
-    get_props(&mut a, c, pr, fl, obj, "out");
+    a.op(Opcode::Int {
+        dst: raw.2,
+        ptr: k0,
+    });
+    props_raw(&mut a, c, fl, obj, raw, pr, "out");
     a.op(Opcode::Float { dst: z, ptr: f0 });
     a.op(Opcode::Call1 {
         dst: mx,
@@ -1111,14 +1341,15 @@ fn add_event(
         b: dd,
     });
     a.op(Opcode::ToInt { dst: oy, src: my });
-    set_offsets(&mut a, c, pr, ox, oy);
+    shift(&mut a, c, pr, obj, (ox, oy), tmp, "follow");
+    a.label("follow");
     a.op(Opcode::GetGlobal {
         dst: fo,
         global: g.follow,
     });
     a.jmp(Opcode::JNull { reg: fo, offset: 0 }, "out");
-    get_props(&mut a, c, fp, fl, fo, "out");
-    set_offsets(&mut a, c, fp, ox, oy);
+    props_raw(&mut a, c, fl, fo, raw, fp, "out");
+    shift(&mut a, c, fp, fo, (ox, oy), tmp, "out");
 
     a.label("out");
     a.op(Opcode::EndTrap { exc });
@@ -1136,6 +1367,65 @@ fn add_event(
     push_fn(code, vec![c.ev_t], c.void_t, r.0, a.finish(), c.dbg_file)
 }
 
+/// The capture's `onCancel` `() -> void`: SceneEvents calls it when another
+/// startCapture replaces ours or anyone calls stopCapture (GameUI fn@41254,
+/// MiniMap, ...). The drag state is dropped and the reached offset saved, so
+/// a lost capture never leaves a drag half open. Our own release clears
+/// `g.obj` before stopCapture, so this is then a no-op.
+fn add_cancel(
+    code: &mut Bytecode,
+    c: &Ctx,
+    g: &Globals,
+    report: RefFun,
+    save: RefFun,
+) -> Result<RefFun> {
+    let mut r = Regs(vec![]);
+    let (v, exc, obj, nobj, nsc, key) = (
+        r.r(c.void_t),
+        r.r(c.dyn_t),
+        r.r(c.obj_t),
+        r.r(c.obj_t),
+        r.r(c.scene_t),
+        r.r(c.str_t),
+    );
+    let gd = Guard { exc, v };
+    let mut a = Asm::new();
+    guard_open(&mut a, &gd);
+    a.op(Opcode::GetGlobal {
+        dst: obj,
+        global: g.obj,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: obj,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Null { dst: nobj });
+    a.op(Opcode::SetGlobal {
+        global: g.obj,
+        src: nobj,
+    });
+    a.op(Opcode::Null { dst: nsc });
+    a.op(Opcode::SetGlobal {
+        global: g.scene,
+        src: nsc,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: key,
+        global: g.key,
+    });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: save,
+        arg0: obj,
+        arg1: key,
+    });
+    guard_close(&mut a, &gd, report);
+    push_fn(code, vec![], c.void_t, r.0, a.finish(), c.dbg_file)
+}
+
 /// `begin(obj, follow, key)`: double push resets, a single push starts the drag.
 fn add_begin(
     code: &mut Bytecode,
@@ -1144,6 +1434,7 @@ fn add_begin(
     report: RefFun,
     save: RefFun,
     event: RefFun,
+    cancel: RefFun,
 ) -> Result<RefFun> {
     let k0 = int_const(code, 0);
     let f_dbl = float_const(code, DOUBLE_S);
@@ -1170,7 +1461,7 @@ fn add_begin(
         r.r(c.i32_t),
         r.r(c.f64_t),
     );
-    let (cb, cn, ni) = (r.r(c.push_t), r.r(c.cancel_t), r.r(c.nint_t));
+    let (cb, cn, ni, mv) = (r.r(c.push_t), r.r(c.cancel_t), r.r(c.nint_t), r.r(c.bool_t));
     let gd = Guard { exc, v };
     let mut a = Asm::new();
     guard_open(&mut a, &gd);
@@ -1247,6 +1538,33 @@ fn add_begin(
     a.jmp(Opcode::JAlways { offset: 0 }, "out");
 
     a.label("press");
+    // Capture first: a capture still open is cancelled by it (our cancel saves
+    // and clears the old drag) before the globals below name the new one.
+    a.op(Opcode::StaticClosure {
+        dst: cb,
+        fun: event,
+    });
+    a.op(Opcode::StaticClosure {
+        dst: cn,
+        fun: cancel,
+    });
+    a.op(Opcode::Null { dst: ni });
+    a.op(Opcode::Call4 {
+        dst: v,
+        fun: c.start_capture,
+        arg0: sc,
+        arg1: cb,
+        arg2: cn,
+        arg3: ni,
+    });
+    a.op(Opcode::Bool {
+        dst: mv,
+        value: ValBool(false),
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.moved,
+        src: mv,
+    });
     for (gl, src) in [
         (g.last, obj),
         (g.last_t, now),
@@ -1276,20 +1594,7 @@ fn add_begin(
         });
         a.op(Opcode::SetGlobal { global: gl, src: m });
     }
-    a.op(Opcode::StaticClosure {
-        dst: cb,
-        fun: event,
-    });
-    a.op(Opcode::Null { dst: cn });
-    a.op(Opcode::Null { dst: ni });
-    a.op(Opcode::Call4 {
-        dst: v,
-        fun: c.start_capture,
-        arg0: sc,
-        arg1: cb,
-        arg2: cn,
-        arg3: ni,
-    });
+
     guard_close(&mut a, &gd, report);
     push_fn(
         code,
@@ -1818,8 +2123,194 @@ fn add_panel(
     )
 }
 
+/// `head(o, rel, skip)`: header elements let a push through to the window.
+///
+/// A window's title row (place name, icon, text with a tooltip, ...) often
+/// has interactives of its own; they keep the push, so the window's
+/// interactive (the drag start) only saw the thin margin above them. Every
+/// h2d.Interactive below `o` whose top (`rel` + local y, relative to the
+/// window) is within HEADER_PX and whose cursor is Default (not a button: X,
+/// tabs, ... use `cursor: button`) gets `propagateEvents = true`, so the push
+/// reaches the window's interactive after them. `skip` (the window's own
+/// interactive) is left alone: a propagating window interactive would hand
+/// the push on to windowRoot's click-outside close. Subtrees starting below
+/// the band are not walked. Runs from the window's reflow (content built after
+/// init is covered); exceptions reach the caller's trap.
+fn add_head(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
+    let me = next_findex(code)?;
+    let k0 = int_const(code, 0);
+    let k_def = int_const(code, c.cursor_default);
+    let f_head = float_const(code, HEADER_PX);
+    let mut r = Regs(vec![c.obj_t, c.f64_t, c.inter_t]);
+    let (o, rel, skip) = (Reg(0), Reg(1), Reg(2));
+    let (v, ch, n, i, raw, d, co, b) = (
+        r.r(c.void_t),
+        r.r(c.arr_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.raw_t),
+        r.r(c.dyn_t),
+        r.r(c.obj_t),
+        r.r(c.bool_t),
+    );
+    let (y, lim, cls, it, cur, ci, k) = (
+        r.r(c.f64_t),
+        r.r(c.f64_t),
+        r.r(c.dyn_t),
+        r.r(c.inter_t),
+        r.r(c.cursor_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Field {
+        dst: ch,
+        obj: o,
+        field: c.children,
+    });
+    a.jmp(Opcode::JNull { reg: ch, offset: 0 }, "out");
+    a.op(Opcode::Field {
+        dst: n,
+        obj: ch,
+        field: c.arr_len,
+    });
+    a.op(Opcode::Float {
+        dst: lim,
+        ptr: f_head,
+    });
+    a.op(Opcode::Int { dst: i, ptr: k0 });
+    a.loop_head("loop");
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: n,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: ch,
+        field: c.arr_arr,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: i,
+    });
+    a.op(Opcode::UnsafeCast { dst: co, src: d });
+    a.op(Opcode::Incr { dst: i });
+    a.jmp(Opcode::JNull { reg: co, offset: 0 }, "loop");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: co,
+        field: c.visible,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "loop");
+    a.op(Opcode::Field {
+        dst: y,
+        obj: co,
+        field: c.y,
+    });
+    a.op(Opcode::Add {
+        dst: y,
+        a: rel,
+        b: y,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: y,
+            b: lim,
+            offset: 0,
+        },
+        "loop",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: cls,
+        global: c.inter_cls,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: c.is_of_type,
+        arg0: co,
+        arg1: cls,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "down");
+    a.op(Opcode::UnsafeCast { dst: it, src: co });
+    a.jmp(
+        Opcode::JEq {
+            a: it,
+            b: skip,
+            offset: 0,
+        },
+        "loop",
+    );
+    a.op(Opcode::Field {
+        dst: cur,
+        obj: it,
+        field: c.cursor,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: cur,
+            offset: 0,
+        },
+        "down",
+    );
+    a.op(Opcode::EnumIndex {
+        dst: ci,
+        value: cur,
+    });
+    a.op(Opcode::Int { dst: k, ptr: k_def });
+    a.jmp(
+        Opcode::JNotEq {
+            a: ci,
+            b: k,
+            offset: 0,
+        },
+        "loop",
+    );
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetField {
+        obj: it,
+        field: c.it_propagate,
+        src: b,
+    });
+    a.label("down");
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: me,
+        arg0: co,
+        arg1: y,
+        arg2: skip,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "loop");
+    a.label("out");
+    a.op(Opcode::Ret { ret: v });
+    let f = push_fn(
+        code,
+        vec![c.obj_t, c.f64_t, c.inter_t],
+        c.void_t,
+        r.0,
+        a.finish(),
+        c.dbg_file,
+    )?;
+    debug_assert_eq!(f, me);
+    Ok(f)
+}
+
 /// `winReflow(win)`: clamp windowRoot's children, then frameFlow follows the window.
-fn add_win_reflow(code: &mut Bytecode, c: &Ctx, report: RefFun, clamp: RefFun) -> Result<RefFun> {
+fn add_win_reflow(
+    code: &mut Bytecode,
+    c: &Ctx,
+    report: RefFun,
+    clamp: RefFun,
+    head: RefFun,
+) -> Result<RefFun> {
+    let f0 = float_const(code, 0.0);
     let k0 = int_const(code, 0);
     let mut r = Regs(vec![c.win_t]);
     let win = Reg(0);
@@ -1862,6 +2353,21 @@ fn add_win_reflow(code: &mut Bytecode, c: &Ctx, report: RefFun, clamp: RefFun) -
         dst: v,
         fun: clamp,
         arg0: win,
+    });
+    // Title row: pushes on its non-button elements reach the drag.
+    let (zf, wit) = (r.r(c.f64_t), r.r(c.inter_t));
+    a.op(Opcode::Float { dst: zf, ptr: f0 });
+    a.op(Opcode::Field {
+        dst: wit,
+        obj: win,
+        field: c.interactive,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: head,
+        arg0: win,
+        arg1: zf,
+        arg2: wit,
     });
     a.op(Opcode::Field {
         dst: ff,
@@ -2651,7 +3157,7 @@ mod tests {
     }
 
     /// Sites found, only Window.init and the GameInventory constructor change,
-    /// eleven functions are appended, every new op type-checks, a second pass
+    /// API_FNS functions are appended, every new op type-checks, a second pass
     /// changes nothing.
     #[test]
     fn patches_installed_game() {
@@ -2668,7 +3174,7 @@ mod tests {
         let back = read(&patched);
 
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 11);
+        assert_eq!(back.functions.len(), n + API_FNS);
         assert_eq!(back.types[..orig.types.len()], orig.types[..]);
         for i in 0..n {
             let want = i == wp.fi || i == pp.fi;
@@ -2690,11 +3196,11 @@ mod tests {
             }
         }
         let api = DragApi {
-            begin: back.functions[n + 4].findex,
+            begin: back.functions[n + 5].findex,
             restore: back.functions[n + 2].findex,
-            clamp: back.functions[n + 5].findex,
-            panel: back.functions[n + 7].findex,
-            win_install: back.functions[n + 10].findex,
+            clamp: back.functions[n + 6].findex,
+            panel: back.functions[n + 8].findex,
+            win_install: back.functions[n + 12].findex,
         };
         assert!(
             matches!(b.ops[end], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == api.win_install)
@@ -2731,7 +3237,7 @@ mod tests {
             check_types(&back, f, 0..f.ops.len());
             traps += traps_ok(f);
         }
-        assert_eq!(traps, 9);
+        assert_eq!(traps, 10);
 
         // Idempotent: a second pass refuses both sites and leaves the image as is.
         let mut again = read(&patched);
@@ -2751,10 +3257,10 @@ mod tests {
         let mut code = read(&image);
         let n = code.functions.len();
         let a = api(&mut code).expect("api");
-        assert_eq!(code.functions.len(), n + 11);
+        assert_eq!(code.functions.len(), n + API_FNS);
         let b = api(&mut code).expect("api again");
         assert_eq!(a, b);
-        assert_eq!(code.functions.len(), n + 11);
+        assert_eq!(code.functions.len(), n + API_FNS);
         let sig_of = |f: RefFun| {
             let (args, ret) = sig(&code, f).unwrap();
             let names: Vec<String> = args
@@ -2831,5 +3337,331 @@ mod tests {
             code.functions[pp.fi].ops.len(),
             orig.functions[pp.fi].ops.len() + 6
         );
+    }
+
+    // ---------- behaviour (testsim) ----------
+
+    use crate::testsim::{Core, Sim, V};
+
+    /// The appended functions by build() order.
+    struct Fns {
+        event: RefFun,
+        cancel: RefFun,
+        begin: RefFun,
+        head: RefFun,
+    }
+
+    fn built(image: &[u8]) -> (Bytecode, usize) {
+        let mut code = read(image);
+        let n = code.functions.len();
+        api(&mut code).expect("api");
+        (code, n)
+    }
+
+    fn fns(code: &Bytecode, n: usize) -> Fns {
+        let f = |k: usize| code.functions[n + k].findex;
+        Fns {
+            event: f(3),
+            cancel: f(4),
+            begin: f(5),
+            head: f(9),
+        }
+    }
+
+    /// Mouse position comes from maps["in"]["mx"/"my"]; vanilla calls are logged.
+    fn sim<'a>(code: &'a Bytecode, n: usize, c: &'a Ctx) -> Sim<'a> {
+        Sim::new(
+            code,
+            n,
+            move |k: &mut Core, f: RefFun, a: &[V]| {
+                let log = |k: &mut Core, what: &'static str| k.log.push((what, a.to_vec()));
+                if f == c.child_index {
+                    Some(V::I(0))
+                } else if f == c.get_scene {
+                    Some(k.map("in", "scene"))
+                } else if f == c.mouse_x {
+                    Some(k.map("in", "mx"))
+                } else if f == c.mouse_y {
+                    Some(k.map("in", "my"))
+                } else if f == c.sys_time {
+                    Some(k.map("in", "now"))
+                } else if f == c.get_props {
+                    log(k, "getProperties");
+                    Some(k.map("in", "props"))
+                } else if f == c.set_need_reflow {
+                    log(k, "needReflow");
+                    Some(V::B(true))
+                } else if f == c.start_capture {
+                    log(k, "startCapture");
+                    Some(V::Null)
+                } else if f == c.stop_capture {
+                    log(k, "stopCapture");
+                    Some(V::Null)
+                } else if f == c.set_ud {
+                    log(k, "setUserData");
+                    Some(V::Null)
+                } else if f == c.is_of_type {
+                    Some(V::B(k.key_get(&a[0], "inter") == V::B(true)))
+                } else if f == c.str_add {
+                    let st = |v: &V| match v {
+                        V::S(x) => x.clone(),
+                        o => panic!("str {o:?}"),
+                    };
+                    Some(V::S(st(&a[0]) + &st(&a[1])))
+                } else if f == c.std_string || f == c.println {
+                    panic!("drag code threw (report called)")
+                } else {
+                    None
+                }
+            },
+            |_: &mut Core, field: usize, _: &[V]| panic!("virtual call #{field}"),
+        )
+    }
+
+    /// A panel (offset 0,0 at x 100 / y 50) in a flow, a 1920x1080 scene.
+    fn scene(s: &mut Sim, c: &Ctx) -> (V, V) {
+        let k = &mut s.c;
+        let sc = k.obj(&[(c.sc_w, V::I(1920)), (c.sc_h, V::I(1080))]);
+        let pr = k.obj(&[
+            (c.off_x, V::I(0)),
+            (c.off_y, V::I(0)),
+            (c.is_abs, V::B(false)),
+        ]);
+        let props = k.arr(c.arr_len, c.arr_arr, vec![pr.clone()]);
+        let fl = k.obj(&[(c.properties, props)]);
+        let obj = k.obj(&[
+            (c.parent, fl),
+            (c.x, V::F(100.0)),
+            (c.y, V::F(50.0)),
+            (c.pos_changed, V::B(false)),
+        ]);
+        k.put("in", "scene", sc);
+        k.put("in", "props", pr.clone());
+        k.put("in", "now", V::F(10.0));
+        (obj, pr)
+    }
+
+    fn mouse(s: &mut Sim, x: f64, y: f64) {
+        s.c.put("in", "mx", V::F(x));
+        s.c.put("in", "my", V::F(y));
+    }
+
+    fn event(s: &mut Sim, c: &Ctx, f: &Fns, kind: i32) -> V {
+        let kd = s.c.enm(kind, vec![]);
+        let e =
+            s.c.obj(&[(c.kind, kd), (c.propagate, V::B(true)), (c.button, V::I(0))]);
+        s.run(f.event, vec![e.clone()]);
+        s.c.get(&e, c.propagate)
+    }
+
+    fn press(s: &mut Sim, f: &Fns, obj: &V) {
+        s.run(f.begin, vec![obj.clone(), V::Null, V::S("k".into())]);
+        let cap = s.c.take("startCapture");
+        assert_eq!(cap.len(), 1);
+        // The capture gets our onCancel (not null): a lost capture resets the drag.
+        assert_eq!(cap[0][2], V::Fun(f.cancel));
+        s.c.take("getProperties");
+    }
+
+    /// Moves apply the position at once (x/y and the flow offset), with no
+    /// reflow and no storage write; the release saves once and consumes the
+    /// event, so it never reaches the world under the cursor.
+    #[test]
+    fn move_is_immediate_and_release_saves() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (obj, pr) = scene(&mut s, &c);
+        mouse(&mut s, 500.0, 300.0);
+        press(&mut s, &f, &obj);
+
+        mouse(&mut s, 530.0, 320.0);
+        assert_eq!(
+            event(&mut s, &c, &f, c.ev_move),
+            V::B(false),
+            "move consumed"
+        );
+        assert_eq!(s.c.get(&obj, c.x), V::F(130.0));
+        assert_eq!(s.c.get(&obj, c.y), V::F(70.0));
+        assert_eq!(s.c.get(&obj, c.pos_changed), V::B(true));
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(20));
+        mouse(&mut s, 540.0, 310.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&obj, c.x), V::F(140.0));
+        assert_eq!(s.c.get(&obj, c.y), V::F(60.0));
+        for what in ["getProperties", "needReflow", "setUserData", "stopCapture"] {
+            assert!(s.c.take(what).is_empty(), "{what} during move");
+        }
+
+        // Released over something else (a town): consumed, capture stopped, saved once.
+        assert_eq!(
+            event(&mut s, &c, &f, c.ev_release),
+            V::B(false),
+            "release consumed"
+        );
+        assert_eq!(s.c.take("stopCapture").len(), 1);
+        let saved = s.c.take("setUserData");
+        assert_eq!(saved.len(), 1);
+        let packed = ((40 + 32768) << 16) | ((10 + 32768) & 0xFFFF);
+        assert_eq!(saved[0][1], V::I(packed));
+
+        // The drag is over: a late move does not move it, just stops the capture.
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&obj, c.x), V::F(140.0));
+        assert_eq!(s.c.take("stopCapture").len(), 1);
+
+        // A new push drags again.
+        mouse(&mut s, 100.0, 100.0);
+        s.c.put("in", "now", V::F(20.0));
+        press(&mut s, &f, &obj);
+        mouse(&mut s, 110.0, 100.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&obj, c.x), V::F(150.0));
+    }
+
+    /// Capture taken away (another startCapture / a stopCapture): onCancel
+    /// drops the drag and saves; later events of the dead drag do nothing.
+    #[test]
+    fn cancel_resets_the_drag() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (obj, _) = scene(&mut s, &c);
+        mouse(&mut s, 500.0, 300.0);
+        press(&mut s, &f, &obj);
+        mouse(&mut s, 520.0, 300.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&obj, c.x), V::F(120.0));
+
+        s.run(f.cancel, vec![]);
+        assert_eq!(s.c.take("setUserData").len(), 1, "cancel saves");
+        assert!(
+            s.c.take("stopCapture").is_empty(),
+            "cancel must not re-enter stopCapture"
+        );
+        s.run(f.cancel, vec![]);
+        assert!(
+            s.c.take("setUserData").is_empty(),
+            "second cancel is a no-op"
+        );
+
+        mouse(&mut s, 900.0, 300.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&obj, c.x), V::F(120.0));
+        assert_eq!(event(&mut s, &c, &f, c.ev_release), V::B(false));
+        assert!(s.c.take("setUserData").is_empty());
+
+        // Dragging works again afterwards.
+        mouse(&mut s, 0.0, 0.0);
+        s.c.put("in", "now", V::F(30.0));
+        press(&mut s, &f, &obj);
+        mouse(&mut s, 5.0, 0.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&obj, c.x), V::F(125.0));
+    }
+
+    /// Push + release without a move is a click: the release goes on.
+    #[test]
+    fn click_without_move_passes_release() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (obj, _) = scene(&mut s, &c);
+        mouse(&mut s, 500.0, 300.0);
+        press(&mut s, &f, &obj);
+        assert_eq!(event(&mut s, &c, &f, c.ev_release), V::B(true));
+        assert_eq!(s.c.take("stopCapture").len(), 1);
+        // A key event during a drag is not swallowed either.
+        s.c.put("in", "now", V::F(20.0));
+        press(&mut s, &f, &obj);
+        let wheel = (0..8)
+            .find(|&k| ![c.ev_push, c.ev_move, c.ev_release, c.ev_release_out].contains(&k))
+            .unwrap();
+        assert_eq!(event(&mut s, &c, &f, wheel), V::B(true));
+    }
+
+    /// Title row: default-cursor interactives in the top band let the push
+    /// through; buttons, the window's own interactive and body elements don't change.
+    #[test]
+    fn header_elements_pass_push() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let k = &mut s.c;
+        let def = c.cursor_default;
+        let other = if def == 0 { 1 } else { 0 };
+        let inter = |k: &mut Core, cur: i32, y: f64| {
+            let e = k.enm(cur, vec![]);
+            let it = k.obj(&[
+                (c.cursor, e),
+                (c.it_propagate, V::B(false)),
+                (c.visible, V::B(true)),
+                (c.y, V::F(y)),
+            ]);
+            k.key_set(&it, "inter".into(), V::B(true));
+            it
+        };
+        let own = inter(k, def, 0.0);
+        let title_it = inter(k, def, 0.0);
+        let button = inter(k, other, 5.0);
+        let body_it = inter(k, def, 0.0);
+        let deep_it = inter(k, def, 0.0);
+        let title_kids = k.arr(c.arr_len, c.arr_arr, vec![title_it.clone(), button.clone()]);
+        let title = k.obj(&[
+            (c.children, title_kids),
+            (c.visible, V::B(true)),
+            (c.y, V::F(20.0)),
+        ]);
+        let body_kids = k.arr(c.arr_len, c.arr_arr, vec![body_it.clone()]);
+        let body = k.obj(&[
+            (c.children, body_kids),
+            (c.visible, V::B(true)),
+            (c.y, V::F(90.0)),
+        ]);
+        // A header child pushed below the band by its parent's y.
+        let low_kids = k.arr(c.arr_len, c.arr_arr, vec![deep_it.clone()]);
+        let low = k.obj(&[
+            (c.children, low_kids),
+            (c.visible, V::B(true)),
+            (c.y, V::F(60.0)),
+        ]);
+        k.set(&deep_it, c.y, V::F(15.0));
+        let kids = k.arr(
+            c.arr_len,
+            c.arr_arr,
+            vec![own.clone(), title, V::Null, body, low],
+        );
+        let win = k.obj(&[(c.children, kids)]);
+        s.run(f.head, vec![win, V::F(0.0), own.clone()]);
+        assert_eq!(s.c.get(&title_it, c.it_propagate), V::B(true));
+        for (it, what) in [
+            (&own, "own"),
+            (&button, "button"),
+            (&body_it, "body"),
+            (&deep_it, "deep"),
+        ] {
+            assert_eq!(s.c.get(it, c.it_propagate), V::B(false), "{what}");
+        }
     }
 }

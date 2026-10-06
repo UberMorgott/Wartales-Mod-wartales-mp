@@ -3466,7 +3466,7 @@ mod tests {
         }
     }
 
-    /// Sites found; only the ten site functions change; window_drag's 11 and
+    /// Sites found; only the ten site functions change; window_drag's API_FNS and
     /// this pass's 16 functions are appended, type-check and trap where vanilla
     /// calls them; a second pass changes nothing.
     #[test]
@@ -3491,7 +3491,7 @@ mod tests {
         let back = read(&patched);
 
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 11 + 16);
+        assert_eq!(back.functions.len(), n + window_drag::API_FNS + 16);
         assert_eq!(back.types[..orig.types.len()], orig.types[..]);
         let u = &p.u;
         let sites = [
@@ -3552,8 +3552,8 @@ mod tests {
         shifted(a, b, u.bar_ret, 1);
         check_types(&back, b, u.bar_ret..u.bar_ret + 1);
         check_flow(b);
-        // appended after window_drag's 11, in build() order: ... button (14), tick (15)
-        let mine = |k: usize| back.functions[n + 11 + k].findex;
+        // appended after window_drag's API_FNS, in build() order: ... button (14), tick (15)
+        let mine = |k: usize| back.functions[n + window_drag::API_FNS + k].findex;
         assert!(
             matches!(b.ops[u.bar_ret], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(14))
         );
@@ -3574,7 +3574,7 @@ mod tests {
             check_types(&back, f, 0..f.ops.len());
             traps += traps_ok(f);
         }
-        assert_eq!(traps, 9 + 8);
+        assert_eq!(traps, 10 + 8); // window_drag's 10 (cancel added) + ours
 
         // Idempotent: every part refuses, the image stays as is.
         let mut again = read(&patched);
