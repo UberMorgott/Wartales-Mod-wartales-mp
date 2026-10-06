@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Morgott. Licensed under CC BY-NC 4.0.
 //
 // Co-op "all inventories" button: a bottom-bar button (multiplayer only) that
-// opens one inventory panel per OTHER connected player, side by side next to
-// the own inventory panel. Full access: any player can take from and give to
+// opens one inventory panel per OTHER connected player, side by side at the
+// left edge of the screen (saved drag positions win). Full access: any player can take from and give to
 // any other player's inventory.
 //
 // Authority (vanilla): a player's st.Inventory is owned by that player's client
@@ -31,10 +31,12 @@
 //      keep the vanilla conversion.
 //   U. UI (local only):
 //      - WorldButtonsBar constructor (end): `mpAllInvButton(this)` adds a
-//        "button" flow with an icon (DialogMerchantTrade, tooltip TIP) whose
-//        click is `mpAllInvToggle(bar)`; visible only in multiplayer, enabled
+//        "button" flow with an icon (ICON_ID, the inventory chest, with a
+//        BADGE_ID companions badge on it; tooltip TIP) whose click is
+//        `mpAllInvToggle(bar)`; visible only in multiplayer, enabled
 //        like btInventory (`mpAllInvTick`).
-//      - Toggle: in GameInventory's dom a horizontal flow gets, per other
+//      - Toggle: in GameUI's dom (HUD root) an absolute horizontal flow at the
+//        left edge (BOX_ATTRS) gets, per other
 //        connected player j, a panel shaped like the vanilla #inventory one
 //        (`element#inventory` > `.title` (nickname, Close icon) +
 //        `inventory-content` with `new ui.comp.Inventory(FoundItems,
@@ -75,7 +77,27 @@ use hlbc::types::{RefEnumConstruct, RefGlobal, RefString, ValBool};
 const LOG_CAP: i32 = 20;
 const S_ERR: &str = "mp: allinv: ";
 pub(crate) const KEY_PREFIX: &str = "AllInv#";
-const ICON_ID: &str = "DialogMerchantTrade";
+/// The bottom-bar inventory icon (TXT_OW_UI_ICONS_48PX 1,3) ...
+const ICON_ID: &str = "Inventory";
+/// ... with the companions group (TXT_OW_UI_ICONS_48PX 11,2) as a badge.
+const BADGE_ID: &str = "Companions";
+const BADGE_ATTRS: &[(&str, &str)] = &[
+    ("class", "mpAllInvBadge"),
+    ("position", "absolute"),
+    ("align", "right bottom"),
+    ("offset", "6 4"),
+    ("scale", "0.5"),
+    ("networkable", "false"),
+];
+/// Panels open at the screen's left edge, bottom aligned like the own inventory.
+const BOX_ATTRS: &[(&str, &str)] = &[
+    ("layout", "horizontal"),
+    ("hspacing", "8"),
+    ("content-valign", "bottom"),
+    ("position", "absolute"),
+    ("align", "left bottom"),
+    ("offset", "10 -70"),
+];
 const TIP: &str = "Co-op inventories";
 const ROWS: i32 = 6;
 /// Ancestors searched from a slot for its ui.comp.Inventory.
@@ -2525,9 +2547,11 @@ fn add_toggle(
         arg0: gi,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "out");
+    // On the HUD root (GameUI is full screen), not in GameInventory (right
+    // docked): the box sits at the left edge (BOX_ATTRS).
     a.op(Opcode::Field {
         dst: dom,
-        obj: gi,
+        obj: ui,
         field: p.dom,
     });
     a.jmp(
@@ -2537,21 +2561,7 @@ fn add_toggle(
         },
         "out",
     );
-    emit_create(
-        &mut a,
-        code,
-        p,
-        &c,
-        bp,
-        dom,
-        "flow",
-        None,
-        &[
-            ("layout", "horizontal"),
-            ("hspacing", "8"),
-            ("content-valign", "top"),
-        ],
-    );
+    emit_create(&mut a, code, p, &c, bp, dom, "flow", None, BOX_ATTRS);
     a.op(Opcode::Field {
         dst: bo,
         obj: bp,
@@ -2728,7 +2738,9 @@ fn add_button(
         r.r(p.bool_t),
         r.r(p.flow_t),
     );
+    let (bp, bo, badge) = (r.r(dk_t), r.r(p.obj_t), r.r(p.icon_t));
     let icon_g = str_global(code, p.str_t, ICON_ID);
+    let badge_g = str_global(code, p.str_t, BADGE_ID);
     let tip_g = str_global(code, p.str_t, TIP);
     let mut a = Asm::new();
     open_trap(&mut a, exc);
@@ -2813,6 +2825,53 @@ fn add_button(
         field: p.title_tip,
         src: f,
     });
+    // Badge over the icon (its child: fades with it when disabled). It has an
+    // interactive of its own (`world-buttons-bar icon { cursor: button }`), so
+    // it clicks and tips like the icon.
+    emit_create(
+        &mut a,
+        code,
+        p,
+        &c,
+        bp,
+        ip,
+        "icon",
+        Some(badge_g),
+        BADGE_ATTRS,
+    );
+    a.op(Opcode::Field {
+        dst: bo,
+        obj: bp,
+        field: p.blk.props_obj,
+    });
+    a.op(Opcode::SafeCast {
+        dst: badge,
+        src: bo,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: badge,
+            offset: 0,
+        },
+        "nobadge",
+    );
+    a.op(Opcode::SetField {
+        obj: badge,
+        field: p.blk.onclick,
+        src: cl,
+    });
+    a.op(Opcode::Call2 {
+        dst: sv,
+        fun: p.set_tip,
+        arg0: badge,
+        arg1: tip,
+    });
+    a.op(Opcode::SetField {
+        obj: badge,
+        field: p.title_tip,
+        src: f,
+    });
+    a.label("nobadge");
     a.op(Opcode::SetGlobal {
         global: g.btn,
         src: co,
@@ -4371,7 +4430,9 @@ mod tests {
         let gi_o = sim.obj(&[]);
         let gi_dom = sim.obj(&[(u.blk.props_obj.0, gi_o.clone())]);
         let gi = sim.obj(&[(u.dom.0, gi_dom)]);
-        let ui = sim.obj(&[(u.ui_gi.0, gi.clone())]);
+        let ui_o = sim.obj(&[]);
+        let ui_dom = sim.obj(&[(u.blk.props_obj.0, ui_o.clone())]);
+        let ui = sim.obj(&[(u.ui_gi.0, gi.clone()), (u.dom.0, ui_dom)]);
         let game = sim.obj(&[(u.game_me.0, a), (u.game_state.0, st), (u.game_ui.0, ui)]);
         let bar_o = sim.obj(&[]);
         let bar_dom = sim.obj(&[(u.blk.props_obj.0, bar_o.clone())]);
@@ -4386,10 +4447,13 @@ mod tests {
             .filter(|(n, _)| *n == "create")
             .map(|(_, a)| a[0].clone())
             .collect();
-        assert_eq!(creates, [s("flow"), s("icon")]);
+        assert_eq!(creates, [s("flow"), s("icon"), s("icon")]);
         let btn = sim.children(&bar_o)[0].clone();
         let icon = sim.children(&btn)[0].clone();
         assert!(matches!(sim.get(&icon, u.blk.onclick.0), V::Clo(f, _) if f == toggle));
+        // the two-people badge sits on the icon and clicks like it
+        let badge = sim.children(&icon)[0].clone();
+        assert!(matches!(sim.get(&badge, u.blk.onclick.0), V::Clo(f, _) if f == toggle));
         assert!(
             sim.log.contains(&("set", vec![btn.clone(), V::B(false)])),
             "hidden in solo"
@@ -4405,7 +4469,9 @@ mod tests {
         sim.multi = true;
         sim.run(toggle, vec![bar.clone()]);
         let bx = sim.global(gbox);
-        assert_eq!(sim.children(&gi_o), [bx.clone()]);
+        // on the HUD root (left edge), not inside GameInventory
+        assert_eq!(sim.children(&ui_o), [bx.clone()]);
+        assert!(sim.children(&gi_o).is_empty());
         let panels = sim.children(&bx);
         assert_eq!(panels.len(), 2);
         let invs: Vec<(V, V)> = sim
@@ -4447,7 +4513,7 @@ mod tests {
         // second click: closed
         sim.run(toggle, vec![bar.clone()]);
         assert_eq!(sim.global(gbox), V::Null);
-        assert!(sim.children(&gi_o).is_empty());
+        assert!(sim.children(&ui_o).is_empty());
         // third click: open again
         sim.run(toggle, vec![bar.clone()]);
         assert_ne!(sim.global(gbox), V::Null);
@@ -4457,6 +4523,6 @@ mod tests {
         sim.set(&game, u.game_battle.0, battle);
         sim.run(toggle, vec![bar.clone()]);
         assert_eq!(sim.global(gbox), V::Null);
-        assert!(sim.children(&gi_o).is_empty());
+        assert!(sim.children(&ui_o).is_empty());
     }
 }
