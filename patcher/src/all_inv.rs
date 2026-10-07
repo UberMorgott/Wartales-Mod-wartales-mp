@@ -65,6 +65,10 @@
 //        MoveTo, the add is netAddItem to the target's owner). Target = the
 //        panel last hovered (ItemSlot.getTipContent op 0: `mpAllInvHover`) or
 //        right-clicked, else the first open panel; only a connected player.
+//        The amount box fixes the recipient and the item when it opens
+//        (`mpAllInvGiveAmount` bound to {slot, to, item}): its confirm gives
+//        nothing once that player left or the slot holds another item, never
+//        to whoever is the target by then.
 //      - Equip from another inventory = take, then equip as usual.
 //   D. Drag & drop (local only; no new network path):
 //      - Slot.netPick (op 0) `if (mpAllInvFgnPick(this, onPick)) return;`:
@@ -2122,20 +2126,22 @@ fn add_close_panel(
     push_fn(code, vec![p.obj_t], p.void_t, r.0, a.finish(), p.dbg_file)
 }
 
-/// `giveN(slot, n)`: `slot.api.networkOperation(MoveTo(target(), n), slot, noop)`.
+/// `giveN(slot, to, n)`: `slot.api.networkOperation(MoveTo(to, n), slot, noop)`,
+/// only while `to` is a connected other player's inventory: the give never
+/// falls back to someone else.
 fn add_give_n(
     code: &mut Bytecode,
     p: &UiPlan,
     report: RefFun,
-    target: RefFun,
+    alive: RefFun,
     noop: RefFun,
 ) -> Result<RefFun> {
-    let mut r = Regs(vec![p.slot_t, p.i32_t]);
-    let (exc, v, z, t, api, va, op, cb) = (
+    let mut r = Regs(vec![p.slot_t, p.inv_t, p.i32_t]);
+    let (exc, v, z, b, api, va, op, cb) = (
         r.r(p.dyn_t),
         r.r(p.void_t),
         r.r(p.i32_t),
-        r.r(p.inv_t),
+        r.r(p.bool_t),
         r.r(p.api_t),
         r.r(p.api_v_t),
         r.r(p.op_t),
@@ -2149,17 +2155,18 @@ fn add_give_n(
     });
     a.jmp(
         Opcode::JSLte {
-            a: Reg(1),
+            a: Reg(2),
             b: z,
             offset: 0,
         },
         "out",
     );
-    a.op(Opcode::Call0 {
-        dst: t,
-        fun: target,
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: alive,
+        arg0: Reg(1),
     });
-    a.jmp(Opcode::JNull { reg: t, offset: 0 }, "out");
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "out");
     a.op(Opcode::Field {
         dst: api,
         obj: Reg(0),
@@ -2176,7 +2183,7 @@ fn add_give_n(
     a.op(Opcode::MakeEnum {
         dst: op,
         construct: p.move_to,
-        args: vec![t, Reg(1)],
+        args: vec![Reg(1), Reg(2)],
     });
     a.op(Opcode::StaticClosure { dst: cb, fun: noop });
     a.op(Opcode::CallMethod {
@@ -2187,12 +2194,137 @@ fn add_give_n(
     close_trap(&mut a, exc, v, v, report, None);
     push_fn(
         code,
-        vec![p.slot_t, p.i32_t],
+        vec![p.slot_t, p.inv_t, p.i32_t],
         p.void_t,
         r.0,
         a.finish(),
         p.dbg_file,
     )
+}
+
+/// The amount box's confirm, `giveAmount(o, n)` with `o = {slot, to, item}`
+/// taken when the box opened: `giveN(o.slot, o.to, n)` while the slot still
+/// holds that item (giveN refuses a recipient who left).
+fn add_give_amount(
+    code: &mut Bytecode,
+    p: &UiPlan,
+    report: RefFun,
+    give_n: RefFun,
+) -> Result<RefFun> {
+    let (fs, ft, fit) = amount_keys(code);
+    let mut r = Regs(vec![p.dynobj_t, p.i32_t]);
+    let (exc, v, slot, to, it, cur) = (
+        r.r(p.dyn_t),
+        r.r(p.void_t),
+        r.r(p.slot_t),
+        r.r(p.inv_t),
+        r.r(p.item_v_t),
+        r.r(p.item_v_t),
+    );
+    let mut a = Asm::new();
+    open_trap(&mut a, exc);
+    for (dst, field) in [(slot, fs), (to, ft), (it, fit)] {
+        a.op(Opcode::DynGet {
+            dst,
+            obj: Reg(0),
+            field,
+        });
+    }
+    a.jmp(
+        Opcode::JNull {
+            reg: slot,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call1 {
+        dst: cur,
+        fun: p.get_item,
+        arg0: slot,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: cur,
+            b: it,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: give_n,
+        arg0: slot,
+        arg1: to,
+        arg2: Reg(1),
+    });
+    close_trap(&mut a, exc, v, v, report, None);
+    push_fn(
+        code,
+        vec![p.dynobj_t, p.i32_t],
+        p.void_t,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
+}
+
+/// The dynamic field names of giveAmount's bound object: slot, to, item.
+fn amount_keys(
+    code: &mut Bytecode,
+) -> (
+    hlbc::types::RefString,
+    hlbc::types::RefString,
+    hlbc::types::RefString,
+) {
+    (
+        string_ref(code, "slot"),
+        string_ref(code, "to"),
+        string_ref(code, "item"),
+    )
+}
+
+/// Registers of `emit_amount_box`.
+struct AmountRegs {
+    o: Reg,
+    cur: Reg,
+    max: Reg,
+    cl: Reg,
+    v: Reg,
+}
+
+/// `selectAmount(slot, null, -1, giveAmount.bind({slot, to, item}))`: the
+/// recipient and the item are fixed when the box opens.
+fn emit_amount_box(
+    code: &mut Bytecode,
+    a: &mut Asm,
+    p: &UiPlan,
+    give_amount: RefFun,
+    k: &AmountRegs,
+    (slot, to, item): (Reg, Reg, Reg),
+) {
+    let (fs, ft, fit) = amount_keys(code);
+    a.op(Opcode::New { dst: k.o });
+    for (field, src) in [(fs, slot), (ft, to), (fit, item)] {
+        a.op(Opcode::DynSet { obj: k.o, field, src });
+    }
+    a.op(Opcode::Null { dst: k.cur });
+    a.op(Opcode::Int {
+        dst: k.max,
+        ptr: int_const(code, -1),
+    });
+    a.op(Opcode::InstanceClosure {
+        dst: k.cl,
+        fun: give_amount,
+        obj: k.o,
+    });
+    a.op(Opcode::Call4 {
+        dst: k.v,
+        fun: p.select_amount,
+        arg0: slot,
+        arg1: k.cur,
+        arg2: k.max,
+        arg3: k.cl,
+    });
 }
 
 /// `give(slot)` (ItemSlot.onRightClick, true = handled): a foreign slot becomes
@@ -2207,9 +2339,10 @@ fn add_give(
     foreign: RefFun,
     slot_inv: RefFun,
     target: RefFun,
-    give_n: RefFun,
+    (give_n, give_amount): (RefFun, RefFun),
 ) -> Result<RefFun> {
     let mut r = Regs(vec![p.slot_t]);
+    let o = r.r(p.dynobj_t);
     let (exc, res, v, bx, fi, b, inv, gc, game, me, mi, it, iv, k, t, key, cur, m, cl, n) = (
         r.r(p.dyn_t),
         r.r(p.bool_t),
@@ -2331,24 +2464,8 @@ fn add_give(
         arg0: key,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "whole");
-    a.op(Opcode::Null { dst: cur });
-    a.op(Opcode::Int {
-        dst: m,
-        ptr: int_const(code, -1),
-    });
-    a.op(Opcode::InstanceClosure {
-        dst: cl,
-        fun: give_n,
-        obj: Reg(0),
-    });
-    a.op(Opcode::Call4 {
-        dst: v,
-        fun: p.select_amount,
-        arg0: Reg(0),
-        arg1: cur,
-        arg2: m,
-        arg3: cl,
-    });
+    let ab = AmountRegs { o, cur, max: m, cl, v };
+    emit_amount_box(code, &mut a, p, give_amount, &ab, (Reg(0), t, it));
     a.jmp(Opcode::JAlways { offset: 0 }, "out");
     a.label("whole");
     a.op(Opcode::Call1 {
@@ -2356,11 +2473,12 @@ fn add_give(
         fun: p.get_count,
         arg0: it,
     });
-    a.op(Opcode::Call2 {
+    a.op(Opcode::Call3 {
         dst: v,
         fun: give_n,
         arg0: Reg(0),
-        arg1: n,
+        arg1: t,
+        arg2: n,
     });
     close_trap(
         &mut a,
@@ -2662,11 +2780,12 @@ fn add_fgn_click(
     report: RefFun,
     foreign: RefFun,
     slot_inv: RefFun,
-    give_n: RefFun,
+    (give_n, give_amount): (RefFun, RefFun),
 ) -> Result<RefFun> {
     let right_click = code.functions[p.right_click_fi].findex;
     let pick_t = field(code, p.ui_t, "currentPick")?.1;
     let mut r = Regs(vec![p.sb_t, p.ev_t]);
+    let o = r.r(p.dynobj_t);
     let (exc, res, v, gui, cur, grp, mg, btn, z, src, cls, b, ts, fi, inv) = (
         r.r(p.dyn_t),
         r.r(p.bool_t),
@@ -2931,31 +3050,22 @@ fn add_fgn_click(
         arg0: key,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "whole");
-    a.op(Opcode::Null { dst: sv });
-    a.op(Opcode::Int {
-        dst: m,
-        ptr: int_const(code, -1),
-    });
-    a.op(Opcode::InstanceClosure {
-        dst: cl,
-        fun: give_n,
-        obj: src,
-    });
-    a.op(Opcode::Call4 {
-        dst: v,
-        fun: p.select_amount,
-        arg0: src,
-        arg1: sv,
-        arg2: m,
-        arg3: cl,
-    });
+    let ab = AmountRegs {
+        o,
+        cur: sv,
+        max: m,
+        cl,
+        v,
+    };
+    emit_amount_box(code, &mut a, p, give_amount, &ab, (src, fi, si));
     a.jmp(Opcode::JAlways { offset: 0 }, "out");
     a.label("whole");
-    a.op(Opcode::Call2 {
+    a.op(Opcode::Call3 {
         dst: v,
         fun: give_n,
         arg0: src,
-        arg1: n,
+        arg1: fi,
+        arg2: n,
     });
     close_trap(&mut a, exc, res, v, report, None);
     a.label("fast");
@@ -4365,8 +4475,10 @@ fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
     let target = add_target(code, p, &g, alive, panel_inv)?;
     let close = add_close(code, p, &g)?;
     let close_panel = add_close_panel(code, p, &g, report, close)?;
-    let give_n = add_give_n(code, p, report, target, noop)?;
-    let give = add_give(code, p, &g, report, foreign, slot_inv, target, give_n)?;
+    let give_n = add_give_n(code, p, report, alive, noop)?;
+    let give_amount = add_give_amount(code, p, report, give_n)?;
+    let gives = (give_n, give_amount);
+    let give = add_give(code, p, &g, report, foreign, slot_inv, target, gives)?;
     let hover = add_hover(code, p, &g, report, foreign)?;
     let add_panel = add_add_panel(code, p, close_panel, drag.panel)?;
     let toggle = add_toggle(code, p, &g, report, close, add_panel)?;
@@ -4374,7 +4486,7 @@ fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
     let tick = add_tick(code, p, &g, report, close, panel_inv, alive)?;
     let fgn_cancel = add_fgn_cancel(code, p)?;
     let fgn_pick = add_fgn_pick(code, p, &g, report, foreign, fgn_cancel)?;
-    let fgn_click = add_fgn_click(code, p, &g, report, foreign, slot_inv, give_n)?;
+    let fgn_click = add_fgn_click(code, p, &g, report, foreign, slot_inv, gives)?;
     for (f, n) in [
         (report, "mpAllInvReport"),
         (slot_inv, "mpAllInvSlotInv"),
@@ -4385,6 +4497,7 @@ fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
         (close, "mpAllInvClose"),
         (close_panel, "mpAllInvClosePanel"),
         (give_n, "mpAllInvGiveN"),
+        (give_amount, "mpAllInvGiveAmount"),
         (give, N_GIVE),
         (hover, N_HOVER),
         (add_panel, "mpAllInvAddPanel"),
@@ -4710,7 +4823,7 @@ mod tests {
         let back = read(&patched);
 
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + window_drag::API_FNS + 19);
+        assert_eq!(back.functions.len(), n + window_drag::API_FNS + 20);
         assert_eq!(back.types[..orig.types.len()], orig.types[..]);
         let u = &p.u;
         let sites = [
@@ -4777,24 +4890,24 @@ mod tests {
         shifted(a, b, u.bar_ret, 1);
         check_types(&back, b, u.bar_ret..u.bar_ret + 1);
         check_flow(b);
-        // appended after window_drag's API_FNS, in build() order: ... button (14), tick (15)
+        // appended after window_drag's API_FNS, in build() order: ... give (11), button (15), tick (16)
         let mine = |k: usize| back.functions[n + window_drag::API_FNS + k].findex;
         assert!(
-            matches!(b.ops[u.bar_ret], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(14))
+            matches!(b.ops[u.bar_ret], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(15))
         );
         let up = &back.functions[u.ui_update_fi];
-        assert!(matches!(up.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(15)));
+        assert!(matches!(up.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(16)));
         let rc = &back.functions[u.right_click_fi];
-        assert!(matches!(rc.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(10)));
+        assert!(matches!(rc.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(11)));
         let tip = &back.functions[u.tip_fi];
-        assert!(matches!(tip.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(11)));
-        // drag & drop: pick (17) in Slot.netPick, click (18) in the click closure
+        assert!(matches!(tip.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(12)));
+        // drag & drop: pick (18) in Slot.netPick, click (19) in the click closure
         let np = &back.functions[u.net_pick_fi];
         assert!(
-            matches!(np.ops[0], Opcode::Call2 { fun, arg0: Reg(0), arg1: Reg(2), .. } if fun == mine(17))
+            matches!(np.ops[0], Opcode::Call2 { fun, arg0: Reg(0), arg1: Reg(2), .. } if fun == mine(18))
         );
         let ck = &back.functions[u.click_fi];
-        assert!(matches!(ck.ops[1], Opcode::Call2 { fun, arg1: Reg(1), .. } if fun == mine(18)));
+        assert!(matches!(ck.ops[1], Opcode::Call2 { fun, arg1: Reg(1), .. } if fun == mine(19)));
         assert!(
             matches!(ck.ops[0], Opcode::EnumField { value: Reg(0), construct, field, .. }
             if (construct, field) == u.click_env)
@@ -4810,7 +4923,7 @@ mod tests {
             check_types(&back, f, 0..f.ops.len());
             traps += traps_ok(f);
         }
-        assert_eq!(traps, 17 + 10); // window_drag's 17 + ours
+        assert_eq!(traps, 17 + 11); // window_drag's 17 + ours
 
         // Idempotent: every part refuses, the image stays as is.
         let mut again = read(&patched);
@@ -5146,6 +5259,9 @@ mod tests {
                         let o = r[rr(obj)].clone();
                         self.set(&o, DYN + field.0, r[rr(src)].clone());
                     }
+                    Opcode::DynGet { dst, obj, field } => {
+                        r[rr(dst)] = self.get(&r[rr(obj)], DYN + field.0)
+                    }
                     Opcode::Float { dst, ptr } => r[rr(dst)] = V::F(code.floats[ptr.0]),
                     Opcode::ToInt { dst, src } => {
                         let V::F(x) = r[rr(src)] else { panic!("ToInt") };
@@ -5445,7 +5561,7 @@ mod tests {
         let u = &pl.u;
         let fun = |n: &str| find_named(&code, n).expect(n);
         let (foreign, give, tick) = (fun(N_FOREIGN), fun(N_GIVE), fun(N_TICK));
-        let (target, give_n) = (fun("mpAllInvTarget"), fun("mpAllInvGiveN"));
+        let (target, give_amount) = (fun("mpAllInvTarget"), fun("mpAllInvGiveAmount"));
         // build() appends, after window_drag's globals: box, gi, target, btn, icon, logs
         let gi_g = (orig.globals.len()..code.globals.len())
             .find(|&i| code.globals[i] == u.gi_t)
@@ -5584,13 +5700,34 @@ mod tests {
         let V::Clo(cb, bound) = &args[3] else {
             panic!()
         };
-        assert_eq!((*cb, (**bound).clone()), (give_n, slot_a.clone()));
+        assert_eq!(*cb, give_amount);
+        let o = (**bound).clone();
         sim.log.clear();
-        sim.run(give_n, vec![slot_a.clone(), V::I(3)]);
+        sim.run(give_amount, vec![o.clone(), V::I(3)]);
         assert_eq!(netop(&sim.log), [(inv_b.clone(), V::I(3))]);
         sim.log.clear();
-        sim.run(give_n, vec![slot_a.clone(), V::I(0)]);
+        sim.run(give_amount, vec![o.clone(), V::I(0)]);
         assert!(sim.log.is_empty(), "nothing for 0");
+        // the recipient is the one of the box: hovering C meanwhile changes nothing
+        sim.set(&c, u.bp_connected.0, V::B(true));
+        sim.globals.insert(gtarget.0, inv_c.clone());
+        sim.run(give_amount, vec![o.clone(), V::I(2)]);
+        assert_eq!(netop(&sim.log), [(inv_b.clone(), V::I(2))]);
+        // B left before the confirm: nothing given, no fallback to C
+        sim.set(&b, u.bp_connected.0, V::B(false));
+        sim.log.clear();
+        sim.run(give_amount, vec![o.clone(), V::I(2)]);
+        assert!(sim.log.is_empty(), "{:?}", sim.log);
+        sim.set(&b, u.bp_connected.0, V::B(true));
+        // the slot no longer holds that item: nothing given
+        let other = item(&mut sim, 7, false);
+        let held = sim.get(&slot_a, ITEM);
+        sim.set(&slot_a, ITEM, other);
+        sim.run(give_amount, vec![o.clone(), V::I(2)]);
+        assert!(sim.log.is_empty(), "{:?}", sim.log);
+        sim.set(&slot_a, ITEM, held);
+        sim.set(&c, u.bp_connected.0, V::B(false));
+        sim.globals.insert(gtarget.0, inv_b.clone());
         sim.shift = false;
         // a locked item is not given
         let locked = item(&mut sim, 1, true);
@@ -5837,7 +5974,11 @@ mod tests {
         patch_all_inv(&mut code);
         let u = &pl.u;
         let fun = |n: &str| find_named(&code, n).expect(n);
-        let (pick, click, give_n) = (fun(N_FGN_PICK), fun(N_FGN_CLICK), fun("mpAllInvGiveN"));
+        let (pick, click, give_amount) = (
+            fun(N_FGN_PICK),
+            fun(N_FGN_CLICK),
+            fun("mpAllInvGiveAmount"),
+        );
         let gi_g = (orig.globals.len()..code.globals.len())
             .find(|&i| code.globals[i] == u.gi_t)
             .expect("gi global");
@@ -6128,8 +6269,16 @@ mod tests {
             V::B(true)
         );
         assert_eq!(names(&sim.log), ["stopPick", "select"]);
-        assert!(matches!(&sim.log[1].1[3], V::Clo(f, s) if *f == give_n && **s == slot_a));
+        let V::Clo(f, o) = sim.log[1].1[3].clone() else {
+            panic!("{:?}", sim.log)
+        };
+        assert_eq!(f, give_amount);
         assert_eq!(sim.global(gtarget), inv_c);
+        // confirmed after B became the target: still C's, from slot_a
+        sim.globals.insert(gtarget.0, inv_b.clone());
+        sim.log.clear();
+        sim.run(give_amount, vec![*o, V::I(2)]);
+        assert_eq!(netop(&sim.log), [(inv_c.clone(), V::I(2), slot_a.clone())]);
         sim.shift = false;
         flush(&mut sim);
         // back in slot_a is another kind, or fewer than the hand: nothing given

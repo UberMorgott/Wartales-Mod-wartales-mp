@@ -490,7 +490,9 @@ containers keep the conversion. (U) take = the vanilla FoundItems right click
 `ItemSlot.onRightClick` op 0: while panels are open, ctrl + right click on the
 own inventory sends `MoveTo(target, stack)` through the slot API (ctrl +
 shift: amount box), target = the panel last hovered (`getTipContent` op 0) or
-right-clicked, else the first, connected players only. `GameUI.update` op 0
+right-clicked, else the first, connected players only; the amount box keeps
+the recipient and item it opened with and gives nothing if that player left
+or the slot changed meanwhile. `GameUI.update` op 0
 closes the panels in battle, while loading, in an arena fight, in solo or when
 the HUD was rebuilt, and drops the panel of a player who disconnected. All
 players need this build. Appended functions run under a trap (`mp: allinv:
