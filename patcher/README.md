@@ -480,7 +480,9 @@ and 0.4 s later the grade's sound (`game.ui.sfx`) and the vanilla particle
 prefabs at the shard (scene `allShards` child), else the `anvil`, else the
 worker, removed after 1.5 s; end plays `animSuccess` ("ForgeYes") on Success,
 else `animFail` ("ForgeMeh"). shim.log: `mp: forge send <code> <a> <b> <uid>`
-and `mp: forge recv <code> <a> <b> <stage>` (5 start, 6 end, 7 hit). All
+and `mp: forge recv <code> <a> <b> <stage>` (5 start, 6 end, 7 hit); a send
+that does not happen prints `mp: forge send skip <code> <step>` (1 no game,
+2 no controller, 3 solo, 4 no activity, 5 no target, 0 exception). All
 players need this build (an older one shows a far-away ping with its sound).
 Archery and the UnitAction kinds: see the work mirror below. Skipped (logged)
 on mismatch.

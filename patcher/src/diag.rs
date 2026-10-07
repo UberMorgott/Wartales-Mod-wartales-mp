@@ -15,7 +15,9 @@
 // The pass adds `Sys.println` calls and nothing else:
 //   - shiro.online.Log.logError: the message (`Std.string` of it), once it is
 //     past the game's own online error cap and its repeat check (`lastERROR`),
-//     so a spamming error prints as rarely as the game reports it;
+//     so a spamming error prints as rarely as the game reports it; then
+//     `mp: error stack: <line> | <line> ...`, the stack logError already
+//     builds for its online report (where an uncaught error was thrown);
 //   - the barrier, one line per step:
 //       syncLeaveMode / syncEnterMode   lockSync, waitLocks.length
 //       waitForClients                  waitLocks.length, game.host.clients.length
@@ -82,6 +84,10 @@ struct Plan {
     /// Where logError prints, and the register holding its String message.
     log_at: usize,
     log_msg: Reg,
+    /// logError's call stack lines (`Array<String>`, later its log entry's
+    /// `stack`), complete at `log_at`; joined by `ArrayObj.join`.
+    log_stack: Reg,
+    arr_join: RefFun,
     fns: Fns,
     types: Types,
     probes: Vec<Probe>,
@@ -272,6 +278,32 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if (0..lops.len()).any(|i| jump_targets(log_error_f, i).contains(&log_at)) {
         bail!("logError: the op after the lastERROR store is a jump target");
     }
+    // The stack lines: the Array<String> stored as the entry's `stack` after
+    // the dedup, already filled (no write to it between the store and there).
+    let arr_t = obj_type(code, "hl.types.ArrayObj")?;
+    let (set_at, log_stack) = (store..lops.len())
+        .find_map(|i| match lops[i] {
+            Opcode::SetField { src, .. } if field_named(&lops[i], "stack", true) => Some((i, src)),
+            _ => None,
+        })
+        .context("logError: no `stack` store after the dedup")?;
+    if log_error_f.regs[log_stack.0 as usize] != arr_t {
+        bail!("logError: the stack is not an ArrayObj");
+    }
+    let wrote = format!("dst: Reg({})", log_stack.0);
+    if lops[store..set_at]
+        .iter()
+        .any(|op| format!("{op:?}").contains(&wrote))
+        || !lops[..store]
+            .iter()
+            .any(|op| format!("{op:?}").contains(&wrote))
+    {
+        bail!("logError: the stack is not complete at the lastERROR store");
+    }
+    let arr_join = proto(code, arr_t, "join")?;
+    if fun_args(code, &code.functions[index_of(code, arr_join)?]) != [arr_t, str_t] {
+        bail!("unexpected ArrayObj.join signature");
+    }
 
     let ctrl_t = obj_type(code, "st.Controller")?;
     let game_t = obj_type(code, "Game")?;
@@ -460,6 +492,8 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         log_error,
         log_at,
         log_msg: msg,
+        log_stack,
+        arr_join,
         fns: Fns {
             println: println.findex,
             std_string,
@@ -481,23 +515,60 @@ fn apply(code: &mut Bytecode, p: Plan) {
         log_error,
         log_at,
         log_msg,
+        log_stack,
+        arr_join,
         fns,
         types,
         probes,
     } = p;
 
-    // logError: Sys.println(msg) once past the error cap and the repeat check.
+    // logError: Sys.println(msg) once past the error cap and the repeat check,
+    // then println("mp: error stack: " + stack.join(" | ")): where it threw.
+    let (pre, sep) = (
+        str_global(code, types.str_t, "mp: error stack: "),
+        str_global(code, types.str_t, " | "),
+    );
     let f = &mut code.functions[log_error];
-    f.regs.push(types.void_t);
-    let v = Reg((f.regs.len() - 1) as u32);
+    let mut reg = |t: RefType| {
+        f.regs.push(t);
+        Reg((f.regs.len() - 1) as u32)
+    };
+    let (v, s1, s2) = (reg(types.void_t), reg(types.str_t), reg(types.str_t));
     insert_ops(
         f,
         log_at,
-        vec![Opcode::Call1 {
-            dst: v,
-            fun: fns.println,
-            arg0: log_msg,
-        }],
+        vec![
+            Opcode::Call1 {
+                dst: v,
+                fun: fns.println,
+                arg0: log_msg,
+            },
+            Opcode::GetGlobal {
+                dst: s1,
+                global: sep,
+            },
+            Opcode::Call2 {
+                dst: s2,
+                fun: arr_join,
+                arg0: log_stack,
+                arg1: s1,
+            },
+            Opcode::GetGlobal {
+                dst: s1,
+                global: pre,
+            },
+            Opcode::Call2 {
+                dst: s1,
+                fun: fns.str_add,
+                arg0: s1,
+                arg1: s2,
+            },
+            Opcode::Call1 {
+                dst: v,
+                fun: fns.println,
+                arg0: s1,
+            },
+        ],
     );
 
     let minus_one = int_const(code, -1);
@@ -733,6 +804,11 @@ mod tests {
             matches!(lb.ops[p.log_at], Opcode::Call1 { fun, arg0, .. } if fun == println && arg0 == p.log_msg)
         );
         assert!(matches!(lb.ops[p.log_at - 1], Opcode::SetField { .. }));
+        // ... and its call stack, joined, on the next line.
+        assert!(matches!(lb.ops[p.log_at + 2],
+            Opcode::Call2 { fun, arg0, .. } if fun == p.arr_join && arg0 == p.log_stack));
+        assert!(matches!(lb.ops[p.log_at + 5], Opcode::Call1 { fun, .. } if fun == println));
+        crate::asm::testutil::check_types(&back, lb, p.log_at..p.log_at + 6);
         // No String is boxed with ToDyn on its way to println.
         for &(fi, _) in &at {
             let b = &back.functions[fi];

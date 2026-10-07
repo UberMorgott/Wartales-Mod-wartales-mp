@@ -57,7 +57,10 @@
 //     once, then idle. Anim names come from the ForgeAction constructor.
 // shim.log: `mp: forge send <code> <a> <b> <uid>` on the forging machine and
 // `mp: forge recv <code> <a> <b> <stage>` on the others (stage 5 start, 6 end,
-// 7 hit played; lower: where it stopped).
+// 7 hit played; lower: where it stopped). A send that does not happen prints
+// `mp: forge send skip <code> <step>` (1 no game, 2 no controller, 3 no network
+// host: solo, 4 no activity, 5 no activity target, 0 an exception). No line at
+// all: ForgeAction never ran (the activity was cancelled before its start).
 //
 // The validated types / fields / functions every mirror needs, the idle and
 // one-shot anim code and the ping__impl hook live in mirror.rs (shared with
@@ -367,6 +370,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
 /// String globals the appended functions read.
 pub(crate) struct Strs {
     send_tag: RefGlobal,
+    skip_tag: RefGlobal,
     recv_tag: RefGlobal,
     sp: RefGlobal,
     shards: RefGlobal,
@@ -384,6 +388,7 @@ fn strs(code: &mut Bytecode, p: &Plan) -> Strs {
     let g = |code: &mut Bytecode, v: &'static str| str_global(code, p.str_t, v);
     let s = Strs {
         send_tag: g(code, "mp: forge send"),
+        skip_tag: g(code, "mp: forge send skip"),
         recv_tag: g(code, "mp: forge recv"),
         sp: g(code, " "),
         shards: g(code, "allShards"),
@@ -436,24 +441,26 @@ fn add_send(code: &mut Bytecode, p: &Plan, st: &Strs) -> Result<RefFun> {
         r.r(p.void_),
     );
     let sent = float_const(code, SENTINEL);
+    let step = r.r(p.i32_);
     let mut a = Asm::new();
     a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
-    let get = |a: &mut Asm, dst: Reg, obj: Reg, field: RefField| {
+    // Each early exit names its step in `mp: forge send skip <code> <step>`.
+    let get = |a: &mut Asm, dst: Reg, obj: Reg, field: RefField, skip: &'static str| {
         a.op(Opcode::Field { dst, obj, field });
         a.jmp(
             Opcode::JNull {
                 reg: dst,
                 offset: 0,
             },
-            "untrap",
+            skip,
         );
     };
-    get(&mut a, game, win, p.w_game);
-    get(&mut a, ctrl, game, p.g_ctrl);
+    get(&mut a, game, win, p.w_game, "skip1");
+    get(&mut a, ctrl, game, p.g_ctrl, "skip2");
     // solo: no network, nothing to mirror
-    get(&mut a, host, ctrl, p.c_host);
-    get(&mut a, act, win, p.w_act);
-    get(&mut a, tgt, act, p.a_target);
+    get(&mut a, host, ctrl, p.c_host, "skip3");
+    get(&mut a, act, win, p.w_act, "skip4");
+    get(&mut a, tgt, act, p.a_target, "skip5");
     a.op(Opcode::Field {
         dst: uid,
         obj: tgt,
@@ -559,9 +566,22 @@ fn add_send(code: &mut Bytecode, p: &Plan, st: &Strs) -> Result<RefFun> {
         args: vec![ctrl, xf, yf, zf, me],
     });
     emit_log(&mut a, &mut r, p, st.send_tag, st.sp, &[kind, arg, b, uid]);
-    a.label("untrap");
     a.op(Opcode::EndTrap { exc });
+    a.op(Opcode::Ret { ret: v });
+    // skip steps: 1 no game, 2 no controller, 3 no network host (solo),
+    // 4 no activity, 5 no activity target; 0 an exception
+    for k in 1..=5 {
+        a.label(["skip1", "skip2", "skip3", "skip4", "skip5"][k - 1]);
+        int(&mut a, code, step, k as i32);
+        a.jmp(Opcode::JAlways { offset: 0 }, "skipped");
+    }
+    a.label("skipped");
+    a.op(Opcode::EndTrap { exc });
+    a.jmp(Opcode::JAlways { offset: 0 }, "log_skip");
     a.label("catch");
+    int(&mut a, code, step, 0);
+    a.label("log_skip");
+    emit_log(&mut a, &mut r, p, st.skip_tag, st.sp, &[kind, step]);
     a.op(Opcode::Ret { ret: v });
     push_fn(
         code,
@@ -2153,11 +2173,32 @@ mod tests {
         let lone = sim.obj(&[]);
         sim.run(send, vec![win.clone(), V::I(2), V::I(p.success), lone]);
         assert_eq!(sim.take("ping")[0][3], z(2, p.success, 0));
-        // solo (no network host): nothing sent
+        sim.log.clear();
+        // no activity target: nothing sent, step 5 logged
+        let act2 = sim.obj(&[]);
+        let win2 = sim.obj(&[(p.w_game, w.game.clone()), (p.w_act, act2)]);
+        sim.run(send, vec![win2, V::I(1), V::I(0), V::Null]);
+        assert!(sim.take("ping").is_empty());
+        assert_eq!(
+            sim.take("println"),
+            vec![vec![V::S("mp: forge send skip 1 5".into())]]
+        );
+        // window without its activity: step 4
+        let win3 = sim.obj(&[(p.w_game, w.game.clone())]);
+        sim.run(send, vec![win3, V::I(0), V::I(0), V::Null]);
+        assert_eq!(
+            sim.take("println"),
+            vec![vec![V::S("mp: forge send skip 0 4".into())]]
+        );
+        // solo (no network host): nothing sent, step 3 logged
         let ctrl = sim.get(&w.game, p.g_ctrl);
         sim.key_set(&ctrl, format!("f{}", p.c_host.0), V::Null);
-        sim.log.clear();
         sim.run(send, vec![win, V::I(1), V::I(0), V::Null]);
+        assert!(sim.take("ping").is_empty());
+        assert_eq!(
+            sim.take("println"),
+            vec![vec![V::S("mp: forge send skip 1 3".into())]]
+        );
         assert!(sim.log.is_empty());
     }
 }
