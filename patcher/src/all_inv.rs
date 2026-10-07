@@ -41,7 +41,10 @@
 //      - Toggle: in GameUI's dom (HUD root) an absolute horizontal flow at the
 //        left edge (BOX_ATTRS) gets, per other
 //        connected player j, a panel shaped like the vanilla #inventory one
-//        (`element#inventory` > `.title` (nickname, Close icon) +
+//        (`element#inventory` > `.title` (getName: nickname in the player
+//        colour; Close icon) + (styled inline: PANEL_ATTRS / TITLE_ATTRS / ...,
+//        the game-inventory CSS does not reach the HUD root; the title is
+//        the drag handle) +
 //        `inventory-content` with `new ui.comp.Inventory(FoundItems,
 //        p.inventory, 6, content)`), made draggable with
 //        `mpDragPanel(panel, "AllInv#" + j)` (window_drag; positions kept).
@@ -102,6 +105,41 @@ const BOX_ATTRS: &[(&str, &str)] = &[
     ("offset", "10 -70"),
 ];
 const TIP: &str = "Co-op inventories";
+// The panels live on the HUD root, outside game-inventory, so none of the
+// `game-inventory #inventory ...` rules (style.css) reach them: the look of
+// the vanilla inventory panel is given inline (domkit parses attributes as
+// CSS values).
+const PANEL_ATTRS: &[(&str, &str)] = &[
+    ("class", "inventory mpAllInvPanel"),
+    ("id", "inventory"),
+    ("layout", "vertical"),
+    ("padding", "0 0 5 5"),
+    ("cursor", "default"),
+    ("background", "url(\"ui/elements/InventoryBg.png\") 50 50"),
+];
+/// The header row (the drag handle): nickname left, close button right.
+const TITLE_ATTRS: &[(&str, &str)] = &[
+    ("class", "title"),
+    ("height", "50"),
+    ("min-width", "220"),
+    ("padding-left", "20"),
+    ("padding-right", "44"),
+    ("content-valign", "middle"),
+];
+const NAME_ATTRS: &[(&str, &str)] = &[
+    ("font", "'ui/fonts/eb_garamond_medium.fnt' 19 multi 0.5 0.5"),
+    ("color", "#969696"),
+];
+/// `.window icon.windowClose` + the inventory panel's offset.
+const CLOSE_ATTRS: &[(&str, &str)] = &[
+    ("class", "windowClose"),
+    ("networkable", "false"),
+    ("position", "absolute"),
+    ("align", "top right"),
+    ("offset", "-10 15"),
+    ("scale", "0.5"),
+    ("cursor", "button"),
+];
 const ROWS: i32 = 6;
 /// Ancestors searched from a slot for its ui.comp.Inventory.
 const DEPTH: i32 = 8;
@@ -756,8 +794,10 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
     if stt.args.len() != 2 || stt.args[1] != str_t {
         bail!("set_text signature");
     }
-    let user_name = method(code, bp_t, "getUserName")?.findex;
-    want(code, user_name, "BasePlayer.getUserName", &[bp_t], str_t)?;
+    // getName: the nickname in <font color=...> (player colour), as the players
+    // panel and timeline_list show it; the title is a TextFixed (an HtmlText).
+    let user_name = method(code, bp_t, "getName")?.findex;
+    want(code, user_name, "BasePlayer.getName", &[bp_t], str_t)?;
 
     // ItemSlot
     let slot_t = obj_type(code, "ui.comp.ItemSlot")?;
@@ -2280,7 +2320,7 @@ fn add_add_panel(
         Reg(0),
         "element",
         None,
-        &[("class", "inventory"), ("id", "inventory")],
+        PANEL_ATTRS,
     );
     a.op(Opcode::Field {
         dst: po,
@@ -2288,18 +2328,8 @@ fn add_add_panel(
         field: props_obj,
     });
     a.jmp(Opcode::JNull { reg: po, offset: 0 }, "ret");
-    emit_create(
-        &mut a,
-        code,
-        p,
-        &c,
-        tp,
-        pp,
-        "flow",
-        None,
-        &[("class", "title")],
-    );
-    emit_create(&mut a, code, p, &c, xp, tp, "text-fixed", None, &[]);
+    emit_create(&mut a, code, p, &c, tp, pp, "flow", None, TITLE_ATTRS);
+    emit_create(&mut a, code, p, &c, xp, tp, "text-fixed", None, NAME_ATTRS);
     a.op(Opcode::Field {
         dst: xo,
         obj: xp,
@@ -2335,7 +2365,7 @@ fn add_add_panel(
         tp,
         "icon",
         Some(p.close_g),
-        &[("class", "windowClose"), ("networkable", "false")],
+        CLOSE_ATTRS,
     );
     a.op(Opcode::Field {
         dst: io,
@@ -4643,6 +4673,14 @@ mod tests {
             assert_eq!(
                 title.iter().map(|o| sim.get(o, TAG)).collect::<Vec<_>>(),
                 [s("text-fixed"), s("icon")]
+            );
+            // header: the owner's name (getName: nickname in the player colour)
+            assert!(sim
+                .log
+                .contains(&("set", vec![title[0].clone(), s("nick")])));
+            assert!(
+                matches!(sim.get(&title[1], u.blk.onclick.0), V::Clo(..)),
+                "close button"
             );
             let drags: Vec<&V> = sim
                 .log
