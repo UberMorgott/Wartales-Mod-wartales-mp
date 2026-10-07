@@ -45,13 +45,6 @@ struct Plan {
     yes: Reg,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn reads(op: &Opcode, r: Reg) -> bool {
     // Debug text lists every register an op names; enough to prove a register is unused.
     let s = format!("{op:?}");

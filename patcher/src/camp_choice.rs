@@ -8,7 +8,7 @@
 // and aptitude count on either side of that grant.
 
 use super::*;
-use crate::diag::{index_of, static_fn};
+use crate::diag::static_fn;
 use crate::job_xp::str_global;
 use hlbc::types::{RefGlobal, RefInt, ValBool};
 
@@ -175,19 +175,19 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     Ok(Plan {
         probes: vec![
             Probe {
-                fi: index_of(code, request.findex)?,
+                fi: fun_index(code, request.findex)?,
                 at: 0,
                 tag: REQUEST,
                 parts: click_parts(),
             },
             Probe {
-                fi: index_of(code, resolved.findex)?,
+                fi: fun_index(code, resolved.findex)?,
                 at: lookup_at + 1,
                 tag: RESOLVED,
                 parts: resolve_parts,
             },
             Probe {
-                fi: index_of(code, gain.findex)?,
+                fi: fun_index(code, gain.findex)?,
                 at: 0,
                 tag: GAINS,
                 parts: vec![
@@ -197,13 +197,13 @@ fn plan(code: &Bytecode) -> Result<Plan> {
                 ],
             },
             Probe {
-                fi: index_of(code, gain.findex)?,
+                fi: fun_index(code, gain.findex)?,
                 at: award_at,
                 tag: BEFORE,
                 parts: award_parts(),
             },
             Probe {
-                fi: index_of(code, gain.findex)?,
+                fi: fun_index(code, gain.findex)?,
                 at: award_at + 1,
                 tag: AFTER,
                 parts: award_parts(),

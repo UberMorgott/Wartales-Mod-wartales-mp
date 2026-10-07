@@ -118,13 +118,6 @@ fn field_name_of(code: &Bytecode, t: RefType, field: RefField) -> Option<&str> {
     fields.get(field.0).map(|f| s(code, f.name))
 }
 
-pub(crate) fn index_of(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 /// Callee and argument registers of a direct call.
 pub(crate) fn call_of(op: &Opcode) -> Option<(RefFun, Vec<Reg>)> {
     Some(match op {
@@ -181,7 +174,7 @@ pub(crate) fn closure_passed_to(code: &Bytecode, fi: usize, callee: RefFun) -> R
             _ => None,
         })
         .with_context(|| format!("fn@{}: no closure passed to fn@{}", f.findex.0, callee.0))?;
-    index_of(code, c)
+    fun_index(code, c)
 }
 
 /// Index of the op right after the first `ArrayObj.remove(this.waitLocks, ..)`.
@@ -205,7 +198,7 @@ fn after_wait_locks_remove(f: &Function, wait_locks: RefField, remove: RefFun) -
 
 fn plan(code: &Bytecode) -> Result<Plan> {
     let log_error_f = static_fn(code, "shiro.online.$Log", "logError")?;
-    let log_error = index_of(code, log_error_f.findex)?;
+    let log_error = fun_index(code, log_error_f.findex)?;
     let println = static_fn(code, "$Sys", "println")?;
     let std_string = static_fn(code, "$Std", "string")?.findex;
     let str_add = static_fn(code, "$String", "__add__")?.findex;
@@ -301,7 +294,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("logError: the stack is not complete at the lastERROR store");
     }
     let arr_join = proto(code, arr_t, "join")?;
-    if fun_args(code, &code.functions[index_of(code, arr_join)?]) != [arr_t, str_t] {
+    if fun_args(code, &code.functions[fun_index(code, arr_join)?]) != [arr_t, str_t] {
         bail!("unexpected ArrayObj.join signature");
     }
 
@@ -361,7 +354,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         ]
     };
 
-    let m = |name: &str| -> Result<usize> { index_of(code, method(code, ctrl_t, name)?.findex) };
+    let m = |name: &str| -> Result<usize> { fun_index(code, method(code, ctrl_t, name)?.findex) };
     let remove = method(code, arr_t, "remove")?.findex;
     let sync_leave = m("syncLeaveMode")?;
     let sync_enter = m("syncEnterMode")?;

@@ -49,19 +49,6 @@ struct Plan {
     dbg_file: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let fun = &code.functions[fun_index(code, f)?];
-    let t = fun.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
 /// Proto `name` of class `t` or its nearest ancestor: (function, vtable index).
 fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, RefField)> {
     let mut cur = Some(t);

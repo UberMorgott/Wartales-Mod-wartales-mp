@@ -104,51 +104,6 @@ const DURATION: f64 = 3.0;
 const BLINK_RATE: f64 = 6.0;
 const ALPHA: f64 = 0.85;
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-pub(crate) fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let t = match code.natives.iter().find(|n| n.findex == f) {
-        Some(n) => n.t,
-        None => code.functions[fun_index(code, f)?].t,
-    };
-    let t = t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
-pub(crate) fn fname(code: &Bytecode, f: RefFun) -> &str {
-    code.functions
-        .iter()
-        .find(|g| g.findex == f)
-        .map(|g| s(code, g.name))
-        .unwrap_or("")
-}
-
-/// The class global of `name` (HL stores it 1-based) and its type `pkg.$Cls`.
-pub(crate) fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
-    let o = obj(code, obj_type(code, name)?)?;
-    let g = RefGlobal(
-        o.global
-            .0
-            .checked_sub(1)
-            .with_context(|| format!("{name}: no class global"))?,
-    );
-    let t = *code
-        .globals
-        .get(g.0)
-        .with_context(|| format!("{name}: class global out of range"))?;
-    let (pkg, cls) = name.rsplit_once('.').unwrap_or(("", name));
-    let want = format!("{pkg}.${cls}");
-    if obj(code, t).ok().map(|o| s(code, o.name)) != Some(want.as_str()) {
-        bail!("{name}: class global is not {want}");
-    }
-    Ok((g, t))
-}
-
 // ---------- 1. depth sample in texture pixels (Game.ping) ----------
 
 struct DepthPlan {
@@ -651,12 +606,27 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     }
     let (cset_cls, cset_cls_t) = class_global(code, "gfx.shader.ColorSet")?;
     let remove_shaders = proto(code, m_pass.1, "removeShaders")?;
-    want(remove_shaders, "Pass.removeShaders", &[m_pass.1, ga[1]], void_)?;
+    want(
+        remove_shaders,
+        "Pass.removeShaders",
+        &[m_pass.1, ga[1]],
+        void_,
+    )?;
     let add_shader = proto(code, m_pass.1, "addShader")?;
-    want(add_shader, "Pass.addShader", &[m_pass.1, shader_t], shader_t)?;
+    want(
+        add_shader,
+        "Pass.addShader",
+        &[m_pass.1, shader_t],
+        shader_t,
+    )?;
     // new ColorSet(?color: Int): color__ = rgb(color), amount = 1
     let cset_ctor = method(code, cset_t, "__constructor__")?.findex;
-    want(cset_ctor, "ColorSet.__constructor__", &[cset_t, ref_i32], void_)?;
+    want(
+        cset_ctor,
+        "ColorSet.__constructor__",
+        &[cset_t, ref_i32],
+        void_,
+    )?;
     let wait = proto(code, ev_t, "wait")?;
     let (wa, wr) = sig(code, wait)?;
     let wait_until = proto(code, ev_t, "waitUntil")?;
@@ -1682,7 +1652,13 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         arg0: pass,
         arg1: ccls,
     });
-    a.jmp(Opcode::JNull { reg: shd, offset: 0 }, "next");
+    a.jmp(
+        Opcode::JNull {
+            reg: shd,
+            offset: 0,
+        },
+        "next",
+    );
     a.op(Opcode::Call2 {
         dst: v,
         fun: p.remove_shaders,
@@ -2069,11 +2045,17 @@ mod tests {
                     } else if f == p.alloc_str {
                         a[0].clone()
                     } else if f == p.add_str {
-                        let (V::S(x), V::S(y)) = (&a[0], &a[1]) else { panic!("add {a:?}") };
+                        let (V::S(x), V::S(y)) = (&a[0], &a[1]) else {
+                            panic!("add {a:?}")
+                        };
                         V::S(format!("{x}{y}"))
                     } else if f == p.get_const {
                         let V::S(key) = &a[0] else { panic!("getConst") };
-                        let i = key.strip_prefix("PlayerColor").unwrap().parse::<usize>().unwrap();
+                        let i = key
+                            .strip_prefix("PlayerColor")
+                            .unwrap()
+                            .parse::<usize>()
+                            .unwrap();
                         let cv = c.obj(&[(p.cv_color.0, V::I(colors[i - 1]))]);
                         name("getConst", a, c);
                         cv
@@ -2104,7 +2086,9 @@ mod tests {
                         assert_eq!(a[1], V::Null, "hex digits");
                         V::S(format!("{x:X}"))
                     } else if f == p.std_string {
-                        let V::I(x) = a[0] else { panic!("Std.string {a:?}") };
+                        let V::I(x) = a[0] else {
+                            panic!("Std.string {a:?}")
+                        };
                         V::S(x.to_string())
                     } else if f == p.println {
                         name("println", a, c);

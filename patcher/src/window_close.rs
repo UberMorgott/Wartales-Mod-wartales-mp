@@ -34,13 +34,6 @@ struct Plan {
     host: (RefField, RefType),
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     let window_t = obj_type(code, "ui.Window")?;
     let set_modal = method(code, window_t, "setModal")?;

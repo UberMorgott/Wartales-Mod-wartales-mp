@@ -36,13 +36,6 @@ struct Plan {
     ap_cost: RefField,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     let tip_t = obj_type(code, "ui.comp.SkillTip")?;
     let f = method(code, tip_t, "__constructor__")?;

@@ -69,13 +69,6 @@ struct Plan {
     fish_game: RefField,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn targets_any(f: &Function, range: std::ops::RangeInclusive<usize>) -> bool {
     (0..f.ops.len()).any(|i| jump_targets(f, i).iter().any(|t| range.contains(t)))
 }

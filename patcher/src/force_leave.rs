@@ -465,45 +465,6 @@ struct Plan {
     camp: Option<Camp>,
 }
 
-fn string_index(code: &Bytecode, value: &str) -> Result<RefString> {
-    code.strings
-        .iter()
-        .position(|v| v.as_str() == value)
-        .map(RefString)
-        .with_context(|| format!("string {value:?} not in the pool"))
-}
-
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let fun = &code.functions[fun_index(code, f)?];
-    let t = fun.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
-fn native(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result<RefFun> {
-    let hits: Vec<RefFun> = code
-        .natives
-        .iter()
-        .filter(|n| {
-            s(code, n.name) == name
-                && n.t
-                    .as_fun(code)
-                    .is_some_and(|t| t.args == args && t.ret == ret)
-        })
-        .map(|n| n.findex)
-        .collect();
-    match hits[..] {
-        [f] => Ok(f),
-        _ => bail!("expected one native {name}, found {}", hits.len()),
-    }
-}
-
 /// The vtable slot of method `name` declared (or overridden) by class `t`.
 fn slot(code: &Bytecode, t: RefType, name: &str) -> Result<RefField> {
     let o = obj(code, t)?;
@@ -514,42 +475,6 @@ fn slot(code: &Bytecode, t: RefType, name: &str) -> Result<RefField> {
         .with_context(|| format!("proto {name} not found on {}", s(code, o.name)))?;
     let i = usize::try_from(p.pindex).context("negative proto index")?;
     Ok(RefField(i))
-}
-
-/// The class global of `name` (HL stores it 1-based) and its type `pkg.$Cls`.
-fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
-    let o = obj(code, obj_type(code, name)?)?;
-    let g = RefGlobal(
-        o.global
-            .0
-            .checked_sub(1)
-            .with_context(|| format!("{name}: no class global"))?,
-    );
-    let t = *code
-        .globals
-        .get(g.0)
-        .with_context(|| format!("{name}: class global out of range"))?;
-    let (pkg, cls) = name.rsplit_once('.').unwrap_or(("", name));
-    let want = if pkg.is_empty() {
-        format!("${cls}")
-    } else {
-        format!("{pkg}.${cls}")
-    };
-    if obj(code, t).ok().map(|o| s(code, o.name)) != Some(want.as_str()) {
-        bail!("{name}: class global is not {want}");
-    }
-    Ok((g, t))
-}
-
-fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return Ok(true);
-        }
-        cur = obj(code, c)?.super_;
-    }
-    Ok(false)
 }
 
 fn no_jump_to(f: &Function, at: usize) -> bool {
@@ -680,7 +605,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let mut locks = vec![];
     for (name, guard) in LOCK_WINDOWS {
         let ct = obj_type(code, name)?;
-        if !is_sub(code, ct, win_t)? {
+        if !is_sub(code, ct, win_t) {
             bail!("{name} is not a ui.Window");
         }
         let (g, gt) = class_global(code, name)?;
@@ -704,7 +629,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         });
     }
     let aw_t = obj_type(code, "ui.win.ActivityWindow")?;
-    if !is_sub(code, aw_t, win_t)? {
+    if !is_sub(code, aw_t, win_t) {
         bail!("ui.win.ActivityWindow is not a ui.Window");
     }
     let act_win_cls = class_global(code, "ui.win.ActivityWindow")?;
@@ -715,13 +640,13 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
     let mut modal_ok = vec![];
     for name in MODAL_OK {
-        if !is_sub(code, obj_type(code, name)?, win_t)? {
+        if !is_sub(code, obj_type(code, name)?, win_t) {
             bail!("{name} is not a ui.Window");
         }
         modal_ok.push(class_global(code, name)?);
     }
     let npc_t = obj_type(code, "ent.p.Npc")?;
-    if !is_sub(code, npc_t, bp_locked.1)? {
+    if !is_sub(code, npc_t, bp_locked.1) {
         bail!("ent.p.Npc is not a BasePlayer.lockedWith type");
     }
     let npc_cls = class_global(code, "ent.p.Npc")?;
@@ -741,7 +666,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
 
     // ui.win.Dialog: Escape's tryClose = `visible && allowLeave -> leave(null)`.
     let dlg_t = obj_type(code, "ui.win.Dialog")?;
-    if !is_sub(code, dlg_t, win_t)? {
+    if !is_sub(code, dlg_t, win_t) {
         bail!("ui.win.Dialog is not a ui.Window");
     }
     let leave_btn = field(code, dlg_t, "leaveButton")?;
@@ -1082,7 +1007,7 @@ fn plan_camp(code: &Bytecode, p: &Plan) -> Result<(Camp, Vec<Lock>)> {
     };
 
     let cm_t = obj_type(code, "world.camp.CampMode")?;
-    if !is_sub(code, cm_t, p.g_mode.1)? {
+    if !is_sub(code, cm_t, p.g_mode.1) {
         bail!("CampMode is not a GameMode");
     }
     let cm_cls = class_global(code, "world.camp.CampMode")?;
@@ -1092,7 +1017,7 @@ fn plan_camp(code: &Bytecode, p: &Plan) -> Result<(Camp, Vec<Lock>)> {
         bail!("CampMode.rest is not an object");
     }
     let tool_t = obj_type(code, "st.item.Tool")?;
-    if !is_sub(code, tool_t, p.bp_locked.1)? {
+    if !is_sub(code, tool_t, p.bp_locked.1) {
         bail!("st.item.Tool is not a lockedWith type");
     }
     let tool_cls = class_global(code, "st.item.Tool")?;
@@ -1217,7 +1142,7 @@ fn plan_camp(code: &Bytecode, p: &Plan) -> Result<(Camp, Vec<Lock>)> {
     let mut locks = vec![];
     for name in CAMP_WINDOWS {
         let ct = obj_type(code, name)?;
-        if !is_sub(code, ct, p.win_t)? {
+        if !is_sub(code, ct, p.win_t) {
             bail!("{name} is not a ui.Window");
         }
         let (g, gt) = class_global(code, name)?;
@@ -1411,11 +1336,6 @@ struct Globals {
     tl_last: RefGlobal,
     /// The window the pending tavern leave closed last.
     tl_closed: RefGlobal,
-}
-
-fn add_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
-    code.globals.push(t);
-    RefGlobal(code.globals.len() - 1)
 }
 
 /// Int constant refs for every reason code.
@@ -5757,10 +5677,7 @@ mod tests {
             "ui.win.UnitAction",
         ] {
             let ct = obj_type(&orig, name).unwrap();
-            assert!(
-                is_sub(&orig, ct, aw).unwrap(),
-                "{name} is an ActivityWindow"
-            );
+            assert!(is_sub(&orig, ct, aw), "{name} is an ActivityWindow");
             assert!(p.locks.iter().all(|l| l.ct != ct), "{name} is never closed");
         }
         // Location-independent windows are neither closed nor a modal that is.

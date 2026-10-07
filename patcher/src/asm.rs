@@ -191,17 +191,6 @@ pub(crate) mod testutil {
         out
     }
 
-    fn is_subclass(code: &Bytecode, t: RefType, of: RefType) -> bool {
-        let mut cur = Some(t);
-        while let Some(c) = cur {
-            if c == of {
-                return true;
-            }
-            cur = code.types[c.0].get_type_obj().and_then(|o| o.super_);
-        }
-        false
-    }
-
     /// `from` may be stored where `to` is expected (same type, Dyn target, subclass,
     /// or both dynamic-ish pointers the VM converts implicitly: Null<T>/virtual/DynObj -> Dyn).
     pub(crate) fn assignable(code: &Bytecode, from: RefType, to: RefType) -> bool {
@@ -212,7 +201,7 @@ pub(crate) mod testutil {
             || matches!(tt, Type::Dyn)
             || (tf.get_type_obj().is_some()
                 && tt.get_type_obj().is_some()
-                && is_subclass(code, from, to))
+                && is_sub(code, from, to))
     }
 
     fn field_type(code: &Bytecode, t: RefType, f: RefField) -> RefType {

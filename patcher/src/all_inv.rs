@@ -75,7 +75,7 @@
 
 use super::asm::{push_fn, string_ref, Asm, Regs, Snap};
 use super::chest_buttons::{plan_icon_block, IconBlock};
-use super::diag::{index_of, static_fn};
+use super::diag::static_fn;
 use super::job_xp::str_global;
 use super::*;
 use hlbc::types::{RefEnumConstruct, RefGlobal, RefString, ValBool};
@@ -168,7 +168,7 @@ pub(crate) struct NetPlan {
 
 /// The RPC id a generated hxbit caller stub passes to `networkAllow(mode, id, ..)`.
 fn rpc_id(code: &Bytecode, stub: RefFun, allow: RefFun) -> Result<i32> {
-    let f = &code.functions[index_of(code, stub)?];
+    let f = &code.functions[fun_index(code, stub)?];
     let int_at = |i: usize, r: Reg| {
         f.ops[..i].iter().rev().find_map(|o| match o {
             Opcode::Int { dst, ptr } if *dst == r => Some(code.ints[ptr.0]),
@@ -193,7 +193,7 @@ fn rpc_id(code: &Bytecode, stub: RefFun, allow: RefFun) -> Result<i32> {
 pub(crate) fn net_plan(code: &Bytecode) -> Result<NetPlan> {
     let inv_t = obj_type(code, "st.Inventory")?;
     let allow = proto(code, inv_t, "networkAllow")?;
-    let fi = index_of(code, allow)?;
+    let fi = fun_index(code, allow)?;
     let f = &code.functions[fi];
     let (owner, _) = field(code, inv_t, "owner")?;
     let id_op = rpc_id(code, proto(code, inv_t, "networkOperation")?, allow)?;
@@ -309,7 +309,7 @@ pub(crate) fn api_plan(code: &Bytecode) -> Result<ApiPlan> {
     let inv_t = obj_type(code, "st.Inventory")?;
     let (owner, bp_t) = field(code, inv_t, "owner")?;
     let net_op = proto(code, inv_t, "networkOperation")?;
-    let nt = code.functions[index_of(code, net_op)?]
+    let nt = code.functions[fun_index(code, net_op)?]
         .t
         .as_fun(code)
         .context("networkOperation type")?
@@ -329,7 +329,7 @@ pub(crate) fn api_plan(code: &Bytecode) -> Result<ApiPlan> {
         let Opcode::InstanceClosure { fun, .. } = o else {
             continue;
         };
-        let g = &code.functions[index_of(code, *fun)?];
+        let g = &code.functions[fun_index(code, *fun)?];
         let gt = g.t.as_fun(code).context("closure type")?;
         if gt.args.len() == 4
             && gt.args[1] == op_t
@@ -337,7 +337,7 @@ pub(crate) fn api_plan(code: &Bytecode) -> Result<ApiPlan> {
                 .iter()
                 .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == has_auth))
         {
-            hits.push(index_of(code, *fun)?);
+            hits.push(fun_index(code, *fun)?);
         }
     }
     let [fi] = hits[..] else {
@@ -580,7 +580,7 @@ fn class_global(code: &Bytecode, t: RefType) -> Result<RefGlobal> {
 fn sig(code: &Bytecode, f: RefFun) -> Result<TypeFun> {
     let t = match code.natives.iter().find(|n| n.findex == f) {
         Some(n) => n.t,
-        None => code.functions[index_of(code, f)?].t,
+        None => code.functions[fun_index(code, f)?].t,
     };
     t.as_fun(code).cloned().context("not a function type")
 }
@@ -591,14 +591,6 @@ fn want(code: &Bytecode, f: RefFun, what: &str, args: &[RefType], ret: RefType) 
         bail!("{what}: unexpected signature");
     }
     Ok(())
-}
-
-fn typed(code: &Bytecode, t: RefType, name: &str, want: RefType) -> Result<RefField> {
-    let (f, ft) = field(code, t, name)?;
-    if ft != want {
-        bail!("field {name} has an unexpected type");
-    }
-    Ok(f)
 }
 
 /// `name` from the prototype of `t` or its nearest ancestor.
@@ -900,7 +892,7 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
 
     // icon creation, as WorldButtonsBar builds btInventory
     let bar_ctor = method(code, bar_t, "__constructor__")?;
-    let bar_ctor_fi = index_of(code, bar_ctor.findex)?;
+    let bar_ctor_fi = fun_index(code, bar_ctor.findex)?;
     let blk = plan_icon_block(code, bar_ctor, bar_bt, bar_t)?;
     if blk.props_t != dk_t {
         bail!("createNew does not return domkit.Properties");
@@ -940,7 +932,7 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
     for n in sites {
         let f = method(code, slot_t, n)?;
         plain_start(f, n)?;
-        fis.push(index_of(code, f.findex)?);
+        fis.push(fun_index(code, f.findex)?);
     }
     for (n, ret) in [
         ("allowPick", bool_t),
@@ -1065,7 +1057,7 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
         blk,
         bar_ctor_fi,
         bar_ret,
-        ui_update_fi: index_of(code, ui_update.findex)?,
+        ui_update_fi: fun_index(code, ui_update.findex)?,
         allow_pick_fi: fis[0],
         allow_drop_fi: fis[1],
         do_pick_fi: fis[2],
@@ -1170,11 +1162,6 @@ struct Globals {
     icon: RefGlobal,
     logs: RefGlobal,
     err: RefGlobal,
-}
-
-fn new_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
-    code.globals.push(t);
-    RefGlobal(code.globals.len() - 1)
 }
 
 /// Registers of a `createNew(comp, parent, [arg], {attrs})` sequence.
@@ -3607,12 +3594,12 @@ pub(crate) struct UiFns {
 fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
     let drag = window_drag::api(code)?;
     let g = Globals {
-        box_: new_global(code, p.obj_t),
-        gi: new_global(code, p.gi_t),
-        target: new_global(code, p.inv_t),
-        btn: new_global(code, p.obj_t),
-        icon: new_global(code, p.icon_t),
-        logs: new_global(code, p.i32_t),
+        box_: add_global(code, p.obj_t),
+        gi: add_global(code, p.gi_t),
+        target: add_global(code, p.inv_t),
+        btn: add_global(code, p.obj_t),
+        icon: add_global(code, p.icon_t),
+        logs: add_global(code, p.i32_t),
         err: str_global(code, p.str_t, S_ERR),
     };
     let report = add_report(code, p, &g)?;
@@ -3658,11 +3645,6 @@ fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
         button,
         tick,
     })
-}
-
-fn new_reg(f: &mut Function, t: RefType) -> Reg {
-    f.regs.push(t);
-    Reg((f.regs.len() - 1) as u32)
 }
 
 fn ui_apply(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
@@ -4268,14 +4250,14 @@ mod tests {
             if let Some(v) = self.stub(f, &args) {
                 return v;
             }
-            let fi = index_of(self.code, f).unwrap();
+            let fi = fun_index(self.code, f).unwrap();
             assert!(fi >= self.orig_n, "unexpected vanilla call fn@{}", f.0);
             self.run(f, args)
         }
 
         fn run(&mut self, f: RefFun, args: Vec<V>) -> V {
             let code = self.code;
-            let fun = &code.functions[index_of(code, f).unwrap()];
+            let fun = &code.functions[fun_index(code, f).unwrap()];
             let mut r = vec![V::Null; fun.regs.len()];
             for (i, a) in args.into_iter().enumerate() {
                 r[i] = a;

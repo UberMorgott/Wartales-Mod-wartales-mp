@@ -54,19 +54,6 @@ struct Plan {
     dbg_file: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let fun = &code.functions[fun_index(code, f)?];
-    let t = fun.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
 /// Proto `name` of class `t` or its nearest ancestor: (function, vtable index).
 fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, RefField)> {
     let mut cur = Some(t);
@@ -85,9 +72,9 @@ fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, RefField)>
 fn reads_virtual_field(code: &Bytecode, f: &Function, name: &str) -> bool {
     f.ops.iter().any(|op| match op {
         Opcode::Field { obj, field, .. } => match &code.types[f.regs[obj.0 as usize].0] {
-            Type::Virtual { fields } => fields
-                .get(field.0)
-                .is_some_and(|x| s(code, x.name) == name),
+            Type::Virtual { fields } => {
+                fields.get(field.0).is_some_and(|x| s(code, x.name) == name)
+            }
             _ => false,
         },
         _ => false,
@@ -373,9 +360,18 @@ mod tests {
                     assert!(matches!(&b.ops[site.at + 1],
                         Opcode::Call1 { fun, arg0: Reg(1), .. } if *fun == helper.findex));
                     assert_eq!(jump_targets(b, site.at + 2), vec![site.at + 4]);
-                    let (Opcode::CallMethod { field: f0, args: a0, .. },
-                         Opcode::CallMethod { field: f1, args: a1, .. }) =
-                        (&b.ops[site.at], &b.ops[site.at + 3])
+                    let (
+                        Opcode::CallMethod {
+                            field: f0,
+                            args: a0,
+                            ..
+                        },
+                        Opcode::CallMethod {
+                            field: f1,
+                            args: a1,
+                            ..
+                        },
+                    ) = (&b.ops[site.at], &b.ops[site.at + 3])
                     else {
                         panic!("{}: no set_text pair", site.name)
                     };
@@ -433,7 +429,10 @@ mod tests {
                 assert!(before != base, "site {site} edit {k} was a no-op");
                 assert!(plan(&code).is_err(), "site {site} edit {k} still planned");
                 patch_marker_names(&mut code);
-                assert!(write(&code) == before, "site {site} edit {k} changed the code");
+                assert!(
+                    write(&code) == before,
+                    "site {site} edit {k} changed the code"
+                );
             }
         }
     }

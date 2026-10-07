@@ -58,13 +58,6 @@ struct Plan {
 
 const BLOCK: usize = 12;
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn named(code: &Bytecode, f: RefFun) -> Option<&str> {
     code.functions
         .iter()

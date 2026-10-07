@@ -54,9 +54,9 @@
 // pass (logged).
 
 use super::asm::{push_fn, Asm, Regs};
-use super::diag::{call_of, closure_passed_to, index_of, static_fn};
+use super::diag::{call_of, closure_passed_to, static_fn};
 use super::job_xp::str_global;
-use super::ping_cell::{sig, vproto};
+use super::ping_cell::vproto;
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
@@ -326,7 +326,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
             bail!("Activity._start: no {what}");
         }
     }
-    let start_fi = index_of(code, start.findex)?;
+    let start_fi = fun_index(code, start.findex)?;
 
     // onReady: the closure of _start (bound to this) that calls showTutorial
     let readies: Vec<RefFun> = start
@@ -339,7 +339,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
             _ => None,
         })
         .filter(|f| {
-            index_of(code, *f)
+            fun_index(code, *f)
                 .map(|i| diag::calls(&code.functions[i], show_tut))
                 .unwrap_or(false)
         })
@@ -350,7 +350,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
             readies.len()
         );
     };
-    let ready_fi = index_of(code, ready)?;
+    let ready_fi = fun_index(code, ready)?;
     let rf = &code.functions[ready_fi];
     if fun_args(code, rf) != [act_t] {
         bail!("Activity onReady: unexpected signature");
@@ -479,7 +479,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         make_fi,
         win_at,
         help_at,
-        help_fi: index_of(code, help_impl.findex)?,
+        help_fi: fun_index(code, help_impl.findex)?,
         help_ret,
         fade_fi,
         fade_at,

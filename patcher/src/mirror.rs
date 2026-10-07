@@ -24,8 +24,8 @@
 
 use super::asm::{push_fn, string_ref, Asm, Regs};
 use super::coop_spectate::dst_of;
-use super::diag::{index_of, static_fn};
-use super::ping_cell::{class_global, fname, sig, vproto};
+use super::diag::static_fn;
+use super::ping_cell::vproto;
 use super::*;
 use hlbc::types::{RefEnumConstruct, RefGlobal, ValBool};
 
@@ -114,18 +114,6 @@ pub(crate) struct Camp {
     pub(crate) unit_c: RefEnumConstruct,
     pub(crate) unit_f: RefField,
     pub(crate) unit_idx: i32,
-}
-
-/// `t` is `of` or one of its subclasses.
-pub(crate) fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> bool {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return true;
-        }
-        cur = code.types[c.0].get_type_obj().and_then(|o| o.super_);
-    }
-    false
 }
 
 pub(crate) fn want(
@@ -243,7 +231,7 @@ pub(crate) fn base(code: &Bytecode) -> Result<Base> {
     if fun_args(code, imp) != [ctrl_t, f64_, f64_, f64_, player_t] {
         bail!("unexpected Controller.ping__impl signature");
     }
-    let impl_fi = index_of(code, imp.findex)?;
+    let impl_fi = fun_index(code, imp.findex)?;
     let impl_ret = last_ret(imp).context("ping__impl does not end in Ret")?;
     if imp.regs[impl_ret.0 as usize] != void_ {
         bail!("ping__impl: Ret register is not void");

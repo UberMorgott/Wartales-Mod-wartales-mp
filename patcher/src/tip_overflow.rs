@@ -105,44 +105,6 @@ struct Plan {
     set_hspace: RefFun,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let g = &code.functions[fun_index(code, f)?];
-    let t = g.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
-/// The class global (`$Name` object) of class `name`, HL stores it 1-based.
-fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
-    let o = obj(code, obj_type(code, name)?)?;
-    let g = RefGlobal(
-        o.global
-            .0
-            .checked_sub(1)
-            .with_context(|| format!("{name}: no class global"))?,
-    );
-    let t = *code
-        .globals
-        .get(g.0)
-        .with_context(|| format!("{name}: class global out of range"))?;
-    let (pkg, cls) = name.rsplit_once('.').unwrap_or(("", name));
-    let want = if pkg.is_empty() {
-        format!("${cls}")
-    } else {
-        format!("{pkg}.${cls}")
-    };
-    if obj(code, t).ok().map(|o| s(code, o.name)) != Some(want.as_str()) {
-        bail!("{name}: class global is not {want}");
-    }
-    Ok((g, t))
-}
-
 /// `field` of `t`, which must have type `want`.
 fn typed_field(code: &Bytecode, t: RefType, name: &str, want: RefType) -> Result<RefField> {
     let (f, ft) = field(code, t, name)?;

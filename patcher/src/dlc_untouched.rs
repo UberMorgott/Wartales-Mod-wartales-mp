@@ -75,7 +75,12 @@ mod tests {
                 let f: Vec<&str> = l.trim_end_matches(['}', ',', ' ']).split(',').collect();
                 let i: usize = f[0].trim().parse().unwrap();
                 assert_eq!(needles[i].len(), f[1].trim().parse::<usize>().unwrap());
-                (needles[i].clone(), f[2].trim().parse().unwrap(), hex(f[3]), hex(f[4]))
+                (
+                    needles[i].clone(),
+                    f[2].trim().parse().unwrap(),
+                    hex(f[3]),
+                    hex(f[4]),
+                )
             })
             .collect();
         assert_eq!(rows.len(), needles.len());
@@ -135,14 +140,20 @@ mod tests {
         // Every name resolves: a rename in a game update must fail here, not pass.
         for name in DLC_FNS {
             assert!(
-                dlc.iter().any(|&i| s(&orig, orig.functions[i].name) == *name),
+                dlc.iter()
+                    .any(|&i| s(&orig, orig.functions[i].name) == *name),
                 "{name} not found"
             );
         }
         for &i in &dlc {
             let (a, b) = (&orig.functions[i], &back.functions[i]);
             assert_eq!(a.findex, b.findex);
-            assert!(same(a, b), "DLC fn {}@{} changed", s(&orig, a.name), a.findex.0);
+            assert!(
+                same(a, b),
+                "DLC fn {}@{} changed",
+                s(&orig, a.name),
+                a.findex.0
+            );
         }
 
         // No function gains or loses a direct reference to a DLC function.
@@ -160,6 +171,9 @@ mod tests {
         for b in &back.functions[orig.functions.len()..] {
             assert_eq!(count(b), 0, "new fn@{} calls a DLC fn", b.findex.0);
         }
-        eprintln!("{} DLC fns byte-identical after the full patch chain", dlc.len());
+        eprintln!(
+            "{} DLC fns byte-identical after the full patch chain",
+            dlc.len()
+        );
     }
 }

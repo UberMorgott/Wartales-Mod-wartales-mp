@@ -81,7 +81,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     for (k, h) in hits.iter().enumerate() {
         let (file, line) = SITES[k];
         let [site] = h[..] else {
-            bail!("{} isControllable calls at {file}:{line}, expected 1", h.len());
+            bail!(
+                "{} isControllable calls at {file}:{line}, expected 1",
+                h.len()
+            );
         };
         sites.push(site);
     }
@@ -162,8 +165,14 @@ mod tests {
             }
             match (&a.ops[at], &b.ops[at]) {
                 (
-                    Opcode::Call1 { dst: d0, arg0: r0, .. },
-                    Opcode::Call1 { dst: d1, fun, arg0: r1 },
+                    Opcode::Call1 {
+                        dst: d0, arg0: r0, ..
+                    },
+                    Opcode::Call1 {
+                        dst: d1,
+                        fun,
+                        arg0: r1,
+                    },
                 ) => {
                     assert_eq!((d0, r0), (d1, r1));
                     assert_eq!(*fun, p.is_player);

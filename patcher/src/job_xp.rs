@@ -64,13 +64,6 @@ struct Plan {
     ref_bool_t: RefType,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 /// The last op before `before` that writes `reg`.
 fn last_write(f: &Function, reg: Reg, before: usize) -> Option<&Opcode> {
     f.ops[..before].iter().rev().find(|op| match op {

@@ -44,7 +44,10 @@ pub(crate) fn nameless(code: &Bytecode) -> Vec<bool> {
         }
         for (fid, mid) in &o.bindings {
             let is_fun = o.fields.get(fid.0).is_some_and(|f| {
-                matches!(code.types[f.t.0], Type::Fun(_) | Type::Method(_) | Type::Dyn)
+                matches!(
+                    code.types[f.t.0],
+                    Type::Fun(_) | Type::Method(_) | Type::Dyn
+                )
             });
             if let (true, Some(&i)) = (is_fun, idx.get(&mid.0)) {
                 has_obj[i] = true;
@@ -202,7 +205,10 @@ mod tests {
         patch_jit_names(&mut code);
         assert_eq!(offending(&code), vec![]);
         for &(fi, at) in &bad {
-            assert!(matches!(code.functions[fi].ops[at], Opcode::NullCheck { .. }));
+            assert!(matches!(
+                code.functions[fi].ops[at],
+                Opcode::NullCheck { .. }
+            ));
             assert!(matches!(code.functions[fi].ops[at + 1], Opcode::Nop));
         }
         let back = read(&write(&code));

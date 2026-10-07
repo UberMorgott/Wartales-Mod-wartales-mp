@@ -126,34 +126,6 @@ struct Plan {
     dbg_file: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    if let Some(n) = code.natives.iter().find(|n| n.findex == f) {
-        let t = n.t.as_fun(code).context("not a function type")?;
-        return Ok((t.args.clone(), t.ret));
-    }
-    let fun = &code.functions[fun_index(code, f)?];
-    let t = fun.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
-fn is_subclass(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return Ok(true);
-        }
-        cur = obj(code, c)?.super_;
-    }
-    Ok(false)
-}
-
 /// The 5-op empty-array idiom (`Int 0; Type; alloc; UnsafeCast; wrap`) the game
 /// uses in onClientReady__impl to reset waitLockCallbs.
 fn plan_new_arr(code: &Bytecode, arr_t: RefType) -> Result<NewArr> {
@@ -263,7 +235,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let game_reloading = typed(game_t, "reloading", bool_t)?;
     let game_ready = typed(game_t, "playersReady", i32_t)?;
     let game_host = field(code, game_t, "host")?;
-    if !is_subclass(code, game_host.1, nh_t)? {
+    if !is_sub(code, game_host.1, nh_t) {
         bail!("Game.host is not an hxbit.NetworkHost");
     }
     let host_clients = typed(game_host.1, "clients", arr_t)?;
@@ -335,7 +307,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("the message handler: the client check is not a type check");
     }
     let client_t = obj_type(code, "mpman.net.Client")?;
-    if !is_subclass(code, cwt_t, client_t)? || !is_subclass(code, cwt_t, nc_t)? {
+    if !is_sub(code, cwt_t, client_t) || !is_sub(code, cwt_t, nc_t) {
         bail!("lib.ClientWT is not an mpman.net.Client / hxbit.NetworkClient");
     }
     let get_user = method(code, client_t, "get_user")?;

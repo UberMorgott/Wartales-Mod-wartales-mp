@@ -624,7 +624,13 @@ pub(super) fn add_list(
         obj: st,
         field: p.s_timelines,
     });
-    a.jmp(Opcode::JNull { reg: tls, offset: 0 }, "tl");
+    a.jmp(
+        Opcode::JNull {
+            reg: tls,
+            offset: 0,
+        },
+        "tl",
+    );
     a.op(Opcode::Field {
         dst: n,
         obj: tls,
@@ -649,7 +655,13 @@ pub(super) fn add_list(
         index: zero,
     });
     a.op(Opcode::UnsafeCast { dst: cur, src: d });
-    a.jmp(Opcode::JNull { reg: cur, offset: 0 }, "tl");
+    a.jmp(
+        Opcode::JNull {
+            reg: cur,
+            offset: 0,
+        },
+        "tl",
+    );
     a.op(Opcode::Field {
         dst: t,
         obj: cur,
@@ -657,12 +669,22 @@ pub(super) fn add_list(
     });
     a.label("tl");
     a.op(Opcode::Int { dst: nu, ptr: c31 });
-    a.op(Opcode::Mul { dst: h, a: h, b: nu });
+    a.op(Opcode::Mul {
+        dst: h,
+        a: h,
+        b: nu,
+    });
     a.op(Opcode::Add { dst: h, a: h, b: t });
     // per slot: sig * 31 + (kind + 1), a Player(p) slot also + 31 * (p's
     // position in state.players + 1): a slot converted in place (vanilla
     // updateAutoPlayed: Player <-> AI(unit)) changes it without a length change.
-    a.jmp(Opcode::JNull { reg: cur, offset: 0 }, "tsig");
+    a.jmp(
+        Opcode::JNull {
+            reg: cur,
+            offset: 0,
+        },
+        "tsig",
+    );
     a.op(Opcode::Int { dst: k, ptr: c0 });
     a.loop_head("ts");
     a.op(Opcode::Field {
@@ -777,7 +799,11 @@ pub(super) fn add_list(
         b: np,
     });
     a.label("tmix");
-    a.op(Opcode::Mul { dst: h, a: h, b: nu });
+    a.op(Opcode::Mul {
+        dst: h,
+        a: h,
+        b: nu,
+    });
     a.op(Opcode::Add { dst: h, a: h, b: t });
     a.jmp(Opcode::JAlways { offset: 0 }, "ts");
     a.label("tsig");
@@ -1081,7 +1107,13 @@ pub(super) fn add_list(
         dst: slots,
         ptr: c0,
     });
-    a.jmp(Opcode::JNull { reg: cur, offset: 0 }, "slots");
+    a.jmp(
+        Opcode::JNull {
+            reg: cur,
+            offset: 0,
+        },
+        "slots",
+    );
     a.op(Opcode::Int { dst: k, ptr: c0 });
     a.loop_head("sl");
     a.op(Opcode::Field {
@@ -1712,7 +1744,9 @@ mod tests {
                     V::I(h.rfind(&n).map_or(-1, |i| i as i32))
                 } else if f == lp.str_substr {
                     let x = s(&a[0]);
-                    let V::I(pos) = a[1] else { panic!("substr pos") };
+                    let V::I(pos) = a[1] else {
+                        panic!("substr pos")
+                    };
                     let len = match a[2] {
                         V::I(l) => l as usize,
                         _ => x.len(),

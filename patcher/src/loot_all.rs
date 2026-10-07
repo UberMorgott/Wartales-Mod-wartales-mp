@@ -52,13 +52,6 @@ struct Plan {
     gate_at: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn calls(f: &Function, want: RefFun) -> bool {
     f.ops.iter().any(|o| {
         matches!(o,

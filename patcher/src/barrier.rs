@@ -168,52 +168,6 @@ struct Plan {
     dbg_file: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    if let Some(n) = code.natives.iter().find(|n| n.findex == f) {
-        let t = n.t.as_fun(code).context("not a function type")?;
-        return Ok((t.args.clone(), t.ret));
-    }
-    let fun = &code.functions[fun_index(code, f)?];
-    let t = fun.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
-fn native(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result<RefFun> {
-    let hits: Vec<RefFun> = code
-        .natives
-        .iter()
-        .filter(|n| {
-            s(code, n.name) == name
-                && n.t
-                    .as_fun(code)
-                    .is_some_and(|t| t.args == args && t.ret == ret)
-        })
-        .map(|n| n.findex)
-        .collect();
-    match hits[..] {
-        [f] => Ok(f),
-        _ => bail!("expected one native {name}, found {}", hits.len()),
-    }
-}
-
-fn is_subclass(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return Ok(true);
-        }
-        cur = obj(code, c)?.super_;
-    }
-    Ok(false)
-}
-
 /// Virtual-table slot of method `name` on `t` or one of its ancestors.
 fn proto_slot(code: &Bytecode, t: RefType, name: &str) -> Result<RefField> {
     let mut cur = Some(t);
@@ -387,7 +341,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let game_auth = typed(game_t, "isAuth", bool_t)?;
     let game_ctrl = typed(game_t, "ctrl", ctrl_t)?;
     let game_host = field(code, game_t, "host")?;
-    if !is_subclass(code, game_host.1, nh_t)? {
+    if !is_sub(code, game_host.1, nh_t) {
         bail!("Game.host is not an hxbit.NetworkHost");
     }
     let host_clients = typed(game_host.1, "clients", arr_t)?;
@@ -2022,7 +1976,9 @@ mod tests {
             self.heap.len() - 1
         }
         fn set(&mut self, o: usize, f: RefField, v: V) {
-            let H::Obj(m) = &mut self.heap[o] else { panic!("not an object") };
+            let H::Obj(m) = &mut self.heap[o] else {
+                panic!("not an object")
+            };
             m.insert(f.0, v);
         }
         fn get(&self, o: usize, f: RefField) -> V {
@@ -2034,11 +1990,15 @@ mod tests {
             }
         }
         fn list(&mut self, o: usize) -> &mut Vec<V> {
-            let H::Arr(a) = &mut self.heap[o] else { panic!("not an array") };
+            let H::Arr(a) = &mut self.heap[o] else {
+                panic!("not an array")
+            };
             a
         }
         fn field_arr(&self, o: usize, f: RefField) -> usize {
-            let V::R(a) = self.get(o, f) else { panic!("no array") };
+            let V::R(a) = self.get(o, f) else {
+                panic!("no array")
+            };
             a
         }
         fn wait_locks(&mut self) -> &mut Vec<V> {
@@ -2185,7 +2145,9 @@ mod tests {
                 return V::S(format!("{:?}", args[0]));
             }
             if f == p.str_add {
-                let (V::S(a), V::S(b)) = (&args[0], &args[1]) else { panic!() };
+                let (V::S(a), V::S(b)) = (&args[0], &args[1]) else {
+                    panic!()
+                };
                 return V::S(format!("{a}{b}"));
             }
             panic!("unexpected call fn@{}", f.0);
@@ -2218,7 +2180,9 @@ mod tests {
                     Opcode::Int { dst, ptr } => r[dst.0 as usize] = V::I(code.ints[ptr.0]),
                     Opcode::Float { dst, ptr } => r[dst.0 as usize] = V::F(code.floats[ptr.0]),
                     Opcode::Field { dst, obj, field } => {
-                        let V::R(o) = r[obj.0 as usize] else { panic!("null access op {}", pc - 1) };
+                        let V::R(o) = r[obj.0 as usize] else {
+                            panic!("null access op {}", pc - 1)
+                        };
                         r[dst.0 as usize] = self.get(o, *field);
                     }
                     Opcode::GetGlobal { dst, global } => {
@@ -2242,7 +2206,9 @@ mod tests {
                         self.globals.insert(global.0, r[src.0 as usize].clone());
                     }
                     Opcode::EnumIndex { dst, value } => {
-                        let V::E(i) = r[value.0 as usize] else { panic!() };
+                        let V::E(i) = r[value.0 as usize] else {
+                            panic!()
+                        };
                         r[dst.0 as usize] = V::I(i as i32);
                     }
                     Opcode::Add { dst, a, b } | Opcode::Sub { dst, a, b } => {
@@ -2256,7 +2222,8 @@ mod tests {
                         };
                     }
                     Opcode::GetArray { dst, array, index } => {
-                        let (V::R(a), V::I(i)) = (&r[array.0 as usize], &r[index.0 as usize]) else {
+                        let (V::R(a), V::I(i)) = (&r[array.0 as usize], &r[index.0 as usize])
+                        else {
                             panic!()
                         };
                         let (a, i) = (*a, *i as usize);
@@ -2283,7 +2250,11 @@ mod tests {
                     }
                     Opcode::JSGte { a, b, offset } | Opcode::JSGt { a, b, offset } => {
                         let (x, y) = (num(&r[a.0 as usize]), num(&r[b.0 as usize]));
-                        let hit = if matches!(op, Opcode::JSGte { .. }) { x >= y } else { x > y };
+                        let hit = if matches!(op, Opcode::JSGte { .. }) {
+                            x >= y
+                        } else {
+                            x > y
+                        };
                         if hit {
                             jump(&mut pc, *offset);
                         }
@@ -2293,12 +2264,26 @@ mod tests {
                         let a = vec![r[arg0.0 as usize].clone()];
                         r[dst.0 as usize] = self.call(*fun, a);
                     }
-                    Opcode::Call2 { dst, fun, arg0, arg1 } => {
+                    Opcode::Call2 {
+                        dst,
+                        fun,
+                        arg0,
+                        arg1,
+                    } => {
                         let a = vec![r[arg0.0 as usize].clone(), r[arg1.0 as usize].clone()];
                         r[dst.0 as usize] = self.call(*fun, a);
                     }
-                    Opcode::Call3 { dst, fun, arg0, arg1, arg2 } => {
-                        let a = [arg0, arg1, arg2].iter().map(|x| r[x.0 as usize].clone()).collect();
+                    Opcode::Call3 {
+                        dst,
+                        fun,
+                        arg0,
+                        arg1,
+                        arg2,
+                    } => {
+                        let a = [arg0, arg1, arg2]
+                            .iter()
+                            .map(|x| r[x.0 as usize].clone())
+                            .collect();
                         r[dst.0 as usize] = self.call(*fun, a);
                     }
                     Opcode::CallN { dst, fun, args } => {
@@ -2307,7 +2292,9 @@ mod tests {
                     }
                     Opcode::CallMethod { dst, field, args } => {
                         assert_eq!(*field, self.p.stop_slot);
-                        let V::R(c) = r[args[0].0 as usize] else { panic!() };
+                        let V::R(c) = r[args[0].0 as usize] else {
+                            panic!()
+                        };
                         self.events.push(Ev::Stop(c));
                         self.clients().retain(|x| *x != V::R(c));
                         self.set(c, self.p.nc_host.0, V::Null);
@@ -2337,7 +2324,9 @@ mod tests {
     /// Join is replayed) and B, now synced, is never disconnected.
     #[test]
     fn parked_join_is_not_waited_for() {
-        let Some((orig, code)) = sim_image() else { return };
+        let Some((orig, code)) = sim_image() else {
+            return;
+        };
         let p = plan(&orig).expect("plan");
         let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
         s.tick();
@@ -2351,13 +2340,17 @@ mod tests {
         assert_eq!(s.at(&Ev::Join(b)), None, "a Join during a switch is parked");
         s.ready(a);
         s.run_to(TIMEOUT - 1.0);
-        let rel = s.at(&Ev::Release).expect("the phase goes on without the joining client");
+        let rel = s
+            .at(&Ev::Release)
+            .expect("the phase goes on without the joining client");
         let join = s.at(&Ev::Join(b)).expect("the parked Join is replayed");
         assert!(rel < join, "{:?}", s.events);
         assert!(s.wait_locks().is_empty());
         s.run_to(4.0 * JOIN_CAP);
         assert!(
-            !s.events.iter().any(|e| matches!(e, Ev::Rejoin(_) | Ev::Stop(_))),
+            !s.events
+                .iter()
+                .any(|e| matches!(e, Ev::Rejoin(_) | Ev::Stop(_))),
             "{:?}\n{:?}",
             s.events,
             s.log
@@ -2369,7 +2362,9 @@ mod tests {
     /// Join is a full sync, and the quarantine must not disconnect it later.
     #[test]
     fn join_after_kick_is_not_disconnected() {
-        let Some((orig, code)) = sim_image() else { return };
+        let Some((orig, code)) = sim_image() else {
+            return;
+        };
         let p = plan(&orig).expect("plan");
         let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
         s.tick();
@@ -2389,7 +2384,9 @@ mod tests {
     /// TIMEOUT and disconnected TIMEOUT later if it is still there.
     #[test]
     fn silent_client_is_still_dropped() {
-        let Some((orig, code)) = sim_image() else { return };
+        let Some((orig, code)) = sim_image() else {
+            return;
+        };
         let p = plan(&orig).expect("plan");
         let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
         s.tick();
@@ -2408,7 +2405,9 @@ mod tests {
     /// disconnected after JOIN_CAP and nothing is left to wait for.
     #[test]
     fn join_cap_drops_and_wait_set_recovers() {
-        let Some((orig, code)) = sim_image() else { return };
+        let Some((orig, code)) = sim_image() else {
+            return;
+        };
         let p = plan(&orig).expect("plan");
         let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
         s.tick();
@@ -2418,7 +2417,10 @@ mod tests {
         s.join_arrives(b);
         s.run_to(JOIN_CAP - 1.0);
         assert_eq!(s.at(&Ev::Stop(b)), None);
-        assert!(s.wait_locks().is_empty(), "the parked client is not waited for");
+        assert!(
+            s.wait_locks().is_empty(),
+            "the parked client is not waited for"
+        );
         s.run_to(JOIN_CAP + 1.0);
         assert!(s.at(&Ev::Stop(b)).is_some(), "{:?}", s.events);
         assert_eq!(s.at(&Ev::Join(b)), None);

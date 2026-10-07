@@ -107,13 +107,6 @@ const OWN_HOLD: f64 = 1.0;
 pub(crate) const PREF_KEY: &str = "mpFollowOff";
 const SHIFT_BIT: i32 = 8;
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 /// The unique code function `name` with exactly this signature.
 fn static_fn(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result<RefFun> {
     let hits: Vec<RefFun> = code
@@ -131,49 +124,6 @@ fn static_fn(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Res
         [f] => Ok(f),
         _ => bail!("expected one {name}{args:?}, found {}", hits.len()),
     }
-}
-
-fn native(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result<RefFun> {
-    let hits: Vec<RefFun> = code
-        .natives
-        .iter()
-        .filter(|n| {
-            s(code, n.name) == name
-                && n.t
-                    .as_fun(code)
-                    .is_some_and(|t| t.args == args && t.ret == ret)
-        })
-        .map(|n| n.findex)
-        .collect();
-    match hits[..] {
-        [f] => Ok(f),
-        _ => bail!("expected one native {name}, found {}", hits.len()),
-    }
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let fun = &code.functions[fun_index(code, f)?];
-    let t = fun.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
-fn string_index(code: &Bytecode, value: &str) -> Result<RefString> {
-    code.strings
-        .iter()
-        .position(|v| v.as_str() == value)
-        .map(RefString)
-        .with_context(|| format!("string {value:?} not in the pool"))
-}
-
-fn is_subclass(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return Ok(true);
-        }
-        cur = obj(code, c)?.super_;
-    }
-    Ok(false)
 }
 
 /// Function-local assembler with symbolic jump labels.
@@ -361,7 +311,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if game_ui.1 != ui_t || game_ctrl.1 != ctrl_t {
         bail!("Game.ui / Game.ctrl have unexpected types");
     }
-    if !is_subclass(code, world_t, game_mode.1)? {
+    if !is_sub(code, world_t, game_mode.1) {
         bail!("World is not a Game.mode type");
     }
     let state_t = game_state.1;
@@ -373,7 +323,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         ("player", state_player.1),
         ("playerMovePriority", state_priority.1),
     ] {
-        if !is_subclass(code, ft, bp_t)? {
+        if !is_sub(code, ft, bp_t) {
             bail!("GameState.{what} is not a BasePlayer");
         }
     }
@@ -598,11 +548,6 @@ struct Globals {
     saw_target: RefGlobal,
     loaded: RefGlobal,
     host_own_at: RefGlobal,
-}
-
-fn add_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
-    code.globals.push(t);
-    RefGlobal(code.globals.len() - 1)
 }
 
 /// Appends `ops` as a new function `args -> void` and returns its findex.
@@ -2031,7 +1976,7 @@ mod tests {
             || matches!(code.types[to.0], Type::Dyn)
             || (code.types[from.0].get_type_obj().is_some()
                 && code.types[to.0].get_type_obj().is_some()
-                && is_subclass(code, from, to).unwrap_or(false))
+                && is_sub(code, from, to))
     }
 
     fn field_type(code: &Bytecode, t: RefType, f: RefField) -> RefType {

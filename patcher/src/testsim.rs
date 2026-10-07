@@ -9,7 +9,7 @@
 // not throw in the scenarios a test builds.
 #![allow(dead_code)]
 
-use crate::diag::index_of;
+use crate::fun_index;
 use hlbc::opcodes::Opcode;
 use hlbc::types::{RefField, RefFun, RefGlobal};
 use hlbc::Bytecode;
@@ -149,14 +149,14 @@ impl<'a> Sim<'a> {
         if let Some(v) = (self.stub)(&mut self.c, f, &args) {
             return v;
         }
-        let fi = index_of(self.code, f).unwrap();
+        let fi = fun_index(self.code, f).unwrap();
         assert!(fi >= self.orig_n, "unexpected vanilla call fn@{}", f.0);
         self.run(f, args)
     }
 
     pub(crate) fn run(&mut self, f: RefFun, args: Vec<V>) -> V {
         let code = self.code;
-        let fun = &code.functions[index_of(code, f).unwrap()];
+        let fun = &code.functions[fun_index(code, f).unwrap()];
         let mut r = vec![V::Null; fun.regs.len()];
         for (i, a) in args.into_iter().enumerate() {
             r[i] = a;

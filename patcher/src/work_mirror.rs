@@ -42,7 +42,7 @@
 // sound). Validated before editing; a mismatch skips the pass (logged).
 
 use super::asm::{push_fn, Asm, Regs};
-use super::diag::index_of;
+
 use super::job_xp::{const_str, str_global};
 use super::mirror::{self, emit_log, emit_play_once, int, want_field, writer, Base, Camp};
 use super::*;
@@ -83,7 +83,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     let ar_t = obj_type(code, "ui.win.Archery")?;
     let win_t = obj_type(code, "ui.Window")?;
     for t in [ua_t, ar_t] {
-        if !mirror::is_sub(code, t, win_t) {
+        if !is_sub(code, t, win_t) {
             bail!("type {} is not a ui.Window", t.0);
         }
     }
@@ -101,7 +101,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     let m = |t: RefType, name: &str| -> Result<usize> {
         let f = method(code, t, name)?;
         mirror::want(code, f.findex, name, &[t], b.void_)?;
-        index_of(code, f.findex)
+        fun_index(code, f.findex)
     };
     let sites = [
         m(ua_t, "init")?,
@@ -144,7 +144,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("Activity._cancel__impl does not end in a void Ret");
     }
     Ok(Plan {
-        cancel_fi: index_of(code, cancel.findex)?,
+        cancel_fi: fun_index(code, cancel.findex)?,
         b,
         c,
         ua_act,
@@ -892,7 +892,7 @@ mod tests {
         let names: Vec<String> = mirror::ping_hooks(&code, &b)
             .into_iter()
             .map(|f| {
-                let g = &code.functions[index_of(&code, f).unwrap()];
+                let g = &code.functions[fun_index(&code, f).unwrap()];
                 // each receiver logs its own tag
                 g.ops
                     .iter()
@@ -920,7 +920,7 @@ mod tests {
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let click = p.sites[1];
-        let su = index_of(
+        let su = fun_index(
             &orig,
             method(&orig, p.act_t, "setUnit__impl").unwrap().findex,
         )

@@ -166,13 +166,6 @@ struct Plan {
     counted: Vec<(usize, Option<usize>, Vec<usize>)>,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn extends(code: &Bytecode, t: RefType, base: RefType) -> bool {
     let mut cur = Some(t);
     while let Some(c) = cur {
@@ -589,11 +582,6 @@ fn name_global(code: &mut Bytecode, str_t: RefType, value: &str) -> RefGlobal {
     let ci = consts.len() - 1;
     code.globals_initializers.insert(g, ci);
     g
-}
-
-fn new_reg(f: &mut Function, t: RefType) -> Reg {
-    f.regs.push(t);
-    Reg((f.regs.len() - 1) as u32)
 }
 
 struct Consts {
@@ -1319,9 +1307,16 @@ mod tests {
                 let Opcode::Call1 { arg0, .. } = b.ops[at - 1] else {
                     panic!("fn@{}: initAlive is not last", a.findex.0)
                 };
-                assert!(matches!(b.ops[trap + 1], Opcode::GetGlobal { global, .. } if global == p.c.g_cls));
-                assert!(matches!(b.ops[trap + 2], Opcode::Field { dst, field, .. } if dst == arg0 && field == p.c.g_inst));
-                let guards: Vec<usize> = blk.clone().filter(|&j| !jump_targets(b, j).is_empty()).collect();
+                assert!(
+                    matches!(b.ops[trap + 1], Opcode::GetGlobal { global, .. } if global == p.c.g_cls)
+                );
+                assert!(
+                    matches!(b.ops[trap + 2], Opcode::Field { dst, field, .. } if dst == arg0 && field == p.c.g_inst)
+                );
+                let guards: Vec<usize> = blk
+                    .clone()
+                    .filter(|&j| !jump_targets(b, j).is_empty())
+                    .collect();
                 assert_eq!(guards.len(), 4);
                 for j in guards {
                     assert_eq!(jump_targets(b, j), [at], "fn@{} op {j}", a.findex.0);

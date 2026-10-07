@@ -24,13 +24,6 @@ use super::*;
 /// `SkillRange.allowedTargets` value for "Enemies".
 const ALLOWED_ENEMIES: i32 = 0;
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 /// Virtual-table slot of method `name` on `t` or one of its ancestors.
 fn proto_slot(code: &Bytecode, t: RefType, name: &str) -> Result<(RefField, RefFun)> {
     let mut cur = Some(t);

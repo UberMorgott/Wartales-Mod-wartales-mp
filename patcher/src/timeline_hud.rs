@@ -204,19 +204,6 @@ struct Plan {
     dbg_file: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let fun = &code.functions[fun_index(code, f)?];
-    let t = fun.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
 /// The only function `name` with exactly this signature (statics included).
 fn by_sig(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result<RefFun> {
     let hits: Vec<RefFun> = code
@@ -237,38 +224,6 @@ fn by_sig(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result
         );
     };
     Ok(f)
-}
-
-/// The class global of `name` (HL stores it 1-based) and its type `pkg.$Cls`.
-fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
-    let o = obj(code, obj_type(code, name)?)?;
-    let g = RefGlobal(
-        o.global
-            .0
-            .checked_sub(1)
-            .with_context(|| format!("{name}: no class global"))?,
-    );
-    let t = *code
-        .globals
-        .get(g.0)
-        .with_context(|| format!("{name}: class global out of range"))?;
-    let (pkg, cls) = name.rsplit_once('.').unwrap_or(("", name));
-    let want = format!("{pkg}.${cls}");
-    if obj(code, t).ok().map(|o| s(code, o.name)) != Some(want.as_str()) {
-        bail!("{name}: class global is not {want}");
-    }
-    Ok((g, t))
-}
-
-fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return Ok(true);
-        }
-        cur = obj(code, c)?.super_;
-    }
-    Ok(false)
 }
 
 fn virtual_field(code: &Bytecode, t: RefType, name: &str, want: RefType) -> Result<RefField> {
@@ -348,13 +303,11 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let mask_t = obj_type(code, "h2d.filter.Mask")?;
     let arr_t = obj_type(code, "hl.types.ArrayObj")?;
     let str_t = obj_type(code, "String")?;
-    if !is_sub(code, ev_t, flow_t)?
-        || !is_sub(code, html_t, text_t)?
-        || !is_sub(code, flow_t, obj_t)?
+    if !is_sub(code, ev_t, flow_t) || !is_sub(code, html_t, text_t) || !is_sub(code, flow_t, obj_t)
     {
         bail!("unexpected TimelineEvent / HtmlText hierarchy");
     }
-    if !is_sub(code, mask_t, filter_t)? {
+    if !is_sub(code, mask_t, filter_t) {
         bail!("h2d.filter.Mask is not a Filter");
     }
     // Appending fields is only safe when no subclass inherits the layout.

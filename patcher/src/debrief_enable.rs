@@ -50,25 +50,6 @@ struct Plan {
     sites: Vec<Site>,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn is_subclass(code: &Bytecode, mut t: RefType, of: RefType) -> bool {
-    loop {
-        if t == of {
-            return true;
-        }
-        match code.types[t.0].get_type_obj().and_then(|o| o.super_) {
-            Some(s) => t = s,
-            None => return false,
-        }
-    }
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     let debrief_t = obj_type(code, "ui.win.Debrief")?;
     let element_t = obj_type(code, "ui.comp.Element")?;
@@ -145,7 +126,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         if update.regs[desired.0 as usize] != bool_t {
             bail!("Debrief.update: desired state is not Bool");
         }
-        if !is_subclass(code, update.regs[button.0 as usize], element_t) {
+        if !is_sub(code, update.regs[button.0 as usize], element_t) {
             bail!("Debrief.update: button register is not an Element");
         }
         sites.push(Site {

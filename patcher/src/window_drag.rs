@@ -75,7 +75,7 @@
 // Validated before editing; each part is skipped (logged) on mismatch.
 
 use super::asm::{push_fn, string_ref, Asm, Regs, Snap};
-use super::diag::{index_of, static_fn};
+use super::diag::static_fn;
 use super::job_xp::str_global;
 use super::*;
 use hlbc::types::{EnumConstruct, RefEnumConstruct, RefGlobal, RefString, ValBool};
@@ -210,28 +210,11 @@ struct Ctx {
     dbg_file: usize,
 }
 
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let t = match code.natives.iter().find(|n| n.findex == f) {
-        Some(n) => n.t,
-        None => code.functions[index_of(code, f)?].t,
-    };
-    let t = t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
 fn want_sig(code: &Bytecode, f: RefFun, what: &str, args: &[RefType], ret: RefType) -> Result<()> {
     if sig(code, f)? != (args.to_vec(), ret) {
         bail!("{what}: unexpected signature");
     }
     Ok(())
-}
-
-fn typed(code: &Bytecode, t: RefType, name: &str, want: RefType) -> Result<RefField> {
-    let (f, ft) = field(code, t, name)?;
-    if ft != want {
-        bail!("field {name} has an unexpected type");
-    }
-    Ok(f)
 }
 
 fn enum_index(code: &Bytecode, t: RefType, name: &str) -> Result<i32> {
@@ -521,11 +504,6 @@ struct Globals {
     title: RefGlobal,
 }
 
-fn new_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
-    code.globals.push(t);
-    RefGlobal(code.globals.len() - 1)
-}
-
 /// `Trap exc -> catch` ... `OUT: EndTrap; Ret v` / `catch: report(exc); Ret v`.
 struct Guard {
     exc: Reg,
@@ -596,16 +574,16 @@ pub(crate) fn api(code: &mut Bytecode) -> Result<DragApi> {
 
 fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
     let g = Globals {
-        obj: new_global(code, c.obj_t),
-        follow: new_global(code, c.obj_t),
-        key: new_global(code, c.str_t),
-        scene: new_global(code, c.scene_t),
-        dx: new_global(code, c.f64_t),
-        dy: new_global(code, c.f64_t),
-        last: new_global(code, c.obj_t),
-        last_t: new_global(code, c.f64_t),
-        moved: new_global(code, c.bool_t),
-        logs: new_global(code, c.i32_t),
+        obj: add_global(code, c.obj_t),
+        follow: add_global(code, c.obj_t),
+        key: add_global(code, c.str_t),
+        scene: add_global(code, c.scene_t),
+        dx: add_global(code, c.f64_t),
+        dy: add_global(code, c.f64_t),
+        last: add_global(code, c.obj_t),
+        last_t: add_global(code, c.f64_t),
+        moved: add_global(code, c.bool_t),
+        logs: add_global(code, c.i32_t),
         prefix: str_global(code, c.str_t, PREFIX),
         base: str_global(code, c.str_t, BASE_PREFIX),
         err: str_global(code, c.str_t, S_ERR),
@@ -2945,7 +2923,7 @@ struct WinPlan {
 fn win_plan(code: &Bytecode) -> Result<WinPlan> {
     let win_t = obj_type(code, "ui.Window")?;
     let init = proto(code, win_t, "init")?;
-    let fi = index_of(code, init)?;
+    let fi = fun_index(code, init)?;
     let f = &code.functions[fi];
     let wo = obj(code, win_t)?;
     let can = wo
@@ -3081,23 +3059,12 @@ struct PanelPlan {
     void_reg: Reg,
 }
 
-fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> bool {
-    let mut cur = Some(t);
-    while let Some(x) = cur {
-        if x == of {
-            return true;
-        }
-        cur = code.types[x.0].get_type_obj().and_then(|o| o.super_);
-    }
-    false
-}
-
 fn panel_plan(code: &Bytecode) -> Result<PanelPlan> {
     let gi_t = obj_type(code, "ui.comp.gameUIComp.GameInventory")?;
     let flow_t = obj_type(code, "h2d.Flow")?;
     let obj_t = obj_type(code, "h2d.Object")?;
     let ctor = method(code, gi_t, "__constructor__")?;
-    let fi = index_of(code, ctor.findex)?;
+    let fi = fun_index(code, ctor.findex)?;
     let f = &code.functions[fi];
     let chest = field(code, gi_t, "chestInventory")?;
     let inv = field(code, gi_t, "inventory")?;

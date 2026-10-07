@@ -71,10 +71,10 @@
 // skips the pass (logged).
 
 use super::asm::{push_fn, string_ref, Asm, Regs};
-use super::diag::index_of;
+
 use super::job_xp::{const_str, str_global};
 use super::mirror::{self, emit_log, emit_play_once, enum_constructs, int, want, want_field, Base};
-use super::ping_cell::fname;
+
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
@@ -251,20 +251,20 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("ping__impl: fx load globals have unexpected types");
     }
     want(code, get_loader, "get_loader", &[], loader_t)?;
-    let (la, lr) = super::ping_cell::sig(code, load_cache)?;
+    let (la, lr) = sig(code, load_cache)?;
     if la.len() != 3 || la[0] != loader_t || la[1] != str_t || lr != hres_t {
         bail!("unexpected loadCache signature");
     }
-    let (pa, pr) = super::ping_cell::sig(code, load_prefab)?;
+    let (pa, pr) = sig(code, load_prefab)?;
     let prefab_t = match pa[..] {
         [c, r, p, o] if c == cache_t && r == res_t && o == obj_t && pr == obj_t => p,
         _ => bail!("unexpected loadPrefab signature"),
     };
 
     let (sfx, _) = super::ping_cell::vproto(code, b.ui_t, "sfx")?;
-    let (sa, sr) = super::ping_cell::sig(code, sfx)?;
+    let (sa, sr) = sig(code, sfx)?;
     if sa.len() != 3
-        || !mirror::is_sub(code, b.ui_t, sa[0])
+        || !is_sub(code, b.ui_t, sa[0])
         || sa[1] != str_t
         || sa[2] != dyn_t
         || sr != void_
@@ -291,7 +291,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     )?;
     let remove = proto(code, obj_t, "remove")?;
     want(code, remove, "Object.remove", &[obj_t], void_)?;
-    if !mirror::is_sub(code, scene_t, obj_t) {
+    if !is_sub(code, scene_t, obj_t) {
         bail!("h3d.scene.Scene is not an Object");
     }
 
@@ -360,9 +360,9 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         yes_g,
         meh_g,
         success,
-        init_fi: index_of(code, init.findex)?,
-        done_fi: index_of(code, done.findex)?,
-        end_fi: index_of(code, end.findex)?,
+        init_fi: fun_index(code, init.findex)?,
+        done_fi: fun_index(code, done.findex)?,
+        end_fi: fun_index(code, end.findex)?,
         dbg_file: debug_file(code, "src/ui/win/ForgeAction.hx")?,
     })
 }
@@ -1573,7 +1573,7 @@ mod tests {
         };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
-        let ctor = index_of(
+        let ctor = fun_index(
             &orig,
             method(&orig, p.fa_t, "__constructor__").unwrap().findex,
         )
@@ -1756,14 +1756,14 @@ mod tests {
             if let Some(v) = self.stub(f, &args) {
                 return v;
             }
-            let fi = index_of(self.code, f).unwrap();
+            let fi = fun_index(self.code, f).unwrap();
             assert!(fi >= self.orig_n, "unexpected vanilla call fn@{}", f.0);
             self.run(f, args)
         }
 
         fn run(&mut self, f: RefFun, args: Vec<V>) -> V {
             let code = self.code;
-            let fun = &code.functions[index_of(code, f).unwrap()];
+            let fun = &code.functions[fun_index(code, f).unwrap()];
             let mut r = vec![V::Null; fun.regs.len()];
             for (i, a) in args.into_iter().enumerate() {
                 r[i] = a;

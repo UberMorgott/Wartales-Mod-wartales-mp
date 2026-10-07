@@ -38,13 +38,6 @@ struct Plan {
     heal: RefFun,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn calls(f: &Function, want: RefFun) -> bool {
     f.ops.iter().any(|o| {
         matches!(o,
@@ -108,7 +101,9 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let tail = &o[at..];
     let has = |name: &str| {
         tail.iter().any(|x| match x {
-            Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. } => named(code, *fun) == Some(name),
+            Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. } => {
+                named(code, *fun) == Some(name)
+            }
             _ => false,
         })
     };
@@ -189,10 +184,21 @@ mod tests {
                 };
                 assert_eq!(
                     format!("{:?}", b.ops[i]),
-                    format!("{:?}", Opcode::Call1 { dst, fun: heal, arg0 })
+                    format!(
+                        "{:?}",
+                        Opcode::Call1 {
+                            dst,
+                            fun: heal,
+                            arg0
+                        }
+                    )
                 );
             } else {
-                assert_eq!(format!("{:?}", b.ops[i]), format!("{:?}", a.ops[i]), "op {i}");
+                assert_eq!(
+                    format!("{:?}", b.ops[i]),
+                    format!("{:?}", a.ops[i]),
+                    "op {i}"
+                );
             }
         }
 

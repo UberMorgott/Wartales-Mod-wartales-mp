@@ -46,13 +46,6 @@ struct Plan {
     end: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     // Static SkillTip.getHelpers(sk, lvl, u: st.Unit, stats: st.UnitStats, parent: h2d.Object).
     let unit_t = obj_type(code, "st.Unit")?;

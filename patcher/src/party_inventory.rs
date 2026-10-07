@@ -111,13 +111,6 @@ struct Consume {
     dbg_file: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn fun_t(code: &Bytecode, f: RefFun) -> Result<TypeFun> {
     let t = code
         .functions
@@ -129,21 +122,6 @@ fn fun_t(code: &Bytecode, f: RefFun) -> Result<TypeFun> {
     t.as_fun(code)
         .cloned()
         .with_context(|| format!("function @{} is not a function", f.0))
-}
-
-fn fname(code: &Bytecode, f: RefFun) -> &str {
-    code.functions
-        .iter()
-        .find(|g| g.findex == f)
-        .map(|g| s(code, g.name))
-        .unwrap_or("")
-}
-
-fn field_name(code: &Bytecode, t: RefType, f: RefField) -> Option<&str> {
-    match &code.types[t.0] {
-        Type::Virtual { fields } => fields.get(f.0).map(|x| s(code, x.name)),
-        _ => obj(code, t).ok()?.fields.get(f.0).map(|x| s(code, x.name)),
-    }
 }
 
 fn string_global(code: &Bytecode, str_t: RefType, value: &str) -> Result<RefGlobal> {

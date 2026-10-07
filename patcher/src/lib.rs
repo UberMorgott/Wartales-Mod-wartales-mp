@@ -53,9 +53,9 @@
 // world map outlines the interactive elements on screen, as inside places (see alt_world.rs).
 
 mod activity_diag;
+mod activity_injury;
 mod all_inv;
 mod alt_world;
-mod activity_injury;
 mod asm;
 mod barrier;
 mod camp_any_unit;
@@ -95,12 +95,12 @@ mod skill_cost;
 mod slot4_diag;
 mod style_guard;
 mod take_all;
+mod tavern_resume;
 #[cfg(test)]
 mod testsim;
-mod tavern_resume;
 mod timeline_hud;
-mod title_version;
 mod tip_overflow;
+mod title_version;
 mod tooltip_input;
 mod window_close;
 mod window_drag;
@@ -108,7 +108,9 @@ mod work_mirror;
 
 use anyhow::{bail, Context, Result};
 use hlbc::opcodes::Opcode;
-use hlbc::types::{Function, RefField, RefFun, RefType, Reg, Type, TypeFun, TypeObj};
+use hlbc::types::{
+    Function, RefField, RefFun, RefGlobal, RefString, RefType, Reg, Type, TypeFun, TypeObj,
+};
 use hlbc::Bytecode;
 use std::io::Cursor;
 
@@ -330,6 +332,124 @@ fn next_findex(code: &Bytecode) -> Result<RefFun> {
         bail!("findex space is not dense; refusing to append a function");
     }
     Ok(RefFun(n))
+}
+
+/// Position of function `findex` in `code.functions`.
+fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
+    code.functions
+        .iter()
+        .position(|f| f.findex == findex)
+        .with_context(|| format!("function @{} not found", findex.0))
+}
+
+/// Argument and return types of a function or native.
+fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
+    let t = match code.natives.iter().find(|n| n.findex == f) {
+        Some(n) => n.t,
+        None => code.functions[fun_index(code, f)?].t,
+    };
+    let t = t.as_fun(code).context("not a function type")?;
+    Ok((t.args.clone(), t.ret))
+}
+
+/// Name of function `f` ("" when it is not a bytecode function).
+fn fname(code: &Bytecode, f: RefFun) -> &str {
+    code.functions
+        .iter()
+        .find(|g| g.findex == f)
+        .map(|g| s(code, g.name))
+        .unwrap_or("")
+}
+
+/// `t` is `of` or one of its subclasses.
+fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> bool {
+    let mut cur = Some(t);
+    while let Some(c) = cur {
+        if c == of {
+            return true;
+        }
+        cur = code.types[c.0].get_type_obj().and_then(|o| o.super_);
+    }
+    false
+}
+
+/// The class global of `name` (HL stores it 1-based) and its type `pkg.$Cls`.
+fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
+    let o = obj(code, obj_type(code, name)?)?;
+    let g = RefGlobal(
+        o.global
+            .0
+            .checked_sub(1)
+            .with_context(|| format!("{name}: no class global"))?,
+    );
+    let t = *code
+        .globals
+        .get(g.0)
+        .with_context(|| format!("{name}: class global out of range"))?;
+    let (pkg, cls) = name.rsplit_once('.').unwrap_or(("", name));
+    let want = if pkg.is_empty() {
+        format!("${cls}")
+    } else {
+        format!("{pkg}.${cls}")
+    };
+    if obj(code, t).ok().map(|o| s(code, o.name)) != Some(want.as_str()) {
+        bail!("{name}: class global is not {want}");
+    }
+    Ok((g, t))
+}
+
+/// Field `name` of `t`, which must have type `want`.
+fn typed(code: &Bytecode, t: RefType, name: &str, want: RefType) -> Result<RefField> {
+    let (f, ft) = field(code, t, name)?;
+    if ft != want {
+        bail!("field {name} has an unexpected type");
+    }
+    Ok(f)
+}
+
+/// Name of field `f` of an object or virtual type.
+fn field_name(code: &Bytecode, t: RefType, f: RefField) -> Option<&str> {
+    match &code.types[t.0] {
+        Type::Virtual { fields } => fields.get(f.0).map(|x| s(code, x.name)),
+        _ => obj(code, t).ok()?.fields.get(f.0).map(|x| s(code, x.name)),
+    }
+}
+
+/// The one native `name` with this signature.
+fn native(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result<RefFun> {
+    let hits: Vec<RefFun> = code
+        .natives
+        .iter()
+        .filter(|n| {
+            s(code, n.name) == name
+                && n.t
+                    .as_fun(code)
+                    .is_some_and(|t| t.args == args && t.ret == ret)
+        })
+        .map(|n| n.findex)
+        .collect();
+    match hits[..] {
+        [f] => Ok(f),
+        _ => bail!("expected one native {name}, found {}", hits.len()),
+    }
+}
+
+fn string_index(code: &Bytecode, value: &str) -> Result<RefString> {
+    code.strings
+        .iter()
+        .position(|v| v.as_str() == value)
+        .map(RefString)
+        .with_context(|| format!("string {value:?} not in the pool"))
+}
+
+fn add_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
+    code.globals.push(t);
+    RefGlobal(code.globals.len() - 1)
+}
+
+fn new_reg(f: &mut Function, t: RefType) -> Reg {
+    f.regs.push(t);
+    Reg((f.regs.len() - 1) as u32)
 }
 
 // ---------- bytecode editing ----------

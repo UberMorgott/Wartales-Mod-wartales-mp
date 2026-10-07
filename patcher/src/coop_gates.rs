@@ -107,22 +107,6 @@ fn closures(code: &Bytecode, f: &Function) -> Vec<usize> {
     out
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-/// Name of the object field `field` read through a register of type `t`.
-fn field_name(code: &Bytecode, t: RefType, field: RefField) -> Option<&str> {
-    let fields = match &code.types[t.0] {
-        Type::Virtual { fields } => fields,
-        other => &other.get_type_obj()?.fields,
-    };
-    fields.get(field.0).map(|f| s(code, f.name))
-}
-
 // ---------- G1: Button.waitAllPlayers ----------
 
 /// A repeat click on the same button within this many seconds of the click that

@@ -39,7 +39,7 @@
 use super::*;
 use crate::asm::{push_fn, Asm, Regs};
 use crate::job_xp::const_str;
-use crate::ping_cell::{class_global, fname};
+
 use hlbc::types::{RefGlobal, ValBool};
 
 struct Plan {
@@ -88,33 +88,6 @@ struct Plan {
     dbg_world: usize,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let t = match code.natives.iter().find(|n| n.findex == f) {
-        Some(n) => n.t,
-        None => code.functions[fun_index(code, f)?].t,
-    };
-    let t = t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
-fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return Ok(true);
-        }
-        cur = obj(code, c)?.super_;
-    }
-    Ok(false)
-}
-
 /// Virtual-table slot of method `name` on `t` or one of its ancestors.
 fn proto_slot(code: &Bytecode, t: RefType, name: &str) -> Result<RefField> {
     let mut cur = Some(t);
@@ -127,17 +100,6 @@ fn proto_slot(code: &Bytecode, t: RefType, name: &str) -> Result<RefField> {
         cur = o.super_;
     }
     bail!("method {name} not found on type {}", t.0)
-}
-
-fn typed(code: &Bytecode, t: RefType, name: &str, want: RefType) -> Result<RefField> {
-    let (f, ft) = field(code, t, name)?;
-    if ft != want {
-        bail!(
-            "{}.{name} has an unexpected type",
-            s(code, obj(code, t)?.name)
-        );
-    }
-    Ok(f)
 }
 
 fn plan(code: &Bytecode) -> Result<Plan> {
@@ -153,7 +115,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let obj_t = obj_type(code, "h3d.scene.Object")?;
     let arr_t = obj_type(code, "hl.types.ArrayObj")?;
     let gs_t = obj_type(code, "st.GameState")?;
-    if !is_sub(code, world_t, mode_t)? {
+    if !is_sub(code, world_t, mode_t) {
         bail!("world.World is not a GameMode");
     }
 
@@ -836,7 +798,7 @@ mod tests {
         check_flow(b);
 
         for f in [fns.gate, fns.edge, fns.cull] {
-            let nf = &back.functions[crate::diag::index_of(&back, f).unwrap()];
+            let nf = &back.functions[crate::fun_index(&back, f).unwrap()];
             check_types(&back, nf, 0..nf.ops.len());
             check_flow(nf);
         }

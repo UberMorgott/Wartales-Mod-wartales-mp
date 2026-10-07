@@ -303,13 +303,6 @@ fn proto_fn<'a>(code: &'a Bytecode, t: RefType, name: &str) -> Result<&'a Functi
     Ok(&code.functions[fun_index(code, f)?])
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn fun_sig(code: &Bytecode, f: RefFun) -> Result<TypeFun> {
     let t = code
         .functions
@@ -323,13 +316,6 @@ fn fun_sig(code: &Bytecode, f: RefFun) -> Result<TypeFun> {
         .with_context(|| format!("function @{} has no function type", f.0))
 }
 
-fn field_name(code: &Bytecode, t: RefType, f: RefField) -> Option<&str> {
-    match &code.types[t.0] {
-        Type::Virtual { fields } => fields.get(f.0).map(|x| s(code, x.name)),
-        _ => obj(code, t).ok()?.fields.get(f.0).map(|x| s(code, x.name)),
-    }
-}
-
 /// A global holding the String constant `value` (must exist).
 fn existing_str_global(code: &Bytecode, str_t: RefType, value: &str) -> Result<RefGlobal> {
     code.constants
@@ -341,23 +327,6 @@ fn existing_str_global(code: &Bytecode, str_t: RefType, value: &str) -> Result<R
         })
         .map(|c| c.global)
         .with_context(|| format!("string global {value:?} not found"))
-}
-
-/// The class global (`$Name` object) of class `name`.
-fn class_global(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
-    let o = obj(code, obj_type(code, name)?)?;
-    // HL stores an object's class global 1-based (0 = none).
-    let g = RefGlobal(
-        o.global
-            .0
-            .checked_sub(1)
-            .with_context(|| format!("{name}: no class global"))?,
-    );
-    let t = *code
-        .globals
-        .get(g.0)
-        .with_context(|| format!("{name}: class global out of range"))?;
-    Ok((g, t))
 }
 
 /// Class global of enum `name` (its `$Name` BaseType object), found as the global
@@ -556,7 +525,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("sortButton is not a ui.comp.Icon");
     }
     let blk = plan_icon_block(code, ctor, sort_field, gi_t)?;
-    if !is_sub(code, icon_t, blk.obj_t)? {
+    if !is_sub(code, icon_t, blk.obj_t) {
         bail!("sortButton block casts to an unrelated type");
     }
     let (elem_dom, dom_t) = field(code, chest_inv.1, "dom")?;
@@ -594,9 +563,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         .find(|f| {
             s(code, f.name) == "getTool"
                 && f.t.as_fun(code).is_some_and(|ft| {
-                    ft.args.len() == 3
-                        && is_sub(code, camp_t, ft.args[0]).unwrap_or(false)
-                        && ft.args[1] == str_t
+                    ft.args.len() == 3 && is_sub(code, camp_t, ft.args[0]) && ft.args[1] == str_t
                 })
         })
         .context("Camp.getTool(String, ?) not found")?;
@@ -681,17 +648,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         flow_g,
         sort_icon_g,
     })
-}
-
-fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> Result<bool> {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return Ok(true);
-        }
-        cur = obj(code, c)?.super_;
-    }
-    Ok(false)
 }
 
 // Op positions in GameInventory.onSortMenu (1.0.48274) that the clone rewrites.

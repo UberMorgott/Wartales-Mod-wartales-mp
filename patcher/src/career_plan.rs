@@ -71,13 +71,6 @@ struct Plan {
     null_i32_t: RefType,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     let ui_t = obj_type(code, "ui.win.UnitInfo")?;
     let unit_t = obj_type(code, "st.Unit")?;

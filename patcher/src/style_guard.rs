@@ -47,7 +47,7 @@
 // Validated before editing; each part is skipped (logged) on mismatch.
 
 use super::asm::Asm;
-use super::diag::{index_of, static_fn};
+use super::diag::static_fn;
 use super::job_xp::str_global;
 use super::*;
 use hlbc::types::{RefGlobal, RefInt, ValBool};
@@ -168,7 +168,7 @@ struct StylePlan {
 fn style_plan(code: &Bytecode, c: &Common) -> Result<StylePlan> {
     let props_t = obj_type(code, "domkit.Properties")?;
     let f = method(code, props_t, "applyStyle")?;
-    let fi = index_of(code, f.findex)?;
+    let fi = fun_index(code, f.findex)?;
     let o = &f.ops;
     if o.iter().any(|x| matches!(x, Opcode::Trap { .. })) {
         bail!("Properties.applyStyle already has a trap (applied)");
@@ -661,7 +661,7 @@ struct OverPlan {
 fn over_plan(code: &Bytecode, c: &Common) -> Result<OverPlan> {
     let ctrl_t = obj_type(code, "st.Controller")?;
     let f = method(code, ctrl_t, "gameOver__impl")?;
-    let fi = index_of(code, f.findex)?;
+    let fi = fun_index(code, f.findex)?;
     let o = &f.ops;
     if o.iter().any(|x| matches!(x, Opcode::Trap { .. })) {
         bail!("gameOver__impl already has a trap (applied)");
@@ -693,7 +693,7 @@ fn over_plan(code: &Bytecode, c: &Common) -> Result<OverPlan> {
     if f.regs[p.0 as usize] != pause_t || src != b || arg0 != p || arg1 != rb {
         bail!("gameOver__impl: the Pause construction has unexpected registers");
     }
-    let ctor_f = &code.functions[index_of(code, *ctor)?];
+    let ctor_f = &code.functions[fun_index(code, *ctor)?];
     if s(code, ctor_f.name) != "__constructor__" || fun_args(code, ctor_f).first() != Some(&pause_t)
     {
         bail!("gameOver__impl: the call is not Pause's constructor");

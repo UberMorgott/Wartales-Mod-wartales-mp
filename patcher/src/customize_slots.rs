@@ -72,13 +72,6 @@ struct Plan {
     is_animal: RefFun,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn fun_name(code: &Bytecode, findex: RefFun) -> Option<&str> {
     code.functions
         .iter()
@@ -364,11 +357,6 @@ fn set_jump(ops: &mut [Opcode], i: usize, target: i64) {
         | Opcode::JAlways { offset } => *offset = off,
         _ => unreachable!("not a jump"),
     }
-}
-
-fn new_reg(f: &mut Function, t: RefType) -> Reg {
-    f.regs.push(t);
-    Reg((f.regs.len() - 1) as u32)
 }
 
 fn apply(code: &mut Bytecode, p: Plan) {

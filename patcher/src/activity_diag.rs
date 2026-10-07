@@ -32,7 +32,7 @@
 //
 // Validated before editing; a mismatch skips the pass (logged).
 
-use super::diag::{calls, closure_passed_to, index_of, static_fn};
+use super::diag::{calls, closure_passed_to, static_fn};
 use super::job_xp::str_global;
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
@@ -79,7 +79,7 @@ fn closure_calling(code: &Bytecode, fi: usize, callee: RefFun) -> Result<usize> 
     let mut hits = vec![];
     for op in &f.ops {
         if let Opcode::InstanceClosure { fun, .. } = op {
-            let ci = index_of(code, *fun)?;
+            let ci = fun_index(code, *fun)?;
             if calls(&code.functions[ci], callee) && !hits.contains(&ci) {
                 hits.push(ci);
             }
@@ -123,7 +123,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if calls(net_err, println) {
         bail!("already applied");
     }
-    let net_err = index_of(code, net_err.findex)?;
+    let net_err = fun_index(code, net_err.findex)?;
 
     // ui.win.Activity and the continuations of its end.
     let act_t = obj_type(code, "ui.win.Activity")?;
@@ -141,7 +141,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if cam_t != bool_t {
         bail!("Activity.changeCamera is not a Bool");
     }
-    let act_m = |name: &str| -> Result<usize> { index_of(code, proto(code, act_t, name)?) };
+    let act_m = |name: &str| -> Result<usize> { fun_index(code, proto(code, act_t, name)?) };
     let start = act_m("start__impl")?;
     let done = act_m("onActionDone")?;
     let result = act_m("doResult__impl")?;
@@ -155,8 +155,11 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let loot_reply = closure_passed_to(code, done, loot)?;
     let after_wait = closure_passed_to(code, done, wait)?;
     let on_ready = closure_calling(code, after_wait, do_result)?;
-    let host_success = index_of(code, method(code, unit_t, "successActivity__impl")?.findex)?;
-    let host_loot = index_of(code, method(code, progress_t, "computeActivityLoot__impl")?.findex)?;
+    let host_success = fun_index(code, method(code, unit_t, "successActivity__impl")?.findex)?;
+    let host_loot = fun_index(
+        code,
+        method(code, progress_t, "computeActivityLoot__impl")?.findex,
+    )?;
 
     let id = || Part {
         label: " id=",
@@ -253,7 +256,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         (
             "ui.win.BoardPuzzle",
             [
-                ("checkPuzzleSolved__impl", "mp: BoardPuzzle checkPuzzleSolved"),
+                (
+                    "checkPuzzleSolved__impl",
+                    "mp: BoardPuzzle checkPuzzleSolved",
+                ),
                 ("successActivity", "mp: BoardPuzzle successActivity"),
                 ("leaveActivity__impl", "mp: BoardPuzzle leaveActivity"),
                 ("getOut__impl", "mp: BoardPuzzle getOut"),
@@ -269,7 +275,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         }
         for (name, tag) in steps {
             probes.push(Probe {
-                fi: index_of(code, proto(code, t, name)?)?,
+                fi: fun_index(code, proto(code, t, name)?)?,
                 tag,
                 parts: vec![
                     Part {
@@ -329,7 +335,12 @@ fn new_reg(regs: &mut Vec<RefType>, t: RefType) -> Reg {
 
 /// Loads `path` from `this` into fresh registers; every link is null-checked
 /// (its JNull index pushed to `skips`). Returns the last register (`this` when empty).
-fn walk(regs: &mut Vec<RefType>, ops: &mut Vec<Opcode>, path: &Path, skips: &mut Vec<usize>) -> Reg {
+fn walk(
+    regs: &mut Vec<RefType>,
+    ops: &mut Vec<Opcode>,
+    path: &Path,
+    skips: &mut Vec<usize>,
+) -> Reg {
     let mut cur = Reg(0);
     for (k, &(fld, t)) in path.iter().enumerate() {
         let r = new_reg(regs, t);
@@ -350,7 +361,12 @@ fn walk(regs: &mut Vec<RefType>, ops: &mut Vec<Opcode>, path: &Path, skips: &mut
 }
 
 /// The probe's ops (fresh registers appended to `regs`), jumps resolved.
-fn probe_ops(p: &Plan, regs: &mut Vec<RefType>, tag_g: RefGlobal, parts: &[(RefGlobal, &Val)]) -> Vec<Opcode> {
+fn probe_ops(
+    p: &Plan,
+    regs: &mut Vec<RefType>,
+    tag_g: RefGlobal,
+    parts: &[(RefGlobal, &Val)],
+) -> Vec<Opcode> {
     let acc = new_reg(regs, p.str_t);
     let d = new_reg(regs, p.dyn_t);
     let v = new_reg(regs, p.void_t);
@@ -463,7 +479,10 @@ fn apply(code: &mut Bytecode, p: Plan) {
             .iter()
             .map(|q| str_global(code, p.str_t, q.label))
             .collect();
-        let parts: Vec<(RefGlobal, &Val)> = labels.into_iter().zip(pr.parts.iter().map(|q| &q.val)).collect();
+        let parts: Vec<(RefGlobal, &Val)> = labels
+            .into_iter()
+            .zip(pr.parts.iter().map(|q| &q.val))
+            .collect();
         let f = &mut code.functions[pr.fi];
         let ops = probe_ops(&p, &mut f.regs, tag_g, &parts);
         // At the entry: a jump back to op 0 (a loop head) lands after the probe.
@@ -511,7 +530,12 @@ mod tests {
         assert_eq!(back.functions.len(), orig.functions.len());
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let changed = format!("{:?}", a.ops) != format!("{:?}", b.ops) || a.regs != b.regs;
-            assert_eq!(changed, probed.contains(&i), "function #{i} (fn@{})", a.findex.0);
+            assert_eq!(
+                changed,
+                probed.contains(&i),
+                "function #{i} (fn@{})",
+                a.findex.0
+            );
         }
         for &fi in &probed {
             let (a, b) = (&orig.functions[fi], &back.functions[fi]);
@@ -537,7 +561,12 @@ mod tests {
                 };
                 // The probe writes only its own (new) registers.
                 if let Some(r) = w {
-                    assert!(r.0 as usize >= a.regs.len(), "fn@{} writes r{}", a.findex.0, r.0);
+                    assert!(
+                        r.0 as usize >= a.regs.len(),
+                        "fn@{} writes r{}",
+                        a.findex.0,
+                        r.0
+                    );
                 }
                 // No String is boxed with ToDyn on its way to println.
                 if let Opcode::ToDyn { src, .. } = &b.ops[k] {

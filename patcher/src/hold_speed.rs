@@ -25,13 +25,6 @@ struct Plan {
     f64_t: RefType,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     let ui_t = obj_type(code, "ui.BaseUI")?;
     let f = method(code, ui_t, "holdAction")?;

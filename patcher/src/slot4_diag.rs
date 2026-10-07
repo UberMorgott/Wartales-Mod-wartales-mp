@@ -103,27 +103,6 @@ struct Plan {
     fns: Fns,
 }
 
-fn sig(code: &Bytecode, f: RefFun) -> Result<(Vec<RefType>, RefType)> {
-    let fun = code
-        .functions
-        .iter()
-        .find(|g| g.findex == f)
-        .with_context(|| format!("fn@{} not found", f.0))?;
-    let t = fun.t.as_fun(code).context("not a function type")?;
-    Ok((t.args.clone(), t.ret))
-}
-
-fn is_sub(code: &Bytecode, t: RefType, of: RefType) -> bool {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        if c == of {
-            return true;
-        }
-        cur = code.types[c.0].get_type_obj().and_then(|o| o.super_);
-    }
-    false
-}
-
 fn native(code: &Bytecode, name: &str, ret: RefType) -> Result<RefFun> {
     let hits: Vec<RefFun> = code
         .natives
@@ -285,11 +264,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
             get_interactive,
         },
     })
-}
-
-fn add_global(code: &mut Bytecode, t: RefType) -> RefGlobal {
-    code.globals.push(t);
-    RefGlobal(code.globals.len() - 1)
 }
 
 /// String pieces of the line, by label.

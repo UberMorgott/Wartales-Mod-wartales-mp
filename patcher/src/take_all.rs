@@ -112,13 +112,6 @@ struct Plan {
     type_t: RefType,
 }
 
-fn fun_index(code: &Bytecode, findex: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == findex)
-        .with_context(|| format!("function @{} not found", findex.0))
-}
-
 fn fun_named(code: &Bytecode, f: RefFun) -> Option<&str> {
     code.functions
         .iter()
