@@ -427,10 +427,13 @@ static void check_reconnect(read_fn read, avail_fn avail, session_fn close, HMOD
 	put_uid(uid, TALK);
 	check(close(uid) == 1, "the game closes the second session");
 	inject(TALK, 0, "\x05\x01\x00\x09\x00\x00\x00hi", 9);
-	size = 0;
-	check(avail(&size, 0) == 1 && size == 9, "the peer's new message is there");
+	// The game does not poll meanwhile (loading): the close falls due with the
+	// message still at Steam; the diag thread pulls it in and cancels.
+	Sleep(2500);
 	check(wait_log(log, "sdr: deferred close of 76561198000000007 cancelled: the peer sends again", 2000),
-		"a message from the peer cancels the deferred close");
+		"a message from the peer, unread by the game, cancels the deferred close");
+	size = 0;
+	check(avail(&size, 0) == 1 && size == 9, "the peer's new message is still there for the game");
 	from = read(buf, sizeof(buf), &len, 0);
 	check(from != NULL && get_uid(from) == TALK && len == 9, "the message reaches the game");
 	Sleep(2500);

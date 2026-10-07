@@ -487,16 +487,18 @@ static void session_request(const sdr_identity *peer, const char *via) {
 	unsigned char ok = 0;
 	if (peer == NULL || sdr_msgs == NULL)
 		return;
+	// Accept and cancel under one lock: a deferred close falling due on the
+	// diag thread in between would close the session just accepted.
+	EnterCriticalSection(&sdr_lock);
+	if (peer->type == SDR_IDENTITY_STEAMID) {
+		watch_peer(peer->u.steam_id);
+		cancel_close(find_watch(peer->u.steam_id), "the peer asks for a new session");
+	}
 	ok = api.accept(sdr_msgs, peer);
+	LeaveCriticalSection(&sdr_lock);
 	sdr_accepted++;
 	shim_log("sdr: session request from %llu (type %d) via %s: %s (RunCallbacks %ld)", (unsigned long long)peer->u.steam_id,
 		peer->type, via, ok ? "accepted" : "accept FAILED", run_callbacks_count);
-	if (peer->type == SDR_IDENTITY_STEAMID) {
-		EnterCriticalSection(&sdr_lock);
-		watch_peer(peer->u.steam_id);
-		cancel_close(find_watch(peer->u.steam_id), "the peer asks for a new session");
-		LeaveCriticalSection(&sdr_lock);
-	}
 }
 
 static void session_failed(const sdr_conn_info *info, const char *via) {
@@ -823,10 +825,17 @@ static void lost_tick(DWORD now) {
 		if (sdr_watch[i].close_pending && (LONG)(now - sdr_watch[i].close_at) >= 0) {
 			sdr_identity peer;
 			unsigned char ok;
-			sdr_watch[i].close_pending = FALSE;
-			identity_of(&peer, sdr_watch[i].id);
-			ok = api.close(sdr_msgs, &peer);
-			shim_log("sdr: deferred CloseSessionWithUser(%llu) = %u", (unsigned long long)sdr_watch[i].id, ok);
+			int ch;
+			// Messages the peer sent while the game was not polling (a reload)
+			// cancel the close too: pull them in first.
+			for (ch = 0; ch < SDR_CHANNELS; ch++)
+				pump(ch);
+			if (sdr_watch[i].close_pending) {
+				sdr_watch[i].close_pending = FALSE;
+				identity_of(&peer, sdr_watch[i].id);
+				ok = api.close(sdr_msgs, &peer);
+				shim_log("sdr: deferred CloseSessionWithUser(%llu) = %u", (unsigned long long)sdr_watch[i].id, ok);
+			}
 		}
 		if (sdr_watch[i].lost && !sdr_watch[i].injected && now - sdr_watch[i].lost_at >= SDR_LOST_CONFIRM_MS) {
 			int c = sdr_watch[i].channel;
