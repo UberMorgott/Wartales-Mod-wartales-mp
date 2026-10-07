@@ -52,6 +52,31 @@
 //     `hasGameplayStarted` path), or, if the others are still loading,
 //     readyFix uncounts it until its new connection sends ReadyToStart.
 //
+// The count only knows state.players. A client whose Join the host has not
+// handled yet (still connecting, or parked by the barrier's joinGate) has no
+// player in it, so the known players alone reach `==` and vanilla sends the
+// start to every host.clients: the unsynced client runs gameplayStart before
+// its SyncDone and never leaves the loading screen. So, in the same handler:
+//
+//   the Join case, at its head:   readyJoined(client)
+//   the start, before gameplayStart: if (readyHold(this, client)) return
+//   the start broadcast, per client: if (!readySendTo(c)) continue
+//
+//   readyJoined(c): c is synced (seen-clients of the Join handler; a parked
+//     Join returns before it and its replay comes back through it).
+//   readyWaiting(game): a client in host.clients (with a user) not synced.
+//   readyHold(game, c): while readyWaiting, the start is held: the count of
+//     this ReadyToStart is undone (playersReady--) and c is kept as `held`.
+//   readyTick, last: a held start with nothing waiting any more (the client
+//     synced, or dropped: hxbit took it out of host.clients) is replayed: the
+//     handler is run for `held` as a forced ReadyToStart, which counts it
+//     again; a joined new player is in the count by then and is waited for.
+//   readySendTo(c): c sent a ReadyToStart that was counted. A client that has
+//     not (a synced player the count leaves out) is not started; its own
+//     ReadyToStart takes the vanilla late-joiner path.
+// No timer of its own: a parked Join is bounded by the barrier's JOIN_CAP
+// (the client is disconnected, and so no longer waited for).
+//
 // Not handled: a player whose client never connects to the host at all is
 // still waited for (it cannot be told from one still on its way).
 //
@@ -63,6 +88,8 @@ use crate::job_xp::{const_str, str_global};
 use hlbc::types::{RefEnumConstruct, RefGlobal, RefInt, ValBool};
 
 const LOG_FORCED: &str = "mp: ready: a player who left is no longer waited for: ";
+const LOG_HOLD: &str = "mp: ready: start held: a connected player has not joined yet";
+const LOG_REPLAY: &str = "mp: ready: every connected player joined, the held start goes ahead";
 
 type F = (RefField, RefType);
 
@@ -121,6 +148,14 @@ struct Plan {
     branch_jump: usize,
     /// First op of the counting branch.
     branch_at: usize,
+    /// The Switch on the message, and the first op of its Join case.
+    switch_at: usize,
+    join_at: usize,
+    /// The gameplayStart call that opens the start block.
+    start_at: usize,
+    /// The broadcast's `GetGlobal msg; c.sendMessage(msg)` and its client.
+    send_at: usize,
+    send_c: Reg,
     update_fi: usize,
     start_fi: usize,
     dbg_file: usize,
@@ -373,6 +408,76 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     {
         bail!("the message handler: the counting branch has an unexpected shape");
     }
+    let only_entry = |at: usize, from: usize| {
+        (0..h.ops.len())
+            .filter(|&i| jump_targets(h, i).contains(&at))
+            .eq([from])
+    };
+    let no_entry = |at: usize| (0..h.ops.len()).all(|i| !jump_targets(h, i).contains(&at));
+    // `switch (msg)`: case 0 (Join) entered only from the switch.
+    let switches: Vec<usize> = (0..h.ops.len())
+        .filter(|&i| matches!(&h.ops[i], Opcode::Switch { offsets, .. } if offsets.len() == 3))
+        .collect();
+    let [switch_at] = switches[..] else {
+        bail!("the message handler: expected one switch on the message");
+    };
+    let join_at = jump_targets(h, switch_at)[0];
+    if join_at >= branch_jump || !only_entry(join_at, switch_at) {
+        bail!("the message handler: the Join case has other entries");
+    }
+    // `if (playersReady == nbPlayers) { gameplayStart(); ...`: entered by fall-through.
+    let gp_start = method(code, game_t, "gameplayStart")?.findex;
+    let starts: Vec<usize> = (branch_at..h.ops.len())
+        .filter(|&i| matches!(h.ops[i], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == gp_start))
+        .collect();
+    let [start_at] = starts[..] else {
+        bail!("the message handler: expected one gameplayStart");
+    };
+    if !matches!(h.ops[start_at - 1], Opcode::JNotEq { .. }) || !no_entry(start_at) {
+        bail!("the message handler: the start block has an unexpected shape");
+    }
+    // The late joiner's `client.sendMessage(ReadyToStart)` (gameplay started):
+    // the message global and the send the broadcast must use too.
+    let late: Vec<(RefGlobal, RefFun)> = h.ops[branch_jump + 1..branch_at]
+        .windows(2)
+        .filter_map(|w| match (&w[0], &w[1]) {
+            (Opcode::GetGlobal { dst, global }, Opcode::Call2 { fun, arg1, .. })
+                if arg1 == dst && h.regs[dst.0 as usize] == msg_t =>
+            {
+                Some((*global, *fun))
+            }
+            _ => None,
+        })
+        .collect();
+    let [(ready_msg, send_fn)] = late[..] else {
+        bail!("the message handler: expected one late-joiner ReadyToStart");
+    };
+    // `for (c in host.clients) c.sendMessage(ReadyToStart)`: the loop's last two ops.
+    let sends: Vec<(usize, Reg)> = (start_at + 1..h.ops.len().saturating_sub(2))
+        .filter_map(|i| match (&h.ops[i], &h.ops[i + 1], &h.ops[i + 2]) {
+            (
+                Opcode::GetGlobal { dst, global },
+                Opcode::Call2 {
+                    fun, arg0, arg1, ..
+                },
+                Opcode::JAlways { offset },
+            ) if *global == ready_msg
+                && *fun == send_fn
+                && arg1 == dst
+                && *offset < 0
+                && h.regs[arg0.0 as usize] == nc_t =>
+            {
+                Some((i, *arg0))
+            }
+            _ => None,
+        })
+        .collect();
+    let [(send_at, send_c)] = sends[..] else {
+        bail!("the message handler: expected one start broadcast loop");
+    };
+    if !no_entry(send_at) {
+        bail!("the message handler: the start broadcast has an unexpected shape");
+    }
 
     // Game.update(dt) and Game.startServer(): a call at op 0, which no jump targets.
     let update = method(code, game_t, "update")?;
@@ -435,6 +540,11 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         join_fi,
         branch_jump,
         branch_at,
+        switch_at,
+        join_at,
+        start_at,
+        send_at,
+        send_c,
         update_fi: fun_index(code, update.findex)?,
         start_fi: fun_index(code, start.findex)?,
         dbg_file: debug_file(code, "src/Game.hx")?,
@@ -446,24 +556,27 @@ struct Globals {
     seen_u: RefGlobal,
     ready: RefGlobal,
     ready_c: RefGlobal,
+    synced: RefGlobal,
     forced: RefGlobal,
+    held: RefGlobal,
 }
 
-/// readyReset(): fresh lists, nothing forced.
+/// readyReset(): fresh lists, nothing forced or held.
 fn add_reset(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
     let na = &p.new_arr;
     let mut r = Regs(vec![]);
-    let (n, t, z, y, a, b, v) = (
+    let (n, t, z, y, a, b, c, v) = (
         r.r(p.i32_t),
         r.r(na.type_t),
         r.r(na.raw_t),
         r.r(na.cast_t),
         r.r(p.arr_t),
         r.r(p.bool_t),
+        r.r(p.nc_t),
         r.r(p.void_t),
     );
     let mut ops = vec![];
-    for gl in [g.seen_c, g.seen_u, g.ready, g.ready_c] {
+    for gl in [g.seen_c, g.seen_u, g.ready, g.ready_c, g.synced] {
         ops.extend([
             Opcode::Int {
                 dst: n,
@@ -493,8 +606,261 @@ fn add_reset(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
         global: g.forced,
         src: b,
     });
+    ops.push(Opcode::Null { dst: c });
+    ops.push(Opcode::SetGlobal {
+        global: g.held,
+        src: c,
+    });
     ops.push(Opcode::Ret { ret: v });
     push_fn(code, vec![], p.void_t, r.0, ops, p.dbg_file)
+}
+
+/// readyWaiting(game): a client in host.clients, with a user, whose Join the
+/// host has not handled.
+fn add_waiting(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
+    let cls_t = code.globals[p.cwt_cls.0];
+    let i0 = int_const(code, 0);
+    let mut r = Regs(vec![p.game_t]);
+    let game = Reg(0);
+    let (b, host, clients, synced, i, len, raw, e) = (
+        r.r(p.bool_t),
+        r.r(p.game_host.1),
+        r.r(p.arr_t),
+        r.r(p.arr_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.arr_raw.1),
+        r.r(p.dyn_t),
+    );
+    let (c, cls, cw, u, uid) = (
+        r.r(p.nc_t),
+        r.r(cls_t),
+        r.r(p.cwt_t),
+        r.r(p.user_t),
+        r.r(p.str_t),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Field {
+        dst: host,
+        obj: game,
+        field: p.game_host.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: host,
+            offset: 0,
+        },
+        "no",
+    );
+    a.op(Opcode::Field {
+        dst: clients,
+        obj: host,
+        field: p.host_clients,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: clients,
+            offset: 0,
+        },
+        "no",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: synced,
+        global: g.synced,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: synced,
+            offset: 0,
+        },
+        "no",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: cls,
+        global: p.cwt_cls,
+    });
+    a.op(Opcode::Int { dst: i, ptr: i0 });
+    a.loop_head("each");
+    a.op(Opcode::Field {
+        dst: len,
+        obj: clients,
+        field: p.arr_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: len,
+            offset: 0,
+        },
+        "no",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: clients,
+        field: p.arr_raw.0,
+    });
+    a.op(Opcode::GetArray {
+        dst: e,
+        array: raw,
+        index: i,
+    });
+    a.op(Opcode::Incr { dst: i });
+    a.op(Opcode::UnsafeCast { dst: c, src: e });
+    a.jmp(Opcode::JNull { reg: c, offset: 0 }, "each");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.contains,
+        arg0: synced,
+        arg1: c,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "each");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.check,
+        arg0: cls,
+        arg1: c,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "each");
+    a.op(Opcode::UnsafeCast { dst: cw, src: c });
+    a.op(Opcode::Call1 {
+        dst: u,
+        fun: p.get_user,
+        arg0: cw,
+    });
+    a.jmp(Opcode::JNull { reg: u, offset: 0 }, "each");
+    a.op(Opcode::Field {
+        dst: uid,
+        obj: u,
+        field: p.user_id,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: uid,
+            offset: 0,
+        },
+        "each",
+    );
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("no");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![p.game_t], p.bool_t, r.0, a.finish(), p.dbg_file)
+}
+
+/// readyHold(game, c): true (the start is held) while readyWaiting; the count
+/// of c's ReadyToStart is undone and c kept for the replay.
+fn add_hold(code: &mut Bytecode, p: &Plan, g: &Globals, waiting: RefFun) -> Result<RefFun> {
+    let log = str_global(code, p.str_t, LOG_HOLD);
+    let mut r = Regs(vec![p.game_t, p.nc_t]);
+    let (game, c) = (Reg(0), Reg(1));
+    let (b, cnt, txt, v) = (r.r(p.bool_t), r.r(p.i32_t), r.r(p.str_t), r.r(p.void_t));
+    let mut a = Asm::new();
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: waiting,
+        arg0: game,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "go");
+    a.op(Opcode::SetGlobal {
+        global: g.held,
+        src: c,
+    });
+    a.op(Opcode::Field {
+        dst: cnt,
+        obj: game,
+        field: p.game_ready,
+    });
+    a.op(Opcode::Decr { dst: cnt });
+    a.op(Opcode::SetField {
+        obj: game,
+        field: p.game_ready,
+        src: cnt,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: txt,
+        global: log,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: txt,
+    });
+    a.label("go");
+    a.op(Opcode::Ret { ret: b });
+    push_fn(
+        code,
+        vec![p.game_t, p.nc_t],
+        p.bool_t,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
+}
+
+/// readyJoined(c): the host handled c's Join.
+fn add_joined(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
+    let mut r = Regs(vec![p.nc_t]);
+    let (synced, n, v) = (r.r(p.arr_t), r.r(p.i32_t), r.r(p.void_t));
+    let mut a = Asm::new();
+    a.op(Opcode::GetGlobal {
+        dst: synced,
+        global: g.synced,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: synced,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Call2 {
+        dst: n,
+        fun: p.push,
+        arg0: synced,
+        arg1: Reg(0),
+    });
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.nc_t], p.void_t, r.0, a.finish(), p.dbg_file)
+}
+
+/// readySendTo(c): c's ReadyToStart was counted (always, before readyReset).
+fn add_send_to(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
+    let mut r = Regs(vec![p.nc_t]);
+    let (ready_c, b) = (r.r(p.arr_t), r.r(p.bool_t));
+    let mut a = Asm::new();
+    a.op(Opcode::GetGlobal {
+        dst: ready_c,
+        global: g.ready_c,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: ready_c,
+            offset: 0,
+        },
+        "yes",
+    );
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.contains,
+        arg0: ready_c,
+        arg1: Reg(0),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("yes");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![p.nc_t], p.bool_t, r.0, a.finish(), p.dbg_file)
 }
 
 /// readyFix(game): a user counted as ready whose connected client is not the
@@ -790,9 +1156,11 @@ fn add_tick(
     g: &Globals,
     handler: RefFun,
     fix: RefFun,
+    waiting: RefFun,
 ) -> Result<RefFun> {
     let i0 = int_const(code, 0);
     let log = str_global(code, p.str_t, LOG_FORCED);
+    let log_replay = str_global(code, p.str_t, LOG_REPLAY);
     let cls_t = code.globals[p.cwt_cls.0];
     let mut r = Regs(vec![p.game_t]);
     let game = Reg(0);
@@ -884,6 +1252,41 @@ fn add_tick(
             a.op(Opcode::Incr { dst: idx });
         }
         a.op(Opcode::UnsafeCast { dst, src: e });
+    };
+    // The vanilla handler run for client `c` as a ReadyToStart that readyMark
+    // lets through uncounted (`forced`).
+    let forced_ready = |a: &mut Asm, c: Reg, caught: &'static str| {
+        a.op(Opcode::Bool {
+            dst: b,
+            value: ValBool(true),
+        });
+        a.op(Opcode::SetGlobal {
+            global: g.forced,
+            src: b,
+        });
+        a.op(Opcode::MakeEnum {
+            dst: msg,
+            construct: p.ready_ctor,
+            args: vec![],
+        });
+        a.jmp(Opcode::Trap { exc, offset: 0 }, caught);
+        a.op(Opcode::Call3 {
+            dst: v,
+            fun: handler,
+            arg0: game,
+            arg1: c,
+            arg2: msg,
+        });
+        a.op(Opcode::EndTrap { exc });
+        a.label(caught);
+        a.op(Opcode::Bool {
+            dst: b,
+            value: ValBool(false),
+        });
+        a.op(Opcode::SetGlobal {
+            global: g.forced,
+            src: b,
+        });
     };
 
     // Host only, while it waits for ReadyToStart.
@@ -978,7 +1381,7 @@ fn add_tick(
             b: cnt,
             offset: 0,
         },
-        "end",
+        "replay",
     );
     a.op(Opcode::Int { dst: i, ptr: i0 });
     a.loop_head("gone");
@@ -989,7 +1392,7 @@ fn add_tick(
             b: len,
             offset: 0,
         },
-        "end",
+        "replay",
     );
     next(&mut a, seen_c, i, c, false);
     next(&mut a, seen_u, i, uid, true);
@@ -1131,40 +1534,39 @@ fn add_tick(
         fun: p.println,
         arg0: txt,
     });
-    a.op(Opcode::Bool {
-        dst: b,
-        value: ValBool(true),
-    });
-    a.op(Opcode::SetGlobal {
-        global: g.forced,
-        src: b,
-    });
-    a.op(Opcode::MakeEnum {
-        dst: msg,
-        construct: p.ready_ctor,
-        args: vec![],
-    });
-    a.jmp(Opcode::Trap { exc, offset: 0 }, "caught");
-    a.op(Opcode::Call3 {
-        dst: v,
-        fun: handler,
-        arg0: game,
-        arg1: c,
-        arg2: msg,
-    });
-    a.op(Opcode::EndTrap { exc });
-    a.label("caught");
-    a.op(Opcode::Bool {
-        dst: b,
-        value: ValBool(false),
-    });
-    a.op(Opcode::SetGlobal {
-        global: g.forced,
-        src: b,
-    });
+    forced_ready(&mut a, c, "caught");
     fld(&mut a, b, game, p.game_started);
     a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
     a.jmp(Opcode::JAlways { offset: 0 }, "gone");
+
+    // 3. A held start with no connected client left unsynced: replay it.
+    a.label("replay");
+    a.op(Opcode::GetGlobal {
+        dst: c,
+        global: g.held,
+    });
+    a.jmp(Opcode::JNull { reg: c, offset: 0 }, "end");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: waiting,
+        arg0: game,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
+    a.op(Opcode::Null { dst: c2 });
+    a.op(Opcode::SetGlobal {
+        global: g.held,
+        src: c2,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: txt,
+        global: log_replay,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: txt,
+    });
+    forced_ready(&mut a, c, "caught2");
     a.label("end");
     a.op(Opcode::Ret { ret: v });
     push_fn(code, vec![p.game_t], p.void_t, r.0, a.finish(), p.dbg_file)
@@ -1180,13 +1582,20 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
         seen_u: global(p.arr_t),
         ready: global(p.arr_t),
         ready_c: global(p.arr_t),
+        synced: global(p.arr_t),
         forced: global(p.bool_t),
+        held: global(p.nc_t),
     };
     let handler = code.functions[p.join_fi].findex;
+    // Appended in this order (the tests' `k` indices).
     let fix = add_fix(code, &p, &g)?;
     let reset = add_reset(code, &p, &g)?;
     let mark = add_mark(code, &p, &g, fix)?;
-    let tick = add_tick(code, &p, &g, handler, fix)?;
+    let waiting = add_waiting(code, &p, &g)?;
+    let tick = add_tick(code, &p, &g, handler, fix, waiting)?;
+    let hold = add_hold(code, &p, &g, waiting)?;
+    let joined = add_joined(code, &p, &g)?;
+    let send_to = add_send_to(code, &p, &g)?;
 
     // Game.startServer: readyReset().
     let f = &mut code.functions[p.start_fi];
@@ -1206,12 +1615,41 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
             arg0: Reg(0),
         }],
     );
-    // The counting branch: if (!readyMark(this, client)) return.
+    // The message handler, last site first so the earlier indices hold.
     let f = &mut code.functions[p.join_fi];
     f.regs.push(p.bool_t);
     let b = Reg((f.regs.len() - 1) as u32);
     f.regs.push(p.void_t);
     let v = Reg((f.regs.len() - 1) as u32);
+    // The broadcast: if (!readySendTo(c)) continue (skip GetGlobal + send).
+    insert_ops(
+        f,
+        p.send_at,
+        vec![
+            Opcode::Call1 {
+                dst: b,
+                fun: send_to,
+                arg0: p.send_c,
+            },
+            Opcode::JFalse { cond: b, offset: 2 },
+        ],
+    );
+    // The start: if (readyHold(this, client)) return.
+    insert_ops(
+        f,
+        p.start_at,
+        vec![
+            Opcode::Call2 {
+                dst: b,
+                fun: hold,
+                arg0: Reg(0),
+                arg1: Reg(1),
+            },
+            Opcode::JFalse { cond: b, offset: 1 },
+            Opcode::Ret { ret: v },
+        ],
+    );
+    // The counting branch: if (!readyMark(this, client)) return.
     let head = vec![
         Opcode::Call2 {
             dst: b,
@@ -1229,8 +1667,23 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
         bail!("the hasGameplayStarted test moved");
     };
     *offset -= n;
+    // The Join case: readyJoined(client); the switch enters it at the call.
+    insert_ops(
+        f,
+        p.join_at,
+        vec![Opcode::Call1 {
+            dst: v,
+            fun: joined,
+            arg0: Reg(1),
+        }],
+    );
+    let Opcode::Switch { offsets, .. } = &mut f.ops[p.switch_at] else {
+        bail!("the message switch moved");
+    };
+    offsets[0] -= 1;
     eprintln!(
-        "patched ready start: a co-op load stops waiting for a player who left before ReadyToStart"
+        "patched ready start: a co-op load stops waiting for a player who left before ReadyToStart, \
+         and starts no one who has not joined"
     );
     Ok(())
 }
@@ -1263,6 +1716,14 @@ mod tests {
     use crate::asm::testutil::*;
     use std::collections::HashMap;
 
+    /// The new functions, in the order `apply` appends them.
+    mod k {
+        pub(super) const RESET: usize = 1;
+        pub(super) const TICK: usize = 4;
+        pub(super) const JOINED: usize = 6;
+        pub(super) const COUNT: usize = 8;
+    }
+
     /// Patches a copy of the installed game (skipped when absent): only
     /// startServer, Game.update and the message handler change, the new
     /// functions are well typed, the image round-trips, and a second pass
@@ -1272,25 +1733,35 @@ mod tests {
         let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
-        let (start_fi, update_fi, join_fi, branch_at, branch_jump) = (
-            p.start_fi,
-            p.update_fi,
-            p.join_fi,
-            p.branch_at,
-            p.branch_jump,
-        );
+        let (start_fi, update_fi, join_fi, branch_jump) =
+            (p.start_fi, p.update_fi, p.join_fi, p.branch_jump);
+        // Handler insertions (original index, length), ascending.
+        let sites = [
+            (p.join_at, 1),
+            (p.branch_at, 3),
+            (p.start_at, 3),
+            (p.send_at, 2),
+        ];
+        let m = |t: usize| {
+            t + sites
+                .iter()
+                .filter(|s| s.0 <= t)
+                .map(|s| s.1)
+                .sum::<usize>()
+        };
+        let at = |t: usize| t + sites.iter().filter(|s| s.0 < t).map(|s| s.1).sum::<usize>();
         let mut code = read(&image);
         patch_ready_start(&mut code);
         let patched = write(&code);
         let back = read(&patched);
         let nf = orig.functions.len();
-        assert_eq!(back.functions.len(), nf + 4);
+        assert_eq!(back.functions.len(), nf + k::COUNT);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
             let touched = [start_fi, update_fi, join_fi].contains(&i);
             assert_eq!(same, !touched, "function #{i} (fn@{})", a.findex.0);
         }
-        for k in 0..4 {
+        for k in 0..k::COUNT {
             let f = &back.functions[nf + k];
             check_types(&back, f, 0..f.ops.len());
             check_flow(f);
@@ -1300,32 +1771,65 @@ mod tests {
             check_types(&back, &back.functions[fi], 0..1);
         }
         let (a, b) = (&orig.functions[join_fi], &back.functions[join_fi]);
-        assert_eq!(b.ops.len(), a.ops.len() + 3);
-        check_types(&back, b, branch_at..branch_at + 3);
+        assert_eq!(b.ops.len(), a.ops.len() + 9);
+        for &(s, n) in &sites {
+            check_types(&back, b, at(s)..at(s) + n);
+        }
         check_flow(b);
-        // Every original op kept; the entry jump now lands on the new head.
+        // Every original op kept; the hasGameplayStarted test and the Join
+        // case enter their new heads, the start and the send fall into theirs.
         for i in 0..a.ops.len() {
-            let m = |t: usize| if t < branch_at { t } else { t + 3 };
             let want: Vec<usize> = if i == branch_jump {
-                vec![branch_at]
+                vec![at(p.branch_at)]
+            } else if i == p.switch_at {
+                let mut t: Vec<usize> = jump_targets(a, i).into_iter().map(m).collect();
+                t[0] = at(p.join_at);
+                t
             } else {
                 jump_targets(a, i).into_iter().map(m).collect()
             };
             assert_eq!(jump_targets(b, m(i)), want, "op {i}");
         }
-        assert!(matches!(
-            b.ops[branch_at],
-            Opcode::Call2 {
-                arg0: Reg(0),
-                arg1: Reg(1),
-                ..
-            }
-        ));
+        // The send skip lands on the loop's back jump.
+        assert_eq!(
+            jump_targets(b, at(p.send_at) + 1),
+            [m(p.send_at) + 2],
+            "send skip"
+        );
+        for s in [p.branch_at, p.start_at] {
+            assert!(matches!(
+                b.ops[at(s)],
+                Opcode::Call2 {
+                    arg0: Reg(0),
+                    arg1: Reg(1),
+                    ..
+                }
+            ));
+        }
 
         let mut again = read(&patched);
         assert!(plan(&again).is_err());
         patch_ready_start(&mut again);
         assert!(write(&again) == patched);
+    }
+
+    /// The broadcast filtered must send the late joiner's ReadyToStart with
+    /// the late joiner's send: another message global or call is refused.
+    #[test]
+    fn refuses_another_broadcast() {
+        let Some(image) = game() else { return };
+        let orig = read(&image);
+        let p = plan(&orig).expect("plan");
+        for k in 0..2 {
+            let mut code = read(&image);
+            let f = &mut code.functions[p.join_fi];
+            match &mut f.ops[p.send_at + k] {
+                Opcode::GetGlobal { global, .. } if k == 0 => global.0 += 1,
+                Opcode::Call2 { fun, .. } if k == 1 => fun.0 += 1,
+                o => panic!("unexpected {o:?}"),
+            }
+            assert!(plan(&code).is_err(), "variant {k}");
+        }
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -1408,7 +1912,7 @@ mod tests {
             // Game.startServer: playersReady = 0, then the host counts itself.
             s.set(s.game, p.game_ready, V::I(0));
             if s.patched() {
-                s.call(s.fun(1), vec![]);
+                s.call(s.fun(k::RESET), vec![]);
             }
             s.set(s.game, p.game_ready, V::I(1));
             s
@@ -1416,7 +1920,7 @@ mod tests {
         fn patched(&self) -> bool {
             self.nf.is_some()
         }
-        /// New function k: 0 fix, 1 reset, 2 mark, 3 tick.
+        /// New function `k` (see `k::*`).
         fn fun(&self, k: usize) -> RefFun {
             self.code.functions[self.nf.expect("patched") + k].findex
         }
@@ -1454,14 +1958,41 @@ mod tests {
         fn ready_count(&self) -> V {
             self.get(self.game, self.p.game_ready)
         }
-        /// A client of user `uid` connects (its Join is not needed here).
+        /// A client of user `uid` connects and the host handles its Join.
         fn connect(&mut self, uid: &str) -> usize {
+            let c = self.arrive(uid);
+            self.join(c);
+            c
+        }
+        /// A client of user `uid` connects; its Join is not handled yet.
+        fn arrive(&mut self, uid: &str) -> usize {
             let c = self.obj();
             let u = self.obj();
             self.set(u, self.p.user_id, V::S(uid.to_string()));
             self.users.insert(c, u);
             self.list(self.clients).push(V::R(c));
             c
+        }
+        /// The host handles c's Join (the handler's Join case: the new head;
+        /// the vanilla rest gives a new user a player).
+        fn join(&mut self, c: usize) {
+            if self.patched() {
+                self.call(self.fun(k::JOINED), vec![V::R(c)]);
+            }
+            let u = self.users[&c];
+            let uid = self.get(u, self.p.user_id);
+            let players = self.players;
+            let known = (0..self.list(players).len()).any(|i| {
+                let V::R(pl) = self.list(players)[i] else {
+                    return false;
+                };
+                self.get(pl, self.p.player_user) == uid
+            });
+            if !known {
+                let pl = self.obj();
+                self.set(pl, self.p.player_user, uid);
+                self.list(players).push(V::R(pl));
+            }
         }
         /// The connection drops: hxbit takes it out of host.clients.
         fn drop_client(&mut self, c: usize) {
@@ -1475,13 +2006,13 @@ mod tests {
         /// One host frame (Game.update's new prologue).
         fn frame(&mut self) {
             if self.patched() {
-                self.call(self.fun(3), vec![V::R(self.game)]);
+                self.call(self.fun(k::TICK), vec![V::R(self.game)]);
             }
         }
         fn call(&mut self, f: RefFun, args: Vec<V>) -> V {
             let p = self.p;
             let code = self.code;
-            if self.patched() && (0..4).any(|k| self.fun(k) == f) {
+            if self.patched() && (0..k::COUNT).any(|k| self.fun(k) == f) {
                 return self.exec(f, args);
             }
             if f == code.functions[p.join_fi].findex {
@@ -1872,7 +2403,7 @@ mod tests {
         s.list(r).push(V::S("r".into()));
         let a = s.connect("a");
         let rc = s.connect("r");
-        let x = s.connect("x");
+        let x = s.arrive("x");
         s.frame();
         s.drop_client(rc);
         s.drop_client(x);
@@ -1880,5 +2411,100 @@ mod tests {
         assert_eq!(s.ready_count(), V::I(1));
         s.ready(a);
         assert_eq!(s.events, [Ev::Start, Ev::Send(a)]);
+    }
+
+    /// Host + A + B known, J1 + J2 still joining (connected, Join not handled:
+    /// on their way, or parked by the barrier). Vanilla starts on B's
+    /// ReadyToStart and sends the start to J1 and J2 before their SyncDone;
+    /// patched, the start waits until both joined and are ready.
+    #[test]
+    fn joining_players_are_waited_for() {
+        let Some((orig, code)) = images() else { return };
+        let p = plan(&orig).expect("plan");
+        for (img, fixed) in [(&orig, false), (&code, true)] {
+            let nf = fixed.then_some(orig.functions.len());
+            let mut s = Sim::new(img, &p, &["host", "a", "b"], nf);
+            let a = s.connect("a");
+            let b = s.connect("b");
+            let j1 = s.arrive("j1");
+            let j2 = s.arrive("j2");
+            s.frame();
+            s.ready(a);
+            s.ready(b);
+            s.frame();
+            let all = [
+                Ev::Start,
+                Ev::Send(a),
+                Ev::Send(b),
+                Ev::Send(j1),
+                Ev::Send(j2),
+            ];
+            if !fixed {
+                assert_eq!(s.events, all, "vanilla starts the unsynced");
+                continue;
+            }
+            assert!(!s.started(), "J1, J2 have not joined");
+            assert_eq!(s.ready_count(), V::I(2), "B's count is held");
+            s.join(j1);
+            s.frame();
+            assert!(!s.started(), "J2 has not joined");
+            s.join(j2);
+            s.frame();
+            assert!(!s.started(), "J1, J2 joined, not ready");
+            assert_eq!(s.ready_count(), V::I(3), "B counted again");
+            s.ready(j1);
+            s.frame();
+            assert!(!s.started(), "J2 is not ready");
+            s.ready(j2);
+            assert_eq!(s.events, all);
+            assert_eq!(s.ready_count(), V::I(5));
+        }
+    }
+
+    /// The start is held for J, whose Join never comes: J drops (or the
+    /// barrier's JOIN_CAP disconnects it), and the next frame starts.
+    #[test]
+    fn joining_player_who_drops_is_not_waited_for() {
+        let Some((orig, code)) = images() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, &["host", "a", "b"], Some(orig.functions.len()));
+        let a = s.connect("a");
+        let b = s.connect("b");
+        let j = s.arrive("j");
+        s.frame();
+        s.ready(a);
+        s.ready(b);
+        for _ in 0..3 {
+            s.frame();
+        }
+        assert!(!s.started(), "J is still connected");
+        s.drop_client(j);
+        s.frame();
+        assert_eq!(s.events, [Ev::Start, Ev::Send(a), Ev::Send(b)]);
+        assert_eq!(s.ready_count(), V::I(3));
+        // J comes back: a late joiner, started on its own ReadyToStart.
+        let j2 = s.connect("j");
+        s.ready(j2);
+        assert_eq!(s.events[3..], [Ev::Send(j2)]);
+    }
+
+    /// The start goes only to clients whose ReadyToStart was counted: R
+    /// (removed in the lobby, back and synced, outside the count) is still
+    /// loading when A's ReadyToStart starts; R's own takes the late path.
+    #[test]
+    fn start_goes_only_to_ready_clients() {
+        let Some((orig, code)) = images() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, &["host", "a", "r"], Some(orig.functions.len()));
+        let removed = s.removed;
+        s.list(removed).push(V::S("r".into()));
+        let a = s.connect("a");
+        let r = s.connect("r");
+        s.frame();
+        s.ready(a);
+        assert!(s.started());
+        assert_eq!(s.events, [Ev::Start, Ev::Send(a)]);
+        s.ready(r);
+        assert_eq!(s.events[2..], [Ev::Send(r)]);
     }
 }
