@@ -242,6 +242,14 @@ impl<'a> Sim<'a> {
                 Opcode::EnumField {
                     dst, value, field, ..
                 } => r[rr(dst)] = self.c.key_get(&r[rr(value)], &format!("e{}", field.0)),
+                Opcode::MakeEnum {
+                    dst,
+                    construct,
+                    args,
+                } => {
+                    let vals = args.iter().map(|a| r[rr(a)].clone()).collect();
+                    r[rr(dst)] = self.c.enm(construct.0 as i32, vals)
+                }
                 Opcode::Incr { dst } => r[rr(dst)] = V::I(num(&r[rr(dst)]) + 1),
                 // A ref is passed by value: the callee is always a stub.
                 Opcode::Ref { dst, src } => r[rr(dst)] = r[rr(src)].clone(),

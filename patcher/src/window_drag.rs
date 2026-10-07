@@ -61,7 +61,11 @@
 //       element on the next sync; that first pass writes the CSS offsets), its
 //       offsets are stored as `mpWinBase:<key>` (the double-push reset target;
 //       removed at 0,0), the saved offset is restored and onAfterReflow becomes
-//       `mpDragClamp(panel)`. It then puts an interactive on its first child with
+//       `mpDragClamp(panel)`. A panel with such a base gets every saved offset
+//       pinned as inline dom attributes (offset-x / offset-y): a style refresh
+//       (the chest Element's hover) re-applies the CSS rules, which threw the
+//       chest back to `offset-y: -410`. A release after a move clears the
+//       double-push state, so quick successive drags all drag. It then puts an interactive on its first child with
 //       dom class "title" (the header; skipped when that child already has
 //       one) whose push starts `mpDragBegin(panel, null, key)`. Header buttons
 //       sit above that interactive and keep their clicks. The caller must own
@@ -138,6 +142,9 @@ struct Ctx {
     cursor_t: RefType,
     ha_t: RefType,
     va_t: RefType,
+    /// domkit.CssValue and Properties.setAttribute's result enum.
+    cssv_t: RefType,
+    attr_res_t: RefType,
     // fields
     parent: RefField,
     children: RefField,
@@ -192,8 +199,11 @@ struct Ctx {
     set_ud: RefFun,
     sys_time: RefFun,
     is_of_type: RefFun,
+    set_attr: RefFun,
     inter_cls: RefGlobal,
     // enum indexes
+    /// CssValue.VInt(i32)
+    css_vint: usize,
     ev_push: i32,
     ev_release: i32,
     ev_move: i32,
@@ -359,6 +369,19 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         &[dk_t, str_t],
         bool_t,
     )?;
+    let set_attr = method(code, dk_t, "setAttribute")?.findex;
+    let (sa, attr_res_t) = sig(code, set_attr)?;
+    if sa.len() != 3 || sa[0] != dk_t || sa[1] != str_t {
+        bail!("Properties.setAttribute: unexpected signature");
+    }
+    let cssv_t = sa[2];
+    let css_vint = match &code.types[cssv_t.0] {
+        Type::Enum { constructs, .. } => constructs
+            .iter()
+            .position(|k| s(code, k.name) == "VInt" && k.params == [i32_t])
+            .context("CssValue.VInt(Int) not found")?,
+        _ => bail!("setAttribute's value is not an enum"),
+    };
     let get_class = static_fn(code, "$Type", "getClass")?;
     let ga = fun_args(code, get_class);
     let cls_t = get_class.t.as_fun(code).context("getClass")?.ret;
@@ -413,6 +436,8 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         cursor_t,
         ha_t,
         va_t,
+        cssv_t,
+        attr_res_t,
         parent,
         children,
         x,
@@ -465,7 +490,9 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         set_ud,
         sys_time,
         is_of_type,
+        set_attr,
         inter_cls,
+        css_vint,
         ev_push,
         ev_release,
         ev_move,
@@ -495,6 +522,9 @@ struct Globals {
     base: RefGlobal,
     err: RefGlobal,
     title: RefGlobal,
+    /// "offset-x" / "offset-y": the inline attributes a pin sets.
+    attr_x: RefGlobal,
+    attr_y: RefGlobal,
 }
 
 /// `Trap exc -> catch` ... `OUT: EndTrap; Ret v` / `catch: report(exc); Ret v`.
@@ -571,18 +601,20 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         base: str_global(code, c.str_t, BASE_PREFIX),
         err: str_global(code, c.str_t, S_ERR),
         title: str_global(code, c.str_t, HEADER_CLASS),
+        attr_x: str_global(code, c.str_t, "offset-x"),
+        attr_y: str_global(code, c.str_t, "offset-y"),
     };
     let report = add_report(code, c, &g)?;
-    let save = add_save(code, c, g.prefix, report)?;
+    let save = add_save(code, c, g.prefix, report, Some((g.base, g.attr_x, g.attr_y)))?;
     let restore = add_restore(code, c, g.prefix, report)?;
-    let save_base = add_save(code, c, g.base, report)?;
+    let save_base = add_save(code, c, g.base, report, None)?;
     let restore_base = add_restore(code, c, g.base, report)?;
     let event = add_event(code, c, &g, report, save)?;
     let cancel = add_cancel(code, c, &g, report, save)?;
     let begin = add_begin(code, c, &g, report, save, restore_base, event, cancel)?;
     let clamp = add_clamp(code, c, report)?;
     let (panel_push, cap_t) = add_panel_push(code, c, begin)?;
-    let late = add_panel_late(code, c, report, save_base, restore, clamp, cap_t)?;
+    let late = add_panel_late(code, c, report, save_base, restore, save, clamp, cap_t)?;
     let panel = add_panel(code, c, &g, report, late, panel_push, cap_t)?;
     let head = add_head(code, c)?;
     let win_reflow = add_win_reflow(code, c, report, clamp, head)?;
@@ -717,8 +749,27 @@ fn full_key(a: &mut Asm, c: &Ctx, prefix: RefGlobal, full: Reg, key: Reg) {
     });
 }
 
+/// The names a pin sets: `(mpWinBase: prefix, "offset-x", "offset-y")`.
+type Pin = (RefGlobal, RefGlobal, RefGlobal);
+
 /// `save(obj, key)`: stores obj's offsets in its parent flow (removes the key at 0,0).
-fn add_save(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) -> Result<RefFun> {
+///
+/// With `pin` (the position save, not the base one): a panel with a CSS offset
+/// (a `mpWinBase:<key>` entry: the chest's `offset-y: -410`) also gets its
+/// offsets as inline dom attributes (`dom.setAttribute("offset-x"/"offset-y",
+/// VInt)`). domkit re-applies every matching CSS rule on each style refresh of
+/// the element (CssStyle.applyStyleRec@4064 calls handler.apply for all of
+/// them; the chest is a ui.comp.Element whose over / out toggles dom.hover =
+/// a refresh, fn@31634 / @31635 -> set_hover@1640), which put `offset-y: -410`
+/// back and threw the dragged chest back to its styled spot. Inline values
+/// are applied after the rules, so the dragged spot survives a refresh.
+fn add_save(
+    code: &mut Bytecode,
+    c: &Ctx,
+    prefix: RefGlobal,
+    report: RefFun,
+    pin: Option<Pin>,
+) -> Result<RefFun> {
     let (k0, k16, kh, km) = (
         int_const(code, 0),
         int_const(code, 16),
@@ -741,6 +792,12 @@ fn add_save(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) -> 
         r.r(c.str_t),
         r.r(c.dyn_t),
     );
+    let (dm, nm, cv, res) = (
+        r.r(c.dk_t),
+        r.r(c.str_t),
+        r.r(c.cssv_t),
+        r.r(c.attr_res_t),
+    );
     let gd = Guard { exc, v };
     let mut a = Asm::new();
     guard_open(&mut a, &gd);
@@ -756,6 +813,42 @@ fn add_save(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) -> 
         obj: pr,
         field: c.off_y,
     });
+    if let Some((base, nx, ny)) = pin {
+        full_key(&mut a, c, base, full, key);
+        a.op(Opcode::Null { dst: d });
+        a.op(Opcode::Call2 {
+            dst: d,
+            fun: c.get_ud,
+            arg0: full,
+            arg1: d,
+        });
+        a.jmp(Opcode::JNull { reg: d, offset: 0 }, "store");
+        a.op(Opcode::Field {
+            dst: dm,
+            obj,
+            field: c.dom,
+        });
+        a.jmp(Opcode::JNull { reg: dm, offset: 0 }, "store");
+        for (name, val) in [(nx, ox), (ny, oy)] {
+            a.op(Opcode::GetGlobal {
+                dst: nm,
+                global: name,
+            });
+            a.op(Opcode::MakeEnum {
+                dst: cv,
+                construct: RefEnumConstruct(c.css_vint),
+                args: vec![val],
+            });
+            a.op(Opcode::Call3 {
+                dst: res,
+                fun: c.set_attr,
+                arg0: dm,
+                arg1: nm,
+                arg2: cv,
+            });
+        }
+        a.label("store");
+    }
     full_key(&mut a, c, prefix, full, key);
     a.op(Opcode::Int { dst: k, ptr: k0 });
     a.jmp(
@@ -1237,11 +1330,20 @@ fn add_event(
 
     a.label("release");
     // A push without a move is a plain click: its release goes on to the scene.
+    // A drag that moved is no first click of a double push: the next push
+    // (even within DOUBLE_S) starts a new drag instead of resetting.
     a.op(Opcode::GetGlobal {
         dst: b,
         global: g.moved,
     });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "rel");
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "click");
+    a.op(Opcode::Null { dst: nobj });
+    a.op(Opcode::SetGlobal {
+        global: g.last,
+        src: nobj,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "rel");
+    a.label("click");
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(true),
@@ -1983,14 +2085,15 @@ fn add_panel_push(code: &mut Bytecode, c: &Ctx, begin: RefFun) -> Result<(RefFun
 /// that first pass sets the CSS offsets (the chest panel: `offset-y: -410`),
 /// overwriting a restore done in the constructor. So, once `panel.dom` has no
 /// style refresh pending: the styled offsets are kept as the panel's base (the
-/// double-push reset target), the saved offset is restored, and onAfterReflow
-/// becomes the plain clamp.
+/// double-push reset target), the saved offset is restored and saved (pinned
+/// over the CSS offset), and onAfterReflow becomes the plain clamp.
 fn add_panel_late(
     code: &mut Bytecode,
     c: &Ctx,
     report: RefFun,
     save_base: RefFun,
     restore: RefFun,
+    save: RefFun,
     clamp: RefFun,
     cap_t: RefType,
 ) -> Result<RefFun> {
@@ -2050,6 +2153,13 @@ fn add_panel_late(
         arg0: panel,
         arg1: nf,
         arg2: key,
+    });
+    // Saved again: pins the restored spot over the CSS offset (see add_save).
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: save,
+        arg0: panel,
+        arg1: key,
     });
     a.op(Opcode::InstanceClosure {
         dst: rc,
@@ -3505,6 +3615,19 @@ mod tests {
                         o => panic!("str {o:?}"),
                     };
                     Some(V::S(st(&a[0]) + &st(&a[1])))
+                } else if f == c.set_attr {
+                    // domkit: kept as an inline style and applied at once.
+                    log(k, "setAttribute");
+                    let V::S(name) = &a[1] else {
+                        panic!("setAttribute name")
+                    };
+                    assert_eq!(k.key_get(&a[2], "idx"), V::I(c.css_vint as i32));
+                    let n = k.key_get(&a[2], "e0");
+                    k.put("inline", name, n.clone());
+                    let pr = k.map("in", "props");
+                    let off = if name == "offset-x" { c.off_x } else { c.off_y };
+                    k.set(&pr, off, n);
+                    Some(V::Null)
                 } else if f == c.std_string || f == c.println {
                     panic!("drag code threw (report called)")
                 } else {
@@ -3856,5 +3979,90 @@ mod tests {
         s.run(f.begin, vec![obj.clone(), V::Null, V::S("k".into())]);
         assert_eq!(s.c.get(&pr, c.off_x), V::I(0));
         assert_eq!(s.c.get(&pr, c.off_y), V::I(0));
+    }
+
+    /// domkit style refresh of the chest panel (its hover toggles): every
+    /// matching CSS rule is applied again (`offset-y: -410`), then the inline
+    /// attributes on top.
+    fn restyle(s: &mut Sim, c: &Ctx, pr: &V) {
+        s.c.set(pr, c.off_x, V::I(0));
+        s.c.set(pr, c.off_y, V::I(-410));
+        for (name, off) in [("offset-x", c.off_x), ("offset-y", c.off_y)] {
+            let v = s.c.map("inline", name);
+            if v != V::Null {
+                s.c.set(pr, off, v);
+            }
+        }
+    }
+
+    /// Chest panel: a style refresh after (or between) drags keeps the dragged
+    /// spot (it threw the chest back to the CSS one), two drags in quick
+    /// succession both move it (the second was taken for a double push), and
+    /// a double click still resets to the styled spot, which then sticks too.
+    #[test]
+    fn chest_drag_survives_restyle() {
+        let Some(image) = game() else { return };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (obj, pr) = scene(&mut s, &c);
+        let (al_h, al_v) = (s.c.enm(0, vec![]), s.c.enm(2, vec![]));
+        s.c.set(&pr, c.is_abs, V::B(true));
+        s.c.set(&pr, c.h_align, al_h);
+        s.c.set(&pr, c.v_align, al_v);
+        s.c.set(&pr, c.off_y, V::I(-410));
+        let dom = s.c.obj(&[(c.need_style, V::B(false))]);
+        s.c.set(&obj, c.dom, dom);
+        let cap = s.c.enm(0, vec![obj.clone(), V::S("k".into())]);
+        s.run(f.late, vec![cap]);
+        assert_eq!(s.c.map("ud", "mpWinBase:k"), packed(0, -410));
+        restyle(&mut s, &c, &pr);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-410));
+
+        // First drag, then a refresh: the dragged spot stays.
+        mouse(&mut s, 500.0, 300.0);
+        press(&mut s, &f, &obj);
+        mouse(&mut s, 530.0, 320.0);
+        event(&mut s, &c, &f, c.ev_move);
+        event(&mut s, &c, &f, c.ev_release);
+        assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(30, -390));
+        s.c.take("setAttribute");
+        restyle(&mut s, &c, &pr);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-390));
+
+        // Second drag 0.1 s later: a drag again, not a reset.
+        s.c.put("in", "now", V::F(10.1));
+        press(&mut s, &f, &obj);
+        mouse(&mut s, 540.0, 330.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(40));
+        assert!(s.c.take("setAttribute").is_empty(), "no pin per move");
+        event(&mut s, &c, &f, c.ev_release);
+        restyle(&mut s, &c, &pr);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(40));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-380));
+        assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(40, -380));
+
+        // Double click: back to the styled spot, which sticks as well.
+        s.c.put("in", "now", V::F(20.0));
+        press(&mut s, &f, &obj);
+        assert_eq!(event(&mut s, &c, &f, c.ev_release), V::B(true));
+        s.c.put("in", "now", V::F(20.1));
+        s.run(f.begin, vec![obj.clone(), V::Null, V::S("k".into())]);
+        restyle(&mut s, &c, &pr);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(0));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-410));
+
+        // A window (no base entry) is never pinned.
+        s.c.take("setAttribute");
+        let (win, _) = scene(&mut s, &c);
+        s.c.put("in", "now", V::F(40.0));
+        s.run(f.begin, vec![win.clone(), V::Null, V::S("w".into())]);
+        mouse(&mut s, 600.0, 300.0);
+        event(&mut s, &c, &f, c.ev_move);
+        event(&mut s, &c, &f, c.ev_release);
+        assert!(s.c.take("setAttribute").is_empty());
     }
 }
