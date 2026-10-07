@@ -99,6 +99,7 @@ mod take_all;
 mod testsim;
 mod tavern_resume;
 mod timeline_hud;
+mod title_version;
 mod tip_overflow;
 mod tooltip_input;
 mod window_close;
@@ -167,6 +168,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     style_guard::patch_style_guard(&mut code);
     all_inv::patch_all_inv(&mut code);
     alt_world::patch_alt_world(&mut code);
+    title_version::patch_title_version(&mut code);
     jit_names::patch_jit_names(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
