@@ -624,7 +624,7 @@ func (s *Server) lobbyMakeShortCode(a lobbyArgs, _ Peer) (any, error) {
 	s.lobbies.mu.Lock()
 	s.lobbies.codes[short] = a.ID
 	s.lobbies.mu.Unlock()
-	s.opt.Log.Printf("master: manual join code for %s is %s (direct %s)", a.ID, applog.Secret(short), ep.Addr())
+	s.opt.Log.Printf("master: manual join code for %s issued (direct %s)", a.ID, ep.Addr())
 	return map[string]any{"shortCode": short}, nil
 }
 
@@ -638,7 +638,7 @@ func (s *Server) lobbyInitInvite(a lobbyArgs, p Peer) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.opt.Log.Printf("master: Steam invite for %s carries the join code %s", a.ID, applog.Secret(short))
+	s.opt.Log.Printf("master: Steam invite for %s carries the join code", a.ID)
 	return short, nil
 }
 
@@ -705,7 +705,7 @@ func (s *Server) issueInvite(id string, p Peer) (string, error) {
 	} else {
 		routes += "; no SDR route: " + sdrWhy
 	}
-	s.opt.Log.Printf("master: join code for %s is %s (routes: %s)", l.id, applog.Secret(short), routes)
+	s.opt.Log.Printf("master: join code for %s issued (routes: %s)", l.id, routes)
 	return short, nil
 }
 
@@ -939,7 +939,7 @@ func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Dur
 		func(cmd string, args json.RawMessage) {
 			sess := s.localSession()
 			if sess == nil {
-				s.opt.Log.Printf("master: %s pushed %s %s, but no game is connected; dropped", what, cmd, applog.Payload(cmd, args))
+				s.opt.Log.Printf("master: %s pushed %s %s, but no game is connected; dropped", what, cmd, applog.Trunc(args))
 				return
 			}
 			sess.Push(cmd, args)

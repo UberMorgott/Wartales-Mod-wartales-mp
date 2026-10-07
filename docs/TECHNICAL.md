@@ -154,9 +154,7 @@ loopback port of its bridge; the helper follows it for as long as it runs.
 
 The previous run of `wartales-mp.log` is kept as `wartales-mp.log.1`. Nothing is
 sampled and nothing leaves the machine — this is a debugging aid, not telemetry.
-Secrets never reach it: the Steam session token and session id, the relay
-passwords, the join codes and credential headers are logged as
-`<redacted:N>` (N = the value's length). Attach both files to any bug report.
+Attach both files to any bug report.
 
 Certificates (a private CA and one leaf, generated on first run) live under
 `%ProgramData%\wartales-mp\`. They are used only by the local master; the CA is

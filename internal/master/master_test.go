@@ -1673,3 +1673,15 @@ func TestOldLinkClosePreservesReplacement(t *testing.T) {
 		t.Fatal("old close callback cleared replacement link")
 	}
 }
+
+// The commands that carry secrets are logged by name only.
+func TestSecretPayloadsNotLogged(t *testing.T) {
+	for _, cmd := range []string{"user/login", "user/session", "instance/get", "lobby/makeShortCode", "lobby/initInvite", "lobby/infoInvite", "lobby/resolveShortCode"} {
+		if got := payload(cmd, map[string]any{"token": "SECRET"}); strings.Contains(got, "SECRET") {
+			t.Errorf("%s logs %s", cmd, got)
+		}
+	}
+	if got := payload("lobby/list", map[string]any{"a": 1}); got != `{"a":1}` {
+		t.Errorf("lobby/list logs %s", got)
+	}
+}
