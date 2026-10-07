@@ -185,6 +185,12 @@ impl<'a> Sim<'a> {
                 | Opcode::ToVirtual { dst, src }
                 | Opcode::ToDyn { dst, src } => r[rr(dst)] = r[rr(src)].clone(),
                 Opcode::Not { dst, src } => r[rr(dst)] = V::B(r[rr(src)] != V::B(true)),
+                Opcode::Neg { dst, src } => {
+                    r[rr(dst)] = match r[rr(src)] {
+                        V::F(x) => V::F(-x),
+                        ref o => V::I(-num(o)),
+                    }
+                }
                 Opcode::ToInt { dst, src } => {
                     let V::F(x) = r[rr(src)] else { panic!("ToInt") };
                     r[rr(dst)] = V::I(x as i32)
@@ -199,7 +205,13 @@ impl<'a> Sim<'a> {
                 Opcode::SetGlobal { global, src } => {
                     self.c.globals.insert(global.0, r[rr(src)].clone());
                 }
-                Opcode::Field { dst, obj, field } => r[rr(dst)] = self.c.get(&r[rr(obj)], *field),
+                // String { bytes, length }: only its length is readable here.
+                Opcode::Field { dst, obj, field } => {
+                    r[rr(dst)] = match &r[rr(obj)] {
+                        V::S(x) if field.0 == 1 => V::I(x.encode_utf16().count() as i32),
+                        o => self.c.get(o, *field),
+                    }
+                }
                 Opcode::GetThis { dst, field } => r[rr(dst)] = self.c.get(&r[0], *field),
                 Opcode::SetField { obj, field, src } => {
                     let (o, v) = (r[rr(obj)].clone(), r[rr(src)].clone());

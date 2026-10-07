@@ -11,11 +11,15 @@
 // - acting:  `state.startedPlaying.data.owner == bp`. Battle.doExecuteSkill
 //            (any move or action) calls setCurrentUnitPlaying(currentUnit), which
 //            sets startedPlaying: that locks the Player slot onto the unit.
-// - done:    one of bp's living units has UnitFlag.PlayedThisRound (flags bit 0).
-//            The turn-end closure (Unit.hx:6181) clears startedPlaying and calls
-//            setPlayed(true); Unit.beginRound -> resetTurn -> setPlayed(false)
-//            clears it for the next round. So the bit marks a consumed slot.
-// - waiting: neither.
+// - waiting: p still has a turn slot in the current round, `state.timelines[0]`:
+//            Player(p) or PlayerUnit(u) with u.data.owner == bp. That line holds
+//            the current and coming slots: the turn end's finish callback shifts
+//            the used head out, a new round shifts in a fresh line
+//            (Battle.hx:2353), the same line the diamonds show.
+// - done:    no slot left. (Not UnitFlag.PlayedThisRound: that bit is per unit,
+//            set only on a unit's last turn and reset by the host's round-end
+//            loop, so a player with units left already read as done, and any unit
+//            whose bit was not cleared kept its player done into the next round.)
 // Players without a living unit in `state.units` are left out.
 //
 // No game font has ✓ • … glyphs, so done / waiting are icons: the label's
@@ -30,7 +34,10 @@
 //   if (!game.isMulti || ev is not the Timeline's first diamond) { mpList?.visible = false; return; }
 //   if (mpList == null) create it (HtmlText, font "default", loadImage = FmtText.loadImgText,
 //                                  drop shadow, absolute);
-//   sig = round; for (u in state.units) sig = sig * 31 + (1 | alive << 1 | played << 2);
+//   sig = round * 31 + timelines[0].length; per slot sig = sig * 31 + (kind + 1
+//         [+ 31 * (players index + 1) for Player(p)]): a slot converted in place
+//         (updateAutoPlayed Player <-> AI) changes it too;
+//   for (u in state.units) sig = sig * 31 + (1 | alive << 1);
 //   if (created || sig != mpListSig || startedPlaying != mpListUnit) rebuild the text;
 //   if (rebuilt || outerWidth != mpListW || absX != mpListAx) place it:
 //       x = -(textWidth + 6), clamped so the list starts >= 4 px from the scene's left edge;
@@ -38,9 +45,10 @@
 //   mpList.visible = true;
 //
 // So per frame: one pass over state.units with integer maths; the text is
-// rebuilt only on a round / startedPlaying / played-flag / living-unit change.
+// rebuilt only on a round / startedPlaying / turn slot / living-unit change.
 
 use super::*;
+use hlbc::types::RefEnumConstruct;
 
 /// The list's fields, appended after part 1's: name and type.
 pub(super) const FIELDS: [(&str, Kind); 5] = [
@@ -108,9 +116,8 @@ pub(super) struct ListPlan {
     proxy_array: RefField,
     arr_dyn_t: RefType,
     pl_player: RefField,
-    u_flags: RefField,
-    flags_t: RefType,
-    fl_value: RefField,
+    /// TimelineElement.PlayerUnit(u): a turn slot bound to one player unit.
+    pu_idx: i32,
     is_alive: RefFun,
     o_abs_x: RefField,
     o_mat_a: RefField,
@@ -154,22 +161,15 @@ pub(super) fn plan(code: &Bytecode, p: &Plan) -> Result<ListPlan> {
     let arr_dyn_t = obj_type(code, "hl.types.ArrayDyn")?;
     let proxy_array = typed(proxy_t, "array", arr_dyn_t)?;
     let pl_player = typed(p.player_t, "player", p.bp_t)?;
-    let (u_flags, flags_t) = field(code, p.unit_t, "flags")?;
-    if s(code, obj(code, flags_t)?.name) != "hxbit.EnumFlagsData" {
-        bail!("Unit.flags is not an hxbit.EnumFlagsData");
+    // The round's turn slots: TimelineElement.Player(p) (construct 0, checked by
+    // the hud plan) and PlayerUnit(u).
+    let pu_idx = match &code.types[p.elt_t.0] {
+        Type::Enum { constructs, .. } => constructs
+            .iter()
+            .position(|c| s(code, c.name) == "PlayerUnit" && c.params == [p.unit_t]),
+        _ => None,
     }
-    let fl_value = typed(flags_t, "value", p.i32_)?;
-    // UnitFlag.PlayedThisRound must be bit 0 (setPlayed tests `1 << index`).
-    let flag_t = code
-        .types
-        .iter()
-        .position(|t| matches!(t, Type::Enum { name, .. } if s(code, *name) == "battle.UnitFlag"))
-        .context("enum battle.UnitFlag not found")?;
-    if !matches!(&code.types[flag_t], Type::Enum { constructs, .. }
-        if constructs.first().is_some_and(|c| s(code, c.name) == "PlayedThisRound"))
-    {
-        bail!("UnitFlag construct 0 is not PlayedThisRound");
-    }
+    .context("TimelineElement has no PlayerUnit(battle.Unit)")? as i32;
     let is_alive = m(p.unit_t, "isAlive", &[p.unit_t], p.bool_)?;
     let o_abs_x = typed(p.obj_t, "absX", p.f64_)?;
     let o_mat_a = typed(p.obj_t, "matA", p.f64_)?;
@@ -259,9 +259,7 @@ pub(super) fn plan(code: &Bytecode, p: &Plan) -> Result<ListPlan> {
         proxy_array,
         arr_dyn_t,
         pl_player,
-        u_flags,
-        flags_t,
-        fl_value,
+        pu_idx,
         is_alive,
         o_abs_x,
         o_mat_a,
@@ -295,8 +293,9 @@ pub(super) fn add_list(
     let c0 = int_const(code, 0);
     let c1 = int_const(code, 1);
     let c2 = int_const(code, 2);
-    let c4 = int_const(code, 4);
     let c31 = int_const(code, 31);
+    let c_m1 = int_const(code, -1);
+    let c_pu = int_const(code, lp.pu_idx);
     let c_max = int_const(code, MAX_NAME);
     let c_cut = int_const(code, MAX_NAME - 1);
     let f_one = float_const(code, 1.0);
@@ -341,7 +340,7 @@ pub(super) fn add_list(
         r.r(p.dyn_t),
         r.r(p.ev_t),
     );
-    let (force, h, k, t, units, nu, u, flags) = (
+    let (force, h, k, t, units, nu, u) = (
         r.r(p.bool_),
         r.r(p.i32_),
         r.r(p.i32_),
@@ -349,7 +348,15 @@ pub(super) fn add_list(
         r.r(p.arr_t),
         r.r(p.i32_),
         r.r(p.unit_t),
-        r.r(lp.flags_t),
+    );
+    // the current round's turn slots, timelines[0]
+    let (tls, cur, e, ei, sp, slots) = (
+        r.r(p.arr_t),
+        r.r(p.arr_t),
+        r.r(p.elt_t),
+        r.r(p.i32_),
+        r.r(p.player_t),
+        r.r(p.i32_),
     );
     let (started, old_sig, old_unit, sbp, sdata, owner, text, lines) = (
         r.r(p.unit_t),
@@ -600,7 +607,9 @@ pub(super) fn add_list(
         value: ValBool(true),
     });
 
-    // sig = round, then per unit sig * 31 + (1 | alive << 1 | played << 2).
+    // sig = round * 31 + timelines[0].length (-1: none), then per unit
+    // sig * 31 + (1 | alive << 1). A turn slot used (shifted out of
+    // timelines[0]) or a new round changes it.
     a.label("sig");
     a.op(Opcode::Int { dst: one, ptr: c1 });
     a.op(Opcode::Field {
@@ -608,6 +617,170 @@ pub(super) fn add_list(
         obj: st,
         field: lp.s_round,
     });
+    a.op(Opcode::Null { dst: cur });
+    a.op(Opcode::Int { dst: t, ptr: c_m1 });
+    a.op(Opcode::Field {
+        dst: tls,
+        obj: st,
+        field: p.s_timelines,
+    });
+    a.jmp(Opcode::JNull { reg: tls, offset: 0 }, "tl");
+    a.op(Opcode::Field {
+        dst: n,
+        obj: tls,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: zero,
+            b: n,
+            offset: 0,
+        },
+        "tl",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: tls,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: zero,
+    });
+    a.op(Opcode::UnsafeCast { dst: cur, src: d });
+    a.jmp(Opcode::JNull { reg: cur, offset: 0 }, "tl");
+    a.op(Opcode::Field {
+        dst: t,
+        obj: cur,
+        field: p.a_len,
+    });
+    a.label("tl");
+    a.op(Opcode::Int { dst: nu, ptr: c31 });
+    a.op(Opcode::Mul { dst: h, a: h, b: nu });
+    a.op(Opcode::Add { dst: h, a: h, b: t });
+    // per slot: sig * 31 + (kind + 1), a Player(p) slot also + 31 * (p's
+    // position in state.players + 1): a slot converted in place (vanilla
+    // updateAutoPlayed: Player <-> AI(unit)) changes it without a length change.
+    a.jmp(Opcode::JNull { reg: cur, offset: 0 }, "tsig");
+    a.op(Opcode::Int { dst: k, ptr: c0 });
+    a.loop_head("ts");
+    a.op(Opcode::Field {
+        dst: n,
+        obj: cur,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: k,
+            b: n,
+            offset: 0,
+        },
+        "tsig",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: cur,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: k,
+    });
+    a.op(Opcode::Incr { dst: k });
+    a.op(Opcode::UnsafeCast { dst: e, src: d });
+    a.op(Opcode::Int { dst: t, ptr: c0 });
+    a.jmp(Opcode::JNull { reg: e, offset: 0 }, "tmix");
+    a.op(Opcode::EnumIndex { dst: ei, value: e });
+    a.op(Opcode::Add {
+        dst: t,
+        a: ei,
+        b: one,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: ei,
+            b: zero,
+            offset: 0,
+        },
+        "tmix",
+    );
+    a.op(Opcode::EnumField {
+        dst: sp,
+        value: e,
+        construct: RefEnumConstruct(0),
+        field: RefField(0),
+    });
+    a.op(Opcode::Field {
+        dst: players,
+        obj: st,
+        field: lp.s_players,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: players,
+            offset: 0,
+        },
+        "tmix",
+    );
+    a.op(Opcode::Field {
+        dst: ad,
+        obj: players,
+        field: lp.proxy_array,
+    });
+    a.op(Opcode::SafeCast { dst: pa, src: ad });
+    a.jmp(Opcode::JNull { reg: pa, offset: 0 }, "tmix");
+    a.op(Opcode::Int { dst: j, ptr: c0 });
+    a.loop_head("tp");
+    a.op(Opcode::Field {
+        dst: np,
+        obj: pa,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: j,
+            b: np,
+            offset: 0,
+        },
+        "tmix",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: pa,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: j,
+    });
+    a.op(Opcode::Incr { dst: j });
+    a.op(Opcode::UnsafeCast { dst: pl, src: d });
+    a.jmp(
+        Opcode::JNotEq {
+            a: pl,
+            b: sp,
+            offset: 0,
+        },
+        "tp",
+    );
+    a.op(Opcode::Mul {
+        dst: np,
+        a: j,
+        b: nu,
+    });
+    a.op(Opcode::Add {
+        dst: t,
+        a: t,
+        b: np,
+    });
+    a.label("tmix");
+    a.op(Opcode::Mul { dst: h, a: h, b: nu });
+    a.op(Opcode::Add { dst: h, a: h, b: t });
+    a.jmp(Opcode::JAlways { offset: 0 }, "ts");
+    a.label("tsig");
     a.op(Opcode::Int { dst: k, ptr: c0 });
     a.loop_head("su");
     a.op(Opcode::Field {
@@ -642,45 +815,8 @@ pub(super) fn add_list(
         fun: lp.is_alive,
         arg0: u,
     });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "sflag");
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "smix");
     a.op(Opcode::Int { dst: t, ptr: c2 });
-    a.op(Opcode::Add {
-        dst: idx,
-        a: idx,
-        b: t,
-    });
-    a.label("sflag");
-    a.op(Opcode::Field {
-        dst: flags,
-        obj: u,
-        field: lp.u_flags,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: flags,
-            offset: 0,
-        },
-        "smix",
-    );
-    a.op(Opcode::Field {
-        dst: t,
-        obj: flags,
-        field: lp.fl_value,
-    });
-    a.op(Opcode::And {
-        dst: t,
-        a: t,
-        b: one,
-    });
-    a.jmp(
-        Opcode::JEq {
-            a: t,
-            b: zero,
-            offset: 0,
-        },
-        "smix",
-    );
-    a.op(Opcode::Int { dst: t, ptr: c4 });
     a.op(Opcode::Add {
         dst: idx,
         a: idx,
@@ -927,40 +1063,6 @@ pub(super) fn add_list(
         dst: alive,
         value: ValBool(true),
     });
-    a.op(Opcode::Field {
-        dst: flags,
-        obj: u,
-        field: lp.u_flags,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: flags,
-            offset: 0,
-        },
-        "unext",
-    );
-    a.op(Opcode::Field {
-        dst: t,
-        obj: flags,
-        field: lp.fl_value,
-    });
-    a.op(Opcode::And {
-        dst: t,
-        a: t,
-        b: one,
-    });
-    a.jmp(
-        Opcode::JEq {
-            a: t,
-            b: zero,
-            offset: 0,
-        },
-        "unext",
-    );
-    a.op(Opcode::Bool {
-        dst: done,
-        value: ValBool(true),
-    });
     a.label("unext");
     a.jmp(Opcode::JAlways { offset: 0 }, "uu");
     a.label("udone");
@@ -971,6 +1073,130 @@ pub(super) fn add_list(
         },
         "pnext",
     );
+
+    // done = no turn slot of this player left in the round: timelines[0]
+    // holds the current and coming slots (a used one is shifted out, a new
+    // round brings a fresh line), Player(pl) or PlayerUnit(u) with u.data.owner == bp.
+    a.op(Opcode::Int {
+        dst: slots,
+        ptr: c0,
+    });
+    a.jmp(Opcode::JNull { reg: cur, offset: 0 }, "slots");
+    a.op(Opcode::Int { dst: k, ptr: c0 });
+    a.loop_head("sl");
+    a.op(Opcode::Field {
+        dst: nu,
+        obj: cur,
+        field: p.a_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: k,
+            b: nu,
+            offset: 0,
+        },
+        "slots",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: cur,
+        field: p.a_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: k,
+    });
+    a.op(Opcode::Incr { dst: k });
+    a.op(Opcode::UnsafeCast { dst: e, src: d });
+    a.jmp(Opcode::JNull { reg: e, offset: 0 }, "sl");
+    a.op(Opcode::EnumIndex { dst: ei, value: e });
+    a.jmp(
+        Opcode::JNotEq {
+            a: ei,
+            b: zero,
+            offset: 0,
+        },
+        "sl_unit",
+    );
+    a.op(Opcode::EnumField {
+        dst: sp,
+        value: e,
+        construct: RefEnumConstruct(0),
+        field: RefField(0),
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: sp,
+            b: pl,
+            offset: 0,
+        },
+        "sl",
+    );
+    a.op(Opcode::Incr { dst: slots });
+    a.jmp(Opcode::JAlways { offset: 0 }, "sl");
+    a.label("sl_unit");
+    a.op(Opcode::Int { dst: t, ptr: c_pu });
+    a.jmp(
+        Opcode::JNotEq {
+            a: ei,
+            b: t,
+            offset: 0,
+        },
+        "sl",
+    );
+    a.op(Opcode::EnumField {
+        dst: u,
+        value: e,
+        construct: RefEnumConstruct(lp.pu_idx as usize),
+        field: RefField(0),
+    });
+    a.jmp(Opcode::JNull { reg: u, offset: 0 }, "sl");
+    a.op(Opcode::Field {
+        dst: sdata,
+        obj: u,
+        field: p.u_data,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: sdata,
+            offset: 0,
+        },
+        "sl",
+    );
+    a.op(Opcode::Field {
+        dst: owner,
+        obj: sdata,
+        field: p.su_owner,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: owner,
+            b: bp,
+            offset: 0,
+        },
+        "sl",
+    );
+    a.op(Opcode::Incr { dst: slots });
+    a.jmp(Opcode::JAlways { offset: 0 }, "sl");
+    a.label("slots");
+    a.op(Opcode::Bool {
+        dst: done,
+        value: ValBool(false),
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: slots,
+            b: zero,
+            offset: 0,
+        },
+        "named0",
+    );
+    a.op(Opcode::Bool {
+        dst: done,
+        value: ValBool(true),
+    });
+    a.label("named0");
 
     // short = escaped nickname, cut to MAX_NAME - 1 chars + "..." when longer.
     a.op(Opcode::Call1 {
@@ -1391,8 +1617,8 @@ mod tests {
         }
     }
 
-    /// A State without `players`, or a UnitFlag whose bit 0 is not
-    /// PlayedThisRound, is refused and the image left as it was.
+    /// A State without `players`, or a TimelineElement without
+    /// PlayerUnit(battle.Unit), is refused and the image left as it was.
     #[test]
     fn refuses_unexpected_shapes() {
         let Ok(image) = std::fs::read(HLBOOT) else {
@@ -1412,22 +1638,207 @@ mod tests {
         assert!(write(&code) == before);
 
         let mut code = read(&image);
-        let i = code
-            .types
-            .iter()
-            .position(
-                |t| matches!(t, Type::Enum { name, .. } if s(&code, *name) == "battle.UnitFlag"),
-            )
-            .expect("UnitFlag");
-        let Type::Enum { constructs, .. } = &mut code.types[i] else {
+        let p = super::super::plan(&code).expect("base plan");
+        let other = string_ref(&mut code, "mpNotPlayerUnit");
+        let Type::Enum { constructs, .. } = &mut code.types[p.elt_t.0] else {
             unreachable!()
         };
-        constructs.swap(0, 1);
-        let p = super::super::plan(&code).expect("base plan");
+        let pu = constructs
+            .iter()
+            .position(|c| s_of(&image, c.name) == "PlayerUnit")
+            .expect("PlayerUnit");
+        constructs[pu].name = other;
         let e = plan(&code, &p).err().expect("refused");
-        assert!(format!("{e:#}").contains("PlayedThisRound"), "{e:#}");
+        assert!(format!("{e:#}").contains("PlayerUnit"), "{e:#}");
         let before = write(&code);
         super::super::patch_timeline_hud(&mut code);
         assert!(write(&code) == before);
+    }
+
+    fn s_of(image: &[u8], i: hlbc::types::RefString) -> String {
+        read(image).strings[i.0].as_str().to_string()
+    }
+
+    /// timelineHudList in the interpreter over a co-op round rollover: two
+    /// players A and B, each with one living unit. A row is waiting while its
+    /// player still has a turn slot in timelines[0] (Player(p), or PlayerUnit(u)
+    /// of one of its units), done once none is left, acting while one of its
+    /// units plays; a new round's line puts everyone back to waiting.
+    #[test]
+    fn round_rollover_resets_marks() {
+        use crate::testsim::{Sim, V};
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let orig = read(&image);
+        let p = super::super::plan(&orig).expect("base plan");
+        let lp = plan(&orig, &p).expect("list plan");
+        let orig_n = orig.functions.len();
+        let mut code = read(&image);
+        super::super::patch_timeline_hud(&mut code);
+        let n = code.functions.len();
+        let (name_font, list) = (code.functions[n - 3].findex, code.functions[n - 1].findex);
+        let (pp, lpp) = (&p, &lp);
+        let s = |v: &V| match v {
+            V::S(x) => x.clone(),
+            o => panic!("not a string: {o:?}"),
+        };
+        let mut sim = Sim::new(
+            &code,
+            orig_n,
+            move |c, f, a| {
+                let (p, lp) = (pp, lpp);
+                Some(if f == p.is_multi {
+                    V::B(true)
+                } else if f == p.base_check {
+                    V::B(c.key_get(&a[1], "is_tl") == V::B(true))
+                } else if f == name_font {
+                    c.obj(&[])
+                } else if f == p.get_props {
+                    c.obj(&[])
+                } else if f == p.html_ctor || f == p.set_absolute {
+                    V::Null
+                } else if f == lp.is_alive {
+                    V::B(c.key_get(&a[0], "alive") == V::B(true))
+                } else if f == lp.get_user_name || f == p.bp_get_name {
+                    c.key_get(&a[0], "name")
+                } else if f == lp.html_escape {
+                    a[0].clone()
+                } else if f == lp.str_add {
+                    V::S(format!("{}{}", s(&a[0]), s(&a[1])))
+                } else if f == lp.str_last_index {
+                    let (h, n) = (s(&a[0]), s(&a[1]));
+                    V::I(h.rfind(&n).map_or(-1, |i| i as i32))
+                } else if f == lp.str_substr {
+                    let x = s(&a[0]);
+                    let V::I(pos) = a[1] else { panic!("substr pos") };
+                    let len = match a[2] {
+                        V::I(l) => l as usize,
+                        _ => x.len(),
+                    };
+                    V::S(x.chars().skip(pos as usize).take(len).collect())
+                } else if f == p.html_set_text {
+                    c.log.push(("text", a.to_vec()));
+                    a[1].clone()
+                } else if f == p.outer_width {
+                    V::I(40)
+                } else if f == p.text_width || f == p.text_height {
+                    V::F(20.0)
+                } else if f == p.set_x || f == p.set_y {
+                    a[1].clone()
+                } else if f == lp.set_visible {
+                    a[1].clone()
+                } else {
+                    return None;
+                })
+            },
+            |_, _, _| panic!("no virtual call expected"),
+        );
+        let c = &mut sim.c;
+        let side = c.obj(&[]);
+        let mk_bp = |c: &mut crate::testsim::Core, name: &str| {
+            let bp = c.obj(&[]);
+            c.key_set(&bp, "name".into(), V::S(name.into()));
+            bp
+        };
+        let (bpa, bpb) = (mk_bp(c, "A"), mk_bp(c, "B"));
+        let pla = c.obj(&[(lp.pl_player, bpa.clone()), (p.p_side, side.clone())]);
+        let plb = c.obj(&[(lp.pl_player, bpb.clone()), (p.p_side, side.clone())]);
+        let mk_unit = |c: &mut crate::testsim::Core, bp: &V| {
+            let data = c.obj(&[(p.su_owner, bp.clone())]);
+            let u = c.obj(&[(p.u_data, data)]);
+            c.key_set(&u, "alive".into(), V::B(true));
+            u
+        };
+        let (ua, ub) = (mk_unit(c, &bpa), mk_unit(c, &bpb));
+        let units = c.arr(p.a_len, p.a_raw, vec![ua.clone(), ub.clone()]);
+        let players_arr = c.arr(p.a_len, p.a_raw, vec![pla.clone(), plb.clone()]);
+        let players = c.obj(&[(lp.proxy_array, players_arr)]);
+        let st = c.obj(&[
+            (lp.s_units, units),
+            (lp.s_players, players),
+            (lp.s_round, V::I(1)),
+            (p.s_side, side),
+        ]);
+        let battle = c.obj(&[(p.b_state, st.clone())]);
+        let game = c.obj(&[]);
+        let tl = c.obj(&[]);
+        c.key_set(&tl, "is_tl".into(), V::B(true));
+        let head = c.enm(0, vec![pla.clone()]);
+        assert_eq!(lp.str_len.0, 1, "String.length is field 1 (testsim)");
+        let ev = c.obj(&[
+            (p.ev_elt, head),
+            (p.ev_game, game),
+            (p.ev_battle, battle),
+            (p.o_parent, tl.clone()),
+            (lp.o_abs_x, V::F(100.0)),
+            (lp.o_mat_a, V::F(1.0)),
+        ]);
+        let events = c.arr(p.a_len, p.a_raw, vec![ev.clone()]);
+        c.set(&tl, p.tl_events, events);
+
+        // one frame with timelines = [line]: the list text, if rebuilt
+        let frame = |sim: &mut Sim, round: i32, line: Vec<V>, started: V| -> Option<String> {
+            let c = &mut sim.c;
+            let line = c.arr(p.a_len, p.a_raw, line);
+            let tls = c.arr(p.a_len, p.a_raw, vec![line]);
+            c.set(&st, p.s_timelines, tls);
+            c.set(&st, lp.s_round, V::I(round));
+            c.set(&st, p.s_started, started);
+            sim.run(list, vec![ev.clone()]);
+            let mut t = sim.c.take("text");
+            assert!(t.len() <= 1);
+            t.pop().map(|a| s(&a[1]))
+        };
+        let (wait, done, br) = (WAITING, DONE, BR);
+        let pa = |c: &mut crate::testsim::Core| c.enm(0, vec![pla.clone()]);
+        let pb = |c: &mut crate::testsim::Core| c.enm(0, vec![plb.clone()]);
+        let pub_ = |c: &mut crate::testsim::Core| c.enm(lp.pu_idx, vec![ub.clone()]);
+        let ai = |c: &mut crate::testsim::Core| c.enm(1, vec![V::Null]);
+
+        // round 1 start: A, AI, B (fixed unit slot) to come -> both waiting
+        let line = vec![pa(&mut sim.c), ai(&mut sim.c), pub_(&mut sim.c)];
+        assert_eq!(
+            frame(&mut sim, 1, line.clone(), V::Null).as_deref(),
+            Some(format!("{wait}A{br}{wait}B").as_str())
+        );
+        // same state next frame: no rebuild
+        assert_eq!(frame(&mut sim, 1, line, V::Null), None);
+        // A's unit acting
+        let line = vec![pa(&mut sim.c), ai(&mut sim.c), pub_(&mut sim.c)];
+        assert_eq!(
+            frame(&mut sim, 1, line, ua.clone()).as_deref(),
+            Some(format!("{ACTING}A{br}{wait}B").as_str())
+        );
+        // A's slot used (shifted out): A done, B waiting
+        let line = vec![ai(&mut sim.c), pub_(&mut sim.c)];
+        assert_eq!(
+            frame(&mut sim, 1, line, V::Null).as_deref(),
+            Some(format!("{done}A{br}{wait}B").as_str())
+        );
+        // B's slot used too: both done
+        assert_eq!(
+            frame(&mut sim, 1, vec![], V::Null).as_deref(),
+            Some(format!("{done}A{br}{done}B").as_str())
+        );
+        // round 2: a fresh line -> both waiting again
+        let line = vec![pb(&mut sim.c), pa(&mut sim.c)];
+        assert_eq!(
+            frame(&mut sim, 2, line, V::Null).as_deref(),
+            Some(format!("{wait}A{br}{wait}B").as_str())
+        );
+        // A's slot turned into an AI(unit) slot in place (updateAutoPlayed):
+        // same length, round and acting unit, still rebuilt: A done
+        let line = vec![pb(&mut sim.c), ai(&mut sim.c)];
+        assert_eq!(
+            frame(&mut sim, 2, line, V::Null).as_deref(),
+            Some(format!("{done}A{br}{wait}B").as_str())
+        );
+        // and back, then the two Player slots swapped: same kinds, other owners
+        let line = vec![pb(&mut sim.c), pa(&mut sim.c)];
+        assert!(frame(&mut sim, 2, line, V::Null).is_some());
+        let line = vec![pa(&mut sim.c), pb(&mut sim.c)];
+        assert!(frame(&mut sim, 2, line, V::Null).is_some());
     }
 }
