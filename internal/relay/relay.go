@@ -128,44 +128,40 @@ func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
 func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 	defer func() { _ = c.Close() }() // connection is finished either way
 
-	var self *client
 	ws, err := wsx.Accept(c, br, func(ident string) (string, bool) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		// RelayServer.onClient: the first '@' connection becomes the host.
 		if strings.HasPrefix(ident, "@") {
-			if s.hostCid != 0 {
-				return "", false
-			}
-			self = &client{cid: s.genCid(), ident: ident, isHost: true}
-			s.clients[self.cid] = self
-			return s.HostPW, true
+			return s.HostPW, s.hostCid == 0
 		}
-		if s.hostCid == 0 {
-			// "No host connected, slave connection refused"
-			return "", false
-		}
-		self = &client{cid: s.genCid(), ident: ident}
-		s.clients[self.cid] = self
-		return s.SlavePW, true
+		// "No host connected, slave connection refused"
+		return s.SlavePW, s.hostCid != 0
 	})
 	if err != nil {
 		s.Log.Printf("relay: handshake from %s refused: %v", c.RemoteAddr(), err)
-		if self != nil {
-			s.mu.Lock()
-			delete(s.clients, self.cid)
-			s.mu.Unlock()
-		}
 		return
 	}
-	self.ws = ws
+	// Only an authenticated, fully built client is published, and the role is
+	// checked again as it is: two host handshakes may both have passed the
+	// check above, and the host may have left while a guest's was running.
+	self := &client{ident: ws.Ident, isHost: strings.HasPrefix(ws.Ident, "@"), ws: ws}
+	s.mu.Lock()
+	if self.isHost == (s.hostCid != 0) {
+		s.mu.Unlock()
+		s.Log.Printf("relay: %s lost its role during the handshake (ident %q), dropped", c.RemoteAddr(), ws.Ident)
+		return
+	}
+	self.cid = s.genCid()
+	s.clients[self.cid] = self
+	if self.isHost {
+		s.hostCid = self.cid
+	}
+	s.mu.Unlock()
 
 	role := "client"
 	if self.isHost {
 		role = "host"
-		s.mu.Lock()
-		s.hostCid = self.cid
-		s.mu.Unlock()
 	}
 	s.Log.Printf("relay: %s connected (cid %d, ident %q, peer %s, headers %s)",
 		role, self.cid, self.ident, c.RemoteAddr(), applog.Trunc(applog.Headers(ws.Headers)))
