@@ -120,6 +120,59 @@ static long find_once(const unsigned char *buf, size_t n, const unsigned char *n
 	return hit;
 }
 
+// int_offset returns the file offset of int constant #idx, or -1: the header
+// indexes (hashlink code.c hl_read_index) are skipped, then the int table.
+static long int_offset(const unsigned char *buf, size_t n, int idx) {
+	size_t pos = 4;
+	int k, nints = 0, fields = buf[3] >= 5 ? 11 : 10;
+	for (k = 0; k < fields && pos < n; k++) {
+		unsigned char b = buf[pos];
+		int v;
+		if (!(b & 0x80)) {
+			v = b;
+			pos += 1;
+		} else if (!(b & 0x40)) {
+			v = ((b & 31) << 8) | buf[pos + 1];
+			pos += 2;
+		} else {
+			v = ((b & 31) << 24) | (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3];
+			pos += 4;
+		}
+		if (k == 1)
+			nints = v;
+	}
+	return idx < nints && pos + 4 * (size_t)nints <= n ? (long)(pos + 4 * (size_t)idx) : -1;
+}
+
+// write_file creates path holding data; 1 on success.
+static int write_file(const wchar_t *path, const unsigned char *data, size_t n) {
+	HANDLE w = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	DWORD put = 0;
+	int ok;
+	if (w == INVALID_HANDLE_VALUE)
+		return 0;
+	ok = WriteFile(w, data, (DWORD)n, &put, NULL) && put == n;
+	CloseHandle(w);
+	return ok;
+}
+
+static int final_path_is(HANDLE h, const wchar_t *want);
+
+// served_untouched opens path the way the game would and reports whether the
+// original came back (handle and bytes).
+static int served_untouched(const wchar_t *path, const unsigned char *data, size_t n) {
+	HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	unsigned char *got;
+	size_t m;
+	int ok = h != INVALID_HANDLE_VALUE && final_path_is(h, path);
+	if (h != INVALID_HANDLE_VALUE)
+		CloseHandle(h);
+	got = read_raw(path, &m);
+	ok = ok && got != NULL && m == n && memcmp(got, data, n) == 0;
+	free(got);
+	return ok;
+}
+
 // diff_is_exactly reports whether got differs from orig exactly at the
 // HL_PATCH_COUNT offsets in at[], each holding its "to" byte.
 static int diff_is_exactly(const unsigned char *orig, const unsigned char *got, size_t n,
@@ -1253,6 +1306,30 @@ int main(int argc, char **argv) {
 	got = read_raw(copy, &m);
 	check(got != NULL && m == en && memcmp(got, exp, en) == 0, "the good copy was not clobbered by the fallback");
 	free(got);
+
+	// 8b. Every needle still matches, but int constant #19 (the 32 patches 4/5
+	//     switch the join code length to) holds another value: untouched.
+	{
+		wchar_t dir2[MAX_PATH * 2], path2[MAX_PATH * 2];
+		long off19 = int_offset(orig, n, 19), off30 = int_offset(orig, n, 30);
+		int32_t v19 = 0, v30 = 0, one = 1;
+		if (off19 >= 0)
+			memcpy(&v19, orig + off19, 4);
+		if (off30 >= 0)
+			memcpy(&v30, orig + off30, 4);
+		check(off19 >= 0 && v19 == 32 && off30 >= 0 && v30 == 5, "the retail int table holds #19 = 32 and #30 = 5");
+		wcscpy(dir2, scratch);
+		wcscat(dir2, L"\\fakegame-int");
+		CreateDirectoryW(dir2, NULL);
+		wcscpy(path2, dir2);
+		wcscat(path2, L"\\hlboot.dat");
+		memcpy(fake_img, orig, n);
+		if (off19 >= 0)
+			memcpy(fake_img + off19, &one, 4);
+		check(write_file(path2, fake_img, n), "wrote an hlboot.dat whose int #19 is 1");
+		check(served_untouched(path2, fake_img, n), "int constant changed: the original is served untouched");
+		check(log_contains(log, "patch: int constant #19 is 1, want 32, image left untouched"), "shim.log names the constant");
+	}
 
 	// 9. A write open is never redirected.
 	h = CreateFileW(fake, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);

@@ -588,9 +588,88 @@ static const unsigned char *find_once(const unsigned char *buf, size_t n,
 	return hit;
 }
 
+// Patches 4 and 5 swap an Int operand's constant index, int@30 (= 5) for
+// int@19 (= 32): their needles pin the instruction bytes, not what those
+// indexes hold, so the int table is checked for both values as well.
+static const struct {
+	int index;
+	int32_t value;
+} hl_ints[] = {{30, 5}, {19, 32}};
+
+// hl_index reads one HashLink varint index (hl_read_index, code.c) at *pos.
+static BOOL hl_index(const unsigned char *buf, size_t n, size_t *pos, int *out) {
+	unsigned char b;
+	if (*pos >= n)
+		return FALSE;
+	b = buf[(*pos)++];
+	if ((b & 0x80) == 0) {
+		*out = b & 0x7F;
+	} else if ((b & 0x40) == 0) {
+		if (*pos >= n)
+			return FALSE;
+		*out = buf[(*pos)++] | ((b & 31) << 8);
+		if (b & 0x20)
+			*out = -*out;
+	} else {
+		if (n - *pos < 3)
+			return FALSE;
+		*out = ((b & 31) << 24) | (buf[*pos] << 16) | (buf[*pos + 1] << 8) | buf[*pos + 2];
+		*pos += 3;
+		if (b & 0x20)
+			*out = -*out;
+	}
+	return TRUE;
+}
+
+// int_constants_ok checks the header (format 4 or 5) and hl_ints against the
+// image's int table: HLB, version, then flags, nints, nfloats, nstrings,
+// [nbytes, version 5], ntypes, nglobals, nnatives, nfunctions, nconstants,
+// entrypoint as indexes, then nints little-endian int32 (hl_code_read).
+static BOOL int_constants_ok(const unsigned char *buf, size_t n) {
+	size_t pos = sizeof(HL_MAGIC) - 1;
+	int version, v, nints = 0, k, fields;
+	unsigned i;
+	if (pos >= n)
+		return FALSE;
+	version = buf[pos++];
+	if (version < 4 || version > 5) {
+		shim_log("patch: bytecode format %d, want 4 or 5, image left untouched", version);
+		return FALSE;
+	}
+	fields = version >= 5 ? 11 : 10;
+	for (k = 0; k < fields; k++) {
+		if (!hl_index(buf, n, &pos, &v) || v < 0) {
+			shim_log("patch: bytecode header unreadable, image left untouched");
+			return FALSE;
+		}
+		if (k == 1)
+			nints = v;
+	}
+	if ((size_t)nints > (n - pos) / 4) {
+		shim_log("patch: int table runs past the image, image left untouched");
+		return FALSE;
+	}
+	for (i = 0; i < sizeof(hl_ints) / sizeof(hl_ints[0]); i++) {
+		const unsigned char *p = buf + pos + 4 * (size_t)hl_ints[i].index;
+		int32_t got;
+		if (hl_ints[i].index >= nints) {
+			shim_log("patch: int constant #%d missing (%d in the table), image left untouched", hl_ints[i].index, nints);
+			return FALSE;
+		}
+		got = (int32_t)((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
+		if (got != hl_ints[i].value) {
+			shim_log("patch: int constant #%d is %ld, want %ld, image left untouched", hl_ints[i].index, (long)got,
+				(long)hl_ints[i].value);
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
 // patch_bytecode rewrites the image in place, and only once every patch has
-// resolved to exactly one site holding exactly the byte it expects. Returns
-// the number of bytes changed (HL_PATCH_COUNT) or 0 with nothing written.
+// resolved to exactly one site holding exactly the byte it expects and the
+// int constants they rely on hold their values. Returns the number of bytes
+// changed (HL_PATCH_COUNT) or 0 with nothing written.
 static unsigned patch_bytecode(unsigned char *buf, size_t n) {
 	unsigned char *at[HL_PATCH_COUNT];
 	unsigned i;
@@ -599,6 +678,8 @@ static unsigned patch_bytecode(unsigned char *buf, size_t n) {
 		shim_log("patch: image does not start with %s", HL_MAGIC);
 		return 0;
 	}
+	if (!int_constants_ok(buf, n))
+		return 0;
 	for (i = 0; i < HL_PATCH_COUNT; i++) {
 		const unsigned char *hit = find_once(buf, n, hl_patches[i].needle, hl_patches[i].len);
 		if (hit == NULL) {
