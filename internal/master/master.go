@@ -318,7 +318,7 @@ func (s *Server) serve(c net.Conn) {
 		}
 		var e link.Envelope
 		if err := json.Unmarshal(payload, &e); err != nil {
-			s.opt.Log.Printf("master: bad frame from %s: %v (%s)", peer, err, applog.Trunc(payload))
+			s.opt.Log.Printf("master: bad frame from %s: %v (%d B, not logged: it may carry secrets)", peer, err, len(payload))
 			continue
 		}
 		if e.UID < 0 {
