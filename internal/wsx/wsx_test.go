@@ -1,6 +1,7 @@
 package wsx
 
 import (
+	"bufio"
 	"io"
 	"net"
 	"strings"
@@ -32,6 +33,82 @@ func TestAcceptBoundsTheRequest(t *testing.T) {
 			t.Fatalf("got %v, want a refusal", err)
 		}
 	})
+}
+
+// upgrade runs a complete handshake over a pipe and returns both ends.
+func upgrade(t *testing.T) (*Conn, net.Conn, *bufio.Reader) {
+	t.Helper()
+	srv, cli := net.Pipe()
+	go func() {
+		_, _ = io.WriteString(cli, "GET / HTTP/1.1\r\nSec-WebSocket-Key: a2V5\r\n\r\n")
+	}()
+	type result struct {
+		c   *Conn
+		err error
+	}
+	res := make(chan result, 1)
+	go func() { c, err := Accept(srv, nil, nil); res <- result{c, err} }()
+	br := bufio.NewReader(cli)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	r := <-res
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	t.Cleanup(func() { _ = r.c.Close(); _ = cli.Close() })
+	return r.c, cli, br
+}
+
+// The keepalive pings a live peer, which answering keeps alive, and gives up
+// on one that stops answering.
+func TestKeepAlive(t *testing.T) {
+	c, cli, br := upgrade(t)
+	stop := c.KeepAlive(20*time.Millisecond, 150*time.Millisecond)
+	defer stop()
+	answering := make(chan bool, 1)
+	answering <- true
+	go func() { // the game: answer every ping with a (masked) pong while told to
+		for {
+			var h [2]byte
+			if _, err := io.ReadFull(br, h[:]); err != nil {
+				return
+			}
+			if h[0]&15 != OpPing || h[1]&127 != 0 {
+				return
+			}
+			on := <-answering
+			answering <- on
+			if on {
+				if _, err := cli.Write([]byte{0x80 | OpPong, 0x80, 0, 0, 0, 0}); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	readErr := make(chan error, 1)
+	go func() { _, _, err := c.Read(); readErr <- err }()
+	select {
+	case err := <-readErr:
+		t.Fatalf("a peer answering pings was dropped: %v", err)
+	case <-time.After(400 * time.Millisecond):
+	}
+	<-answering
+	answering <- false
+	select {
+	case err := <-readErr:
+		if err == nil {
+			t.Fatal("Read returned without an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a peer that stopped answering was kept")
+	}
 }
 
 // A peer that never finishes its request is dropped after HandshakeTimeout.

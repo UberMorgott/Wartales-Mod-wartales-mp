@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/UberMorgott/wartales-mp/internal/sendq"
@@ -59,6 +60,8 @@ type Conn struct {
 
 	br *bufio.Reader
 	q  *sendq.Queue // every write goes through it, so none waits on the peer
+
+	idle time.Duration // see KeepAlive; 0 = Read waits forever
 }
 
 // sendBudget is how far a peer may fall behind before it is dropped: room for
@@ -183,9 +186,39 @@ func readLine(br *bufio.Reader, budget *int) (string, error) {
 	}
 }
 
+// KeepAlive pings the peer every interval and makes Read fail once nothing at
+// all (data, pong) has arrived for idle: an open socket alone does not prove
+// the program behind it still runs. Call it before the first Read; stop ends
+// the pings.
+func (c *Conn) KeepAlive(interval, idle time.Duration) (stop func()) {
+	c.idle = idle
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if c.Write(OpPing, nil) != nil {
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
 // Read returns the next data frame. Control frames are handled internally.
 func (c *Conn) Read() (opcode byte, payload []byte, err error) {
 	for {
+		if c.idle > 0 {
+			if err := c.SetReadDeadline(time.Now().Add(c.idle)); err != nil {
+				return 0, nil, err
+			}
+		}
 		var h [2]byte
 		if _, err := io.ReadFull(c.br, h[:]); err != nil {
 			return 0, nil, err

@@ -30,12 +30,24 @@ type client struct {
 	ws     *wsx.Conn
 
 	// Frame counters, summarised in the log instead of dumping payloads.
-	framesIn  int64
-	bytesIn   int64
+	framesIn int64
+	bytesIn  int64
 	// The out counters are bumped by the host's goroutine.
 	framesOut atomic.Int64
 	bytesOut  atomic.Int64
 }
+
+// The game's own liveness check (hxbit's 60 s clientTimeout) is patched out,
+// because its timeout path crashes the game (see internal/hlpatch), so the
+// relay checks liveness itself: it pings every connection, the game's
+// WSConnection.processData answers with a pong, and a connection silent for
+// idleTimeout - a hung or frozen game behind a socket the OS keeps open - is
+// dropped, which the host sees as an ordinary disconnect. idleTimeout is twice
+// the game's own bound, so a long blocking load is not taken for a hang.
+const (
+	pingInterval = 20 * time.Second
+	idleTimeout  = 120 * time.Second
+)
 
 // frameLogEvery is how many frames pass between two relay traffic summaries.
 const frameLogEvery = 512
@@ -170,6 +182,8 @@ func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 	if self.isHost {
 		role = "host"
 	}
+	stopPings := ws.KeepAlive(pingInterval, idleTimeout)
+	defer stopPings()
 	s.Log.Printf("relay: %s connected (cid %d, ident %q, peer %s, headers %s)",
 		role, self.cid, self.ident, c.RemoteAddr(), applog.Trunc(applog.Headers(ws.Headers)))
 	if !self.isHost {
