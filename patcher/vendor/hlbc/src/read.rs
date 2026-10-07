@@ -26,7 +26,7 @@ impl Bytecode {
             )));
         }
         let version = r.read_u8()?;
-        if version < 4 && version > 5 {
+        if !(4..=5).contains(&version) {
             return Err(Error::UnsupportedVersion {
                 version,
                 min: 4,

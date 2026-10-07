@@ -1239,6 +1239,15 @@ mod tests {
         traps
     }
 
+    /// A bytecode format other than 4 or 5 is refused before anything is parsed.
+    #[test]
+    fn unsupported_bytecode_version_is_refused() {
+        for v in [3u8, 6] {
+            let err = patch_image(&[b'H', b'L', b'B', v, 0, 0, 0, 0]).unwrap_err();
+            assert!(format!("{err:#}").contains("nsupported"), "version {v}: {err:#}");
+        }
+    }
+
     /// Patches a copy of the installed game's bytecode (skipped when absent): the
     /// image round-trips, only the StartChoice preview changes, the two tooltip
     /// functions are appended, and every tooltip constructor runs under a trap.
