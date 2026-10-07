@@ -1394,12 +1394,9 @@ pub(crate) fn patch_forge_mirror(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asm::testutil::same;
     use crate::asm::testutil::*;
     use std::collections::HashMap;
-
-    fn same(a: &Function, b: &Function) -> bool {
-        format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs
-    }
 
     /// Four hooks, four well-typed functions appended, every other function
     /// untouched; a second pass is a no-op.

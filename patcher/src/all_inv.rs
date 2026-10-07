@@ -3803,50 +3803,12 @@ pub(crate) fn patch_all_inv(code: &mut Bytecode) {
 mod tests {
     use super::*;
     use crate::asm::testutil::{check_flow, check_types, read, shifted, write, HLBOOT};
+    use crate::asm::testutil::{same, traps_ok};
     use std::collections::HashMap;
 
     /// Ops of a gate: call, jump, (Bool false,) Ret.
     const GATE_BOOL_OPS: usize = 4;
     const GATE_VOID_OPS: usize = 3;
-
-    fn same(a: &Function, b: &Function) -> bool {
-        format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs
-    }
-
-    /// Each Trap is closed by an EndTrap on its register, nothing jumps out of
-    /// the protected block, and the handler follows a Ret.
-    fn traps_ok(f: &Function) -> usize {
-        let n = f.ops.len();
-        let mut traps = 0;
-        for (i, op) in f.ops.iter().enumerate() {
-            let Opcode::Trap { exc, .. } = *op else {
-                continue;
-            };
-            traps += 1;
-            let [handler] = jump_targets(f, i)[..] else {
-                unreachable!()
-            };
-            let end = (i + 1..n)
-                .find(|&j| matches!(f.ops[j], Opcode::EndTrap { exc: e } if e == exc))
-                .expect("EndTrap");
-            assert!(handler > end);
-            assert!(matches!(f.ops[handler - 1], Opcode::Ret { .. }));
-            for j in i + 1..end {
-                assert!(!matches!(
-                    f.ops[j],
-                    Opcode::Ret { .. } | Opcode::Trap { .. }
-                ));
-                for t in jump_targets(f, j) {
-                    assert!(
-                        t > i && t <= end,
-                        "fn@{} op {j} leaves the trap",
-                        f.findex.0
-                    );
-                }
-            }
-        }
-        traps
-    }
 
     struct Plans {
         n: NetPlan,

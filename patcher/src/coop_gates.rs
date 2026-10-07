@@ -1006,15 +1006,10 @@ pub(crate) fn patch_coop_gates(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
+    use crate::asm::testutil::{read, HLBOOT};
 
     fn ops(o: &[Opcode]) -> String {
         format!("{o:?}")
-    }
-
-    fn read(image: &[u8]) -> Bytecode {
-        Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
     }
 
     /// `b` is `a` with `n` ops inserted at `at`: every original jump keeps its target.

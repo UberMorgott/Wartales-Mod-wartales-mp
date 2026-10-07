@@ -759,13 +759,10 @@ pub(crate) fn patch_work_mirror(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asm::testutil::same;
     use crate::asm::testutil::*;
     use crate::diag::call_of;
     use crate::testsim::{Core, Sim, V};
-
-    fn same(a: &Function, b: &Function) -> bool {
-        format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs
-    }
 
     /// Six sites edited, five well-typed functions appended, nothing else
     /// touched; a second pass is a no-op.

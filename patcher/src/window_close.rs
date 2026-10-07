@@ -161,18 +161,7 @@ pub(crate) fn patch_window_close(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
-
-    fn read(image: &[u8]) -> Bytecode {
-        Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
-    }
-
-    fn write(code: &Bytecode) -> Vec<u8> {
-        let mut v = Vec::new();
-        code.serialize(&mut v).expect("write");
-        v
-    }
+    use crate::asm::testutil::{read, write, HLBOOT};
 
     /// Only the backdrop closure changes: two ops in front of triggerClose, one
     /// register; jumps still land on the same ops; a second pass is a no-op.

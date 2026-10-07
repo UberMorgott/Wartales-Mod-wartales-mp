@@ -1267,12 +1267,9 @@ pub(crate) fn patch_coop_spectate(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asm::testutil::same;
     use crate::asm::testutil::*;
     use crate::testsim::{Core, Sim, V};
-
-    fn same(a: &Function, b: &Function) -> bool {
-        format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs
-    }
 
     /// Five sites edited, seven well-typed functions appended, nothing else
     /// touched; a second pass is a no-op.

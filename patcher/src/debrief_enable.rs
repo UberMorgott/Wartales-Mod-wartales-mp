@@ -185,18 +185,7 @@ pub(crate) fn patch_debrief_enable(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
-
-    fn read(image: &[u8]) -> Bytecode {
-        Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
-    }
-
-    fn write(code: &Bytecode) -> Vec<u8> {
-        let mut v = Vec::new();
-        code.serialize(&mut v).expect("write");
-        v
-    }
+    use crate::asm::testutil::{read, write, HLBOOT};
 
     /// On the vanilla image and after cure + diag: only the two rebuild calls of
     /// Debrief.update change, into set_enable(button, desired); idempotent.

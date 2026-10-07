@@ -8,9 +8,8 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::asm::testutil::{read, HLBOOT};
     use crate::*;
-
-    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
 
     /// The vanilla DLC model: Steam ownership (`hasDLC`, `getDlcs`), each
     /// player's synced, signed list (`setDlcs*`, `checkSignature`, `hasDlc`,
@@ -41,10 +40,6 @@ mod tests {
         "getDlcs",
         "hasDLC",
     ];
-
-    fn read(image: &[u8]) -> Bytecode {
-        Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
-    }
 
     fn same(a: &Function, b: &Function) -> bool {
         format!("{:?}", a.ops) == format!("{:?}", b.ops)

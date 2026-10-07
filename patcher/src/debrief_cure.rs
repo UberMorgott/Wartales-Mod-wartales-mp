@@ -141,18 +141,7 @@ pub(crate) fn patch_debrief_cure(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
-
-    fn read(image: &[u8]) -> Bytecode {
-        Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
-    }
-
-    fn write(code: &Bytecode) -> Vec<u8> {
-        let mut v = Vec::new();
-        code.serialize(&mut v).expect("write");
-        v
-    }
+    use crate::asm::testutil::{read, write, HLBOOT};
 
     /// Only the one Call1 target in Debrief.update changes; a second pass is a no-op.
     #[test]

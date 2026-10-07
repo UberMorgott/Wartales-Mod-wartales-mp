@@ -307,8 +307,7 @@ pub(crate) fn patch_enemy_area_friendly_fire(code: &mut Bytecode) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
+    use crate::asm::testutil::HLBOOT;
 
     /// Patches the installed game's bytecode (skipped when it is absent) and
     /// checks the result reads back with both area sites passing `&cv`.

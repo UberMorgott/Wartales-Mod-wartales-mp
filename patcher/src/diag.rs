@@ -697,12 +697,7 @@ pub(crate) fn patch_diag(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
-
-    fn read(image: &[u8]) -> Bytecode {
-        Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
-    }
+    use crate::asm::testutil::{read, HLBOOT};
 
     #[test]
     fn patches_installed_game() {

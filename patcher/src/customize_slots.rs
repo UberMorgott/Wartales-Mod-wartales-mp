@@ -608,8 +608,7 @@ pub(crate) fn patch_customize_slots(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
+    use crate::asm::testutil::{read, HLBOOT};
 
     fn ops(o: &[Opcode]) -> String {
         format!("{o:?}")
@@ -635,10 +634,6 @@ mod tests {
                 assert_eq!(jump_targets(p, m(i)), mapped, "op {i} target");
             }
         }
-    }
-
-    fn read(image: &[u8]) -> Bytecode {
-        Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
     }
 
     /// Patches a copy of the installed game's bytecode (skipped when absent):
