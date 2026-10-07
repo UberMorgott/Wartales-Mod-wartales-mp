@@ -555,6 +555,31 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 	from = read(buf, sizeof(buf), &len, 0);
 	check(from != NULL && get_uid(from) == OTHER && len == 10, "a message from another peer reports that peer's SteamID");
 
+	// A backlog is pulled one batch per poll, never drained into the shim at
+	// once, and still comes out whole and in order.
+	{
+		unsigned k, in_order = 1, before;
+		unsigned char msg[4];
+		stats(&st);
+		before = st.queued;
+		for (k = 0; k < 200; k++) {
+			memcpy(msg, &k, 4);
+			inject(OTHER, 3, msg, 4);
+		}
+		size = 0;
+		check(avail(&size, 3) == 1 && size == 4, "backlog of 200: the next message is reported");
+		stats(&st);
+		check(st.queued - before == 200 - 64, "a poll pulls one batch of 64 from Steam, not the whole backlog");
+		for (k = 0; k < 200; k++) {
+			from = read(buf, sizeof(buf), &len, 3);
+			if (from == NULL || len != 4 || memcmp(buf, &k, 4) != 0) {
+				in_order = 0;
+				break;
+			}
+		}
+		check(in_order && read(buf, sizeof(buf), &len, 3) == NULL, "all 200 read once each, in send order");
+	}
+
 	// Diagnostics: the watch thread reports the session state of a peer we
 	// sent to, and the game's RunCallbacks calls are counted through the hook.
 	check(wait_log(log, "sdr: first packet to 72623859790382856: 5 bytes, type 2 -> flags 0x29, channel 0 = EResult 1", 2000),

@@ -741,28 +741,39 @@ static sdr_msg *queue_pop(int channel) {
 	return m;
 }
 
-// pump moves whatever Steam holds for channel into our queue, so the head is
-// always the next message the game will read.
-static void pump(int channel) {
+// pump_batch moves up to one batch of what Steam holds for channel to the
+// tail of our queue; returns how many Steam handed over.
+static int pump_batch(int channel) {
 	sdr_msg *batch[SDR_PULL_BATCH];
 	int n, i;
-	for (;;) {
-		n = api.receive(sdr_msgs, channel, batch, SDR_PULL_BATCH);
-		if (n <= 0)
-			return;
-		for (i = 0; i < n; i++) {
-			if (batch[i]->size < 0 || batch[i]->peer.type != SDR_IDENTITY_STEAMID) {
-				api.release(batch[i]); // not a Steam peer: nothing the game could name
-				sdr_dropped++;
-				continue;
-			}
-			cancel_close(find_watch(batch[i]->peer.u.steam_id), "the peer sends again");
-			queue_push(channel, batch[i]);
-			sdr_received++;
+	n = api.receive(sdr_msgs, channel, batch, SDR_PULL_BATCH);
+	for (i = 0; i < n; i++) {
+		if (batch[i]->size < 0 || batch[i]->peer.type != SDR_IDENTITY_STEAMID) {
+			api.release(batch[i]); // not a Steam peer: nothing the game could name
+			sdr_dropped++;
+			continue;
 		}
-		if (n < SDR_PULL_BATCH)
-			return;
+		cancel_close(find_watch(batch[i]->peer.u.steam_id), "the peer sends again");
+		queue_push(channel, batch[i]);
+		sdr_received++;
 	}
+	return n;
+}
+
+// pump moves everything Steam holds for channel into our queue: for a close
+// or an injected frame, which must come after every real message already sent.
+static void pump(int channel) {
+	while (pump_batch(channel) == SDR_PULL_BATCH)
+		;
+}
+
+// pump_game is the game thread's per-poll pull: one batch, and only once our
+// queue ran dry. Everything queued predates what Steam still holds, so the
+// head stays the next message, and a poll costs O(1) however large a backlog
+// is (the game reads it one message per call anyway).
+static void pump_game(int channel) {
+	if (sdr_queue[channel].head == NULL)
+		pump_batch(channel);
 }
 
 // drop_peer discards queued messages from one SteamID, like CloseP2PSessionWithUser.
@@ -914,7 +925,7 @@ static unsigned char detour_is_p2p_packet_available(uint32_t *msg_size, int chan
 	if (!channel_ok(channel) || !ready())
 		return 0;
 	EnterCriticalSection(&sdr_lock);
-	pump(channel);
+	pump_game(channel);
 	head = sdr_queue[channel].head;
 	if (head != NULL && msg_size != NULL)
 		*msg_size = (uint32_t)head->m->size;
@@ -931,7 +942,7 @@ static vuid detour_read_p2p_packet(unsigned char *data, int max_length, uint32_t
 	if (data == NULL || max_length < 0 || !channel_ok(channel) || !ready())
 		return NULL;
 	EnterCriticalSection(&sdr_lock);
-	pump(channel);
+	pump_game(channel);
 	m = queue_pop(channel);
 	if (m == NULL) {
 		LeaveCriticalSection(&sdr_lock);
