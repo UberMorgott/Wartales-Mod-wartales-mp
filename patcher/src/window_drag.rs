@@ -62,8 +62,10 @@
 //       once the panel's dom has no style refresh pending (domkit styles a new
 //       element on the next sync; that first pass writes the CSS offsets), its
 //       offsets are stored as `mpWinBase:<key>` (the double-push reset target;
-//       removed at 0,0), the saved offset is restored and onAfterReflow becomes
-//       `mpDragClamp(panel)`. A panel with such a base gets every saved offset
+//       removed at 0,0), the saved offset is restored, a panel with an
+//       InventoryContent gets the row-resize handle and saved size (see
+//       "row resize") and onAfterReflow becomes `mpDragClamp(panel)` plus
+//       the rows kept built. A panel with such a base gets every saved offset
 //       pinned as inline dom attributes (offset-x / offset-y): a style refresh
 //       (the chest Element's hover) re-applies the CSS rules, which threw the
 //       chest back to `offset-y: -410`. A release after a move clears the
@@ -97,6 +99,15 @@ pub(crate) const KEY_CHEST: &str = "GameInventory#chest";
 pub(crate) const KEY_INV: &str = "GameInventory#inv";
 const HEADER_CLASS: &str = "title";
 const HEAD_MARK: &str = "mpDragHead";
+pub(crate) const SIZE_PREFIX: &str = "mpWinSize:";
+/// Inventory grid row pitch (ui.comp.Inventory.INV_SPACING) and the scroll
+/// area's height beyond whole rows (vanilla 330 px = 6 rows + 12).
+const ROW_PX: i32 = 53;
+const ROW_PAD: i32 = 12;
+const MIN_ROWS: i32 = 2;
+/// The resize handle: square side and colour (ARGB).
+const HANDLE_PX: f64 = 14.0;
+const HANDLE_ARGB: i32 = 0xA0C8A060u32 as i32;
 const S_ERR: &str = "mp: drag: ";
 const N_BEGIN: &str = "mpDragBegin";
 const N_RESTORE: &str = "mpDragRestore";
@@ -104,10 +115,11 @@ const N_CLAMP: &str = "mpDragClamp";
 const N_PANEL: &str = "mpDragPanel";
 const N_WIN_INSTALL: &str = "mpWinInstall";
 /// Functions appended by `api()` (report, save, restore, save base, restore
-/// base, event, cancel, begin, clamp, panel push, panel late, panel, win push,
+/// base, rs content, rs apply, rs read, rs move, event, cancel, begin, clamp,
+/// panel push, rs push, rs reflow, rs install, panel late, panel, win push,
 /// head push, head, win reflow, win install).
 #[cfg(test)]
-pub(crate) const API_FNS: usize = 17;
+pub(crate) const API_FNS: usize = 24;
 
 /// The shared drag functions other passes call (findexes).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -215,6 +227,136 @@ struct Ctx {
     modal_none: i32,
     cursor_default: i32,
     dbg_file: usize,
+    rs: RsCtx,
+}
+
+/// What the row resize of inventory panels needs.
+struct RsCtx {
+    /// ui.comp.InventoryContent (the scroll area) and its class global.
+    cont_t: RefType,
+    cont_cls: RefGlobal,
+    /// ui.comp.Inventory (the slot grid) and `InventoryContent.getInventory`.
+    inv_t: RefType,
+    get_inv: RefFun,
+    vis_h: RefField,
+    base_h: RefField,
+    force_update: RefFun,
+    /// Flow.set_minHeight / set_maxHeight and their Null<Int>.
+    set_min_h: RefFun,
+    set_max_h: RefFun,
+    nint_t: RefType,
+    calc_h: RefField,
+    /// `new h2d.Interactive(w, h, parent, shape)`; shape's type.
+    inter_ctor: RefFun,
+    shape_t: RefType,
+    bg_color: RefField,
+    /// The FlowAlign.Left / Bottom singletons (globals).
+    fa_left: RefGlobal,
+    fa_bottom: RefGlobal,
+}
+
+/// The global holding the parameterless construct `idx` of enum `t`: the
+/// enum init stores each one as `Int k; GetArray; SafeCast r; SetGlobal g = r`.
+/// Haxe code compares such values by identity, so a MakeEnum copy would not do.
+fn enum_const(code: &Bytecode, t: RefType, idx: i32) -> Result<RefGlobal> {
+    for f in &code.functions {
+        for w in f.ops.windows(4) {
+            if let [Opcode::Int { ptr, .. }, Opcode::GetArray { .. }, Opcode::SafeCast { dst, .. }, Opcode::SetGlobal { global, src }] =
+                w
+            {
+                if dst == src && code.globals[global.0] == t && code.ints[ptr.0] == idx {
+                    return Ok(*global);
+                }
+            }
+        }
+    }
+    bail!("enum type {}: no global for construct {idx}", t.0)
+}
+
+/// Base types for rs_ctx: flow, interactive, object, i32, f64, void, h-align, v-align.
+struct RsBase {
+    flow_t: RefType,
+    inter_t: RefType,
+    obj_t: RefType,
+    i32_t: RefType,
+    f64_t: RefType,
+    void_t: RefType,
+    ha_t: RefType,
+    va_t: RefType,
+}
+
+fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
+    let cont_t = obj_type(code, "ui.comp.InventoryContent")?;
+    let inv_t = obj_type(code, "ui.comp.Inventory")?;
+    if !is_sub(code, cont_t, c.flow_t) {
+        bail!("InventoryContent is not an h2d.Flow");
+    }
+    let cont_cls = obj(code, cont_t)?
+        .global
+        .0
+        .checked_sub(1)
+        .filter(|&g| g < code.globals.len())
+        .map(RefGlobal)
+        .context("InventoryContent: no class global")?;
+    let get_inv = method(code, cont_t, "getInventory")?.findex;
+    want_sig(
+        code,
+        get_inv,
+        "InventoryContent.getInventory",
+        &[cont_t],
+        inv_t,
+    )?;
+    let vis_h = typed(code, inv_t, "visibleHeight", c.i32_t)?;
+    let base_h = typed(code, inv_t, "baseHeight", c.i32_t)?;
+    let force_update = method(code, inv_t, "forceUpdate")?.findex;
+    want_sig(
+        code,
+        force_update,
+        "Inventory.forceUpdate",
+        &[inv_t],
+        c.void_t,
+    )?;
+    let set_max_h = proto(code, c.flow_t, "set_maxHeight")?;
+    let (sa, nint_t) = sig(code, set_max_h)?;
+    if sa != [c.flow_t, nint_t] || !matches!(code.types[nint_t.0], Type::Null(t) if t == c.i32_t) {
+        bail!("Flow.set_maxHeight: unexpected signature");
+    }
+    let set_min_h = proto(code, c.flow_t, "set_minHeight")?;
+    want_sig(
+        code,
+        set_min_h,
+        "Flow.set_minHeight",
+        &[c.flow_t, nint_t],
+        nint_t,
+    )?;
+    let calc_h = typed(code, c.flow_t, "calculatedHeight", c.f64_t)?;
+    let inter_ctor = method(code, c.inter_t, "__constructor__")?.findex;
+    let (ia, ir) = sig(code, inter_ctor)?;
+    if ia.len() != 5 || ia[..4] != [c.inter_t, c.f64_t, c.f64_t, c.obj_t] || ir != c.void_t {
+        bail!("Interactive constructor: unexpected signature");
+    }
+    let bg_color = typed(code, c.inter_t, "backgroundColor", nint_t)?;
+    let construct = |t: RefType, name: &str| -> Result<RefGlobal> {
+        enum_const(code, t, enum_index(code, t, name)?)
+    };
+    Ok(RsCtx {
+        cont_t,
+        cont_cls,
+        inv_t,
+        get_inv,
+        vis_h,
+        base_h,
+        force_update,
+        set_min_h,
+        set_max_h,
+        nint_t,
+        calc_h,
+        inter_ctor,
+        shape_t: ia[4],
+        bg_color,
+        fa_left: construct(c.ha_t, "Left")?,
+        fa_bottom: construct(c.va_t, "Bottom")?,
+    })
 }
 
 fn want_sig(code: &Bytecode, f: RefFun, what: &str, args: &[RefType], ret: RefType) -> Result<()> {
@@ -413,7 +555,21 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
     let ev_move = enum_index(code, kind_t, "EMove")?;
     let ev_release_out = enum_index(code, kind_t, "EReleaseOutside")?;
     let modal_none = enum_index(code, modal_t, "None")?;
+    let rs = rs_ctx(
+        code,
+        &RsBase {
+            flow_t,
+            inter_t,
+            obj_t,
+            i32_t,
+            f64_t,
+            void_t,
+            ha_t,
+            va_t,
+        },
+    )?;
     Ok(Ctx {
+        rs,
         void_t,
         bool_t,
         i32_t,
@@ -531,6 +687,15 @@ struct Globals {
     attr_y: RefGlobal,
     /// The name given to a header interactive once its onPush is wrapped.
     head_mark: RefGlobal,
+    /// The capture is a row resize (not a move): its scroll area, start rows,
+    /// current rows, max rows, start mouse y; "mpWinSize:".
+    rs_on: RefGlobal,
+    rs_cont: RefGlobal,
+    rs_rows0: RefGlobal,
+    rs_rows: RefGlobal,
+    rs_max: RefGlobal,
+    rs_my0: RefGlobal,
+    size: RefGlobal,
 }
 
 /// `Trap exc -> catch` ... `OUT: EndTrap; Ret v` / `catch: report(exc); Ret v`.
@@ -610,18 +775,52 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         attr_x: str_global(code, c.str_t, "offset-x"),
         attr_y: str_global(code, c.str_t, "offset-y"),
         head_mark: str_global(code, c.str_t, HEAD_MARK),
+        rs_on: add_global(code, c.bool_t),
+        rs_cont: add_global(code, c.rs.cont_t),
+        rs_rows0: add_global(code, c.i32_t),
+        rs_rows: add_global(code, c.i32_t),
+        rs_max: add_global(code, c.i32_t),
+        rs_my0: add_global(code, c.f64_t),
+        size: str_global(code, c.str_t, SIZE_PREFIX),
     };
     let report = add_report(code, c, &g)?;
-    let save = add_save(code, c, g.prefix, report, Some((g.base, g.attr_x, g.attr_y)))?;
+    let save = add_save(
+        code,
+        c,
+        g.prefix,
+        report,
+        Some((g.base, g.attr_x, g.attr_y)),
+    )?;
     let restore = add_restore(code, c, g.prefix, report)?;
     let save_base = add_save(code, c, g.base, report, None)?;
     let restore_base = add_restore(code, c, g.base, report)?;
-    let event = add_event(code, c, &g, report, save)?;
+    let rs_content = add_rs_content(code, c)?;
+    let rs_apply = add_rs_apply(code, c)?;
+    let rs_read = add_rs_read(code, c, &g)?;
+    let rs_move = add_rs_move(code, c, &g, report, rs_apply)?;
+    let event = add_event(code, c, &g, report, save, rs_move)?;
     let cancel = add_cancel(code, c, &g, report, save)?;
     let begin = add_begin(code, c, &g, report, save, restore_base, event, cancel)?;
     let clamp = add_clamp(code, c, report)?;
     let (panel_push, cap_t) = add_panel_push(code, c, begin)?;
-    let late = add_panel_late(code, c, report, save_base, restore, save, clamp, cap_t)?;
+    let rs = RsFns {
+        content: rs_content,
+        apply: rs_apply,
+        read: rs_read,
+    };
+    let rs_push = add_rs_push(code, c, &g, report, begin, rs.content, cap_t)?;
+    let rs_reflow = add_rs_reflow(code, c, report, clamp, &rs, cap_t)?;
+    let rs_install = add_rs_install(code, c, report, &rs, rs_push, cap_t)?;
+    let late = add_panel_late(
+        code,
+        c,
+        report,
+        save_base,
+        restore,
+        save,
+        (rs_install, rs_reflow),
+        cap_t,
+    )?;
     let panel = add_panel(code, c, &g, report, late, panel_push, cap_t)?;
     let win_push = add_win_push(code, c, report, begin)?;
     let (head_push, head_t) = add_head_push(code, c, win_push)?;
@@ -800,12 +999,7 @@ fn add_save(
         r.r(c.str_t),
         r.r(c.dyn_t),
     );
-    let (dm, nm, cv, res) = (
-        r.r(c.dk_t),
-        r.r(c.str_t),
-        r.r(c.cssv_t),
-        r.r(c.attr_res_t),
-    );
+    let (dm, nm, cv, res) = (r.r(c.dk_t), r.r(c.str_t), r.r(c.cssv_t), r.r(c.attr_res_t));
     let gd = Guard { exc, v };
     let mut a = Asm::new();
     guard_open(&mut a, &gd);
@@ -1022,6 +1216,856 @@ fn add_restore(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) 
     )
 }
 
+// ---------- row resize (inventory panels) ----------
+//
+// A small handle (HANDLE_PX square, h2d.Interactive with a backgroundColor)
+// sits at a panel's bottom-left corner (absolute child, align left bottom).
+// Its push starts the shared drag capture in resize mode (`g.rs_on`): a move
+// sets the panel's InventoryContent (the scroll area) to `rows` whole grid
+// rows, rows = start + round(mouse dy / ROW_PX), clamped to [MIN_ROWS, as
+// many as fit below the panel on screen]: min = max height = rows * ROW_PX +
+// ROW_PAD (Flow.set_minHeight / set_maxHeight; no CSS sets them on
+// inventory-content). Width is untouched. Enough grid rows are built
+// (Inventory.visibleHeight / baseHeight >= rows, forceUpdate). The three
+// panels (chest, inventory, co-op AllInv) are all bottom-anchored (chest:
+// absolute align bottom; inventory: in the bottom-aligned .windows flow;
+// AllInv: in a bottom-aligned box), so the top would move up: the panel's
+// offsetY grows by the added height, the top stays and the panel grows
+// downward. The rows are saved as `mpWinSize:<key>` at each change, the
+// position (offset) on release as for a move. On install (panel styled) a
+// saved size is applied; the panel's reflow handler (clamp, then the rows
+// kept built: vanilla showInventory resets visibleHeight to 6) replaces the
+// plain clamp.
+
+/// The functions shared by the resize parts.
+struct RsFns {
+    /// `(panel) -> InventoryContent`: the first direct child that is one, or null.
+    content: RefFun,
+    /// `(content, rows, full)`: full: viewport height; always: rows built.
+    apply: RefFun,
+    /// `(key) -> rows` saved for key, 0 if none.
+    read: RefFun,
+}
+
+fn add_rs_content(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
+    let k0 = int_const(code, 0);
+    let mut r = Regs(vec![c.flow_t]);
+    let panel = Reg(0);
+    let (ct, ch, n, i, raw, d, co, b, cls) = (
+        r.r(c.rs.cont_t),
+        r.r(c.arr_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.raw_t),
+        r.r(c.dyn_t),
+        r.r(c.obj_t),
+        r.r(c.bool_t),
+        r.r(c.dyn_t),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Null { dst: ct });
+    a.op(Opcode::Field {
+        dst: ch,
+        obj: panel,
+        field: c.children,
+    });
+    a.jmp(Opcode::JNull { reg: ch, offset: 0 }, "out");
+    a.op(Opcode::Field {
+        dst: n,
+        obj: ch,
+        field: c.arr_len,
+    });
+    a.op(Opcode::Int { dst: i, ptr: k0 });
+    a.op(Opcode::GetGlobal {
+        dst: cls,
+        global: c.rs.cont_cls,
+    });
+    a.loop_head("loop");
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: n,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: ch,
+        field: c.arr_arr,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: i,
+    });
+    a.op(Opcode::UnsafeCast { dst: co, src: d });
+    a.op(Opcode::Incr { dst: i });
+    a.jmp(Opcode::JNull { reg: co, offset: 0 }, "loop");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: c.is_of_type,
+        arg0: co,
+        arg1: cls,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "loop");
+    a.op(Opcode::UnsafeCast { dst: ct, src: co });
+    a.label("out");
+    a.op(Opcode::Ret { ret: ct });
+    push_fn(
+        code,
+        vec![c.flow_t],
+        c.rs.cont_t,
+        r.0,
+        a.finish(),
+        c.dbg_file,
+    )
+}
+
+fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
+    let (k_row, k_pad) = (int_const(code, ROW_PX), int_const(code, ROW_PAD));
+    let mut r = Regs(vec![c.rs.cont_t, c.i32_t, c.bool_t]);
+    let (ct, rows, full) = (Reg(0), Reg(1), Reg(2));
+    let (v, k, px, nb, nr, inv, vh) = (
+        r.r(c.void_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.rs.nint_t),
+        r.r(c.rs.nint_t),
+        r.r(c.rs.inv_t),
+        r.r(c.i32_t),
+    );
+    let mut a = Asm::new();
+    a.jmp(
+        Opcode::JFalse {
+            cond: full,
+            offset: 0,
+        },
+        "grid",
+    );
+    a.op(Opcode::Int { dst: k, ptr: k_row });
+    a.op(Opcode::Mul {
+        dst: px,
+        a: rows,
+        b: k,
+    });
+    a.op(Opcode::Int { dst: k, ptr: k_pad });
+    a.op(Opcode::Add {
+        dst: px,
+        a: px,
+        b: k,
+    });
+    a.op(Opcode::ToDyn { dst: nb, src: px });
+    for fun in [c.rs.set_min_h, c.rs.set_max_h] {
+        a.op(Opcode::Call2 {
+            dst: nr,
+            fun,
+            arg0: ct,
+            arg1: nb,
+        });
+    }
+    a.label("grid");
+    a.op(Opcode::Call1 {
+        dst: inv,
+        fun: c.rs.get_inv,
+        arg0: ct,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: inv,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::SetField {
+        obj: inv,
+        field: c.rs.base_h,
+        src: rows,
+    });
+    a.op(Opcode::Field {
+        dst: vh,
+        obj: inv,
+        field: c.rs.vis_h,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: vh,
+            b: rows,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::SetField {
+        obj: inv,
+        field: c.rs.vis_h,
+        src: rows,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: c.rs.force_update,
+        arg0: inv,
+    });
+    a.label("out");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(
+        code,
+        vec![c.rs.cont_t, c.i32_t, c.bool_t],
+        c.void_t,
+        r.0,
+        a.finish(),
+        c.dbg_file,
+    )
+}
+
+fn add_rs_read(code: &mut Bytecode, c: &Ctx, g: &Globals) -> Result<RefFun> {
+    let k0 = int_const(code, 0);
+    let mut r = Regs(vec![c.str_t]);
+    let key = Reg(0);
+    let (rows, full, d, nd) = (r.r(c.i32_t), r.r(c.str_t), r.r(c.dyn_t), r.r(c.dyn_t));
+    let mut a = Asm::new();
+    a.op(Opcode::Int { dst: rows, ptr: k0 });
+    full_key(&mut a, c, g.size, full, key);
+    a.op(Opcode::Null { dst: nd });
+    a.op(Opcode::Call2 {
+        dst: d,
+        fun: c.get_ud,
+        arg0: full,
+        arg1: nd,
+    });
+    a.jmp(Opcode::JNull { reg: d, offset: 0 }, "out");
+    a.op(Opcode::SafeCast { dst: rows, src: d });
+    a.label("out");
+    a.op(Opcode::Ret { ret: rows });
+    push_fn(code, vec![c.str_t], c.i32_t, r.0, a.finish(), c.dbg_file)
+}
+
+/// `rsMove()`: the capture's move in resize mode (see the section comment).
+fn add_rs_move(
+    code: &mut Bytecode,
+    c: &Ctx,
+    g: &Globals,
+    report: RefFun,
+    apply: RefFun,
+) -> Result<RefFun> {
+    let (k0, k_half, k_row, k_min) = (
+        int_const(code, 0),
+        int_const(code, ROW_PX / 2),
+        int_const(code, ROW_PX),
+        int_const(code, MIN_ROWS),
+    );
+    let mut r = Regs(vec![]);
+    let (v, exc, obj, p, fl, sc, my, m0) = (
+        r.r(c.void_t),
+        r.r(c.dyn_t),
+        r.r(c.obj_t),
+        r.r(c.obj_t),
+        r.r(c.flow_t),
+        r.r(c.scene_t),
+        r.r(c.f64_t),
+        r.r(c.f64_t),
+    );
+    let (d, k, z, rows, cur, lim, ct, b) = (
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.rs.cont_t),
+        r.r(c.bool_t),
+    );
+    let (pr, oy, key, full, dd) = (
+        r.r(c.fprops_t),
+        r.r(c.i32_t),
+        r.r(c.str_t),
+        r.r(c.str_t),
+        r.r(c.dyn_t),
+    );
+    let gd = Guard { exc, v };
+    let mut a = Asm::new();
+    guard_open(&mut a, &gd);
+    a.op(Opcode::GetGlobal {
+        dst: obj,
+        global: g.obj,
+    });
+    parent_flow(&mut a, c, obj, p, fl);
+    a.op(Opcode::GetGlobal {
+        dst: sc,
+        global: g.scene,
+    });
+    a.jmp(Opcode::JNull { reg: sc, offset: 0 }, "out");
+    a.op(Opcode::GetGlobal {
+        dst: ct,
+        global: g.rs_cont,
+    });
+    a.jmp(Opcode::JNull { reg: ct, offset: 0 }, "out");
+    // rows = rows0 + round((mouseY - y0) / ROW_PX), in [MIN_ROWS, max].
+    a.op(Opcode::Call1 {
+        dst: my,
+        fun: c.mouse_y,
+        arg0: sc,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: m0,
+        global: g.rs_my0,
+    });
+    a.op(Opcode::Sub {
+        dst: my,
+        a: my,
+        b: m0,
+    });
+    a.op(Opcode::ToInt { dst: d, src: my });
+    a.op(Opcode::Int { dst: z, ptr: k0 });
+    a.op(Opcode::Int {
+        dst: k,
+        ptr: k_half,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: d,
+            b: z,
+            offset: 0,
+        },
+        "pos",
+    );
+    a.op(Opcode::Sub { dst: d, a: d, b: k });
+    a.jmp(Opcode::JAlways { offset: 0 }, "div");
+    a.label("pos");
+    a.op(Opcode::Add { dst: d, a: d, b: k });
+    a.label("div");
+    a.op(Opcode::Int { dst: k, ptr: k_row });
+    a.op(Opcode::SDiv { dst: d, a: d, b: k });
+    a.op(Opcode::GetGlobal {
+        dst: rows,
+        global: g.rs_rows0,
+    });
+    a.op(Opcode::Add {
+        dst: rows,
+        a: rows,
+        b: d,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: lim,
+        global: g.rs_max,
+    });
+    a.jmp(
+        Opcode::JSLte {
+            a: rows,
+            b: lim,
+            offset: 0,
+        },
+        "c1",
+    );
+    a.op(Opcode::Mov {
+        dst: rows,
+        src: lim,
+    });
+    a.label("c1");
+    a.op(Opcode::Int {
+        dst: lim,
+        ptr: k_min,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: rows,
+            b: lim,
+            offset: 0,
+        },
+        "c2",
+    );
+    a.op(Opcode::Mov {
+        dst: rows,
+        src: lim,
+    });
+    a.label("c2");
+    a.op(Opcode::GetGlobal {
+        dst: cur,
+        global: g.rs_rows,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: rows,
+            b: cur,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.rs_rows,
+        src: rows,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: apply,
+        arg0: ct,
+        arg1: rows,
+        arg2: b,
+    });
+    // Bottom-anchored panel: offsetY += the added height keeps its top.
+    a.op(Opcode::Sub {
+        dst: cur,
+        a: rows,
+        b: cur,
+    });
+    a.op(Opcode::Int { dst: k, ptr: k_row });
+    a.op(Opcode::Mul {
+        dst: cur,
+        a: cur,
+        b: k,
+    });
+    get_props(&mut a, c, pr, fl, obj, "out");
+    a.op(Opcode::Field {
+        dst: oy,
+        obj: pr,
+        field: c.off_y,
+    });
+    a.op(Opcode::Add {
+        dst: oy,
+        a: oy,
+        b: cur,
+    });
+    a.op(Opcode::SetField {
+        obj: pr,
+        field: c.off_y,
+        src: oy,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: key,
+        global: g.key,
+    });
+    full_key(&mut a, c, g.size, full, key);
+    a.op(Opcode::ToDyn { dst: dd, src: rows });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: c.set_ud,
+        arg0: full,
+        arg1: dd,
+    });
+    guard_close(&mut a, &gd, report);
+    push_fn(code, vec![], c.void_t, r.0, a.finish(), c.dbg_file)
+}
+
+/// Handle push `(cap(panel, key), hxd.Event)`: a left push starts the resize.
+#[allow(clippy::too_many_arguments)]
+fn add_rs_push(
+    code: &mut Bytecode,
+    c: &Ctx,
+    g: &Globals,
+    report: RefFun,
+    begin: RefFun,
+    content: RefFun,
+    cap_t: RefType,
+) -> Result<RefFun> {
+    let k0 = int_const(code, 0);
+    let (f0, f_row) = (float_const(code, 0.0), float_const(code, ROW_PX as f64));
+    let mut r = Regs(vec![cap_t, c.ev_t]);
+    let (cx, e) = (Reg(0), Reg(1));
+    let (v, exc, bt, z, panel, key, ct, sc) = (
+        r.r(c.void_t),
+        r.r(c.dyn_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.flow_t),
+        r.r(c.str_t),
+        r.r(c.rs.cont_t),
+        r.r(c.scene_t),
+    );
+    let (fr, h, room, t, rows, mx, si, nobj, b) = (
+        r.r(c.f64_t),
+        r.r(c.f64_t),
+        r.r(c.f64_t),
+        r.r(c.f64_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.obj_t),
+        r.r(c.bool_t),
+    );
+    let gd = Guard { exc, v };
+    let mut a = Asm::new();
+    guard_open(&mut a, &gd);
+    a.op(Opcode::Field {
+        dst: bt,
+        obj: e,
+        field: c.button,
+    });
+    a.op(Opcode::Int { dst: z, ptr: k0 });
+    a.jmp(
+        Opcode::JNotEq {
+            a: bt,
+            b: z,
+            offset: 0,
+        },
+        "out",
+    );
+    for (dst, i) in [(panel, 0), (key, 1)] {
+        a.op(Opcode::EnumField {
+            dst,
+            value: cx,
+            construct: RefEnumConstruct(0),
+            field: RefField(i),
+        });
+    }
+    a.jmp(
+        Opcode::JNull {
+            reg: panel,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call1 {
+        dst: ct,
+        fun: content,
+        arg0: panel,
+    });
+    a.jmp(Opcode::JNull { reg: ct, offset: 0 }, "out");
+    a.op(Opcode::Call1 {
+        dst: sc,
+        fun: c.get_scene,
+        arg0: panel,
+    });
+    a.jmp(Opcode::JNull { reg: sc, offset: 0 }, "out");
+    // Start rows: the viewport's height in whole rows.
+    a.op(Opcode::Float {
+        dst: fr,
+        ptr: f_row,
+    });
+    a.op(Opcode::Field {
+        dst: h,
+        obj: ct,
+        field: c.rs.calc_h,
+    });
+    a.op(Opcode::SDiv {
+        dst: h,
+        a: h,
+        b: fr,
+    });
+    a.op(Opcode::ToInt { dst: rows, src: h });
+    // Max: what fits between the panel's bottom and the screen's (no less than now).
+    a.op(Opcode::Field {
+        dst: si,
+        obj: sc,
+        field: c.sc_h,
+    });
+    a.op(Opcode::ToSFloat { dst: room, src: si });
+    for fl in [c.abs_y, c.rs.calc_h] {
+        a.op(Opcode::Field {
+            dst: t,
+            obj: panel,
+            field: fl,
+        });
+        a.op(Opcode::Sub {
+            dst: room,
+            a: room,
+            b: t,
+        });
+    }
+    a.op(Opcode::Float { dst: t, ptr: f0 });
+    a.jmp(
+        Opcode::JSGte {
+            a: room,
+            b: t,
+            offset: 0,
+        },
+        "room",
+    );
+    a.op(Opcode::Mov { dst: room, src: t });
+    a.label("room");
+    a.op(Opcode::SDiv {
+        dst: room,
+        a: room,
+        b: fr,
+    });
+    a.op(Opcode::ToInt { dst: mx, src: room });
+    a.op(Opcode::Add {
+        dst: mx,
+        a: mx,
+        b: rows,
+    });
+    for (gl, src) in [
+        (g.rs_cont, ct),
+        (g.rs_rows0, rows),
+        (g.rs_rows, rows),
+        (g.rs_max, mx),
+    ] {
+        a.op(Opcode::SetGlobal { global: gl, src });
+    }
+    a.op(Opcode::Call1 {
+        dst: h,
+        fun: c.mouse_y,
+        arg0: sc,
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.rs_my0,
+        src: h,
+    });
+    // Never a double push (that resets the position): the capture starts.
+    a.op(Opcode::Null { dst: nobj });
+    a.op(Opcode::SetGlobal {
+        global: g.last,
+        src: nobj,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: begin,
+        arg0: panel,
+        arg1: nobj,
+        arg2: key,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.rs_on,
+        src: b,
+    });
+    guard_close(&mut a, &gd, report);
+    push_fn(
+        code,
+        vec![cap_t, c.ev_t],
+        c.void_t,
+        r.0,
+        a.finish(),
+        c.dbg_file,
+    )
+}
+
+/// `rsReflow(cap(panel, key))`, the panel's onAfterReflow once styled: the
+/// clamp, then a saved size keeps its rows built.
+fn add_rs_reflow(
+    code: &mut Bytecode,
+    c: &Ctx,
+    report: RefFun,
+    clamp: RefFun,
+    rs: &RsFns,
+    cap_t: RefType,
+) -> Result<RefFun> {
+    let k0 = int_const(code, 0);
+    let mut r = Regs(vec![cap_t]);
+    let cx = Reg(0);
+    let (v, exc, panel, key, rows, z, ct, b) = (
+        r.r(c.void_t),
+        r.r(c.dyn_t),
+        r.r(c.flow_t),
+        r.r(c.str_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.rs.cont_t),
+        r.r(c.bool_t),
+    );
+    let gd = Guard { exc, v };
+    let mut a = Asm::new();
+    guard_open(&mut a, &gd);
+    for (dst, i) in [(panel, 0), (key, 1)] {
+        a.op(Opcode::EnumField {
+            dst,
+            value: cx,
+            construct: RefEnumConstruct(0),
+            field: RefField(i),
+        });
+    }
+    a.jmp(
+        Opcode::JNull {
+            reg: panel,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: clamp,
+        arg0: panel,
+    });
+    a.op(Opcode::Call1 {
+        dst: rows,
+        fun: rs.read,
+        arg0: key,
+    });
+    a.op(Opcode::Int { dst: z, ptr: k0 });
+    a.jmp(
+        Opcode::JSLte {
+            a: rows,
+            b: z,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call1 {
+        dst: ct,
+        fun: rs.content,
+        arg0: panel,
+    });
+    a.jmp(Opcode::JNull { reg: ct, offset: 0 }, "out");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: rs.apply,
+        arg0: ct,
+        arg1: rows,
+        arg2: b,
+    });
+    guard_close(&mut a, &gd, report);
+    push_fn(code, vec![cap_t], c.void_t, r.0, a.finish(), c.dbg_file)
+}
+
+/// `rsInstall(panel, key)`: saved size applied, resize handle added (panels
+/// with an InventoryContent child only).
+fn add_rs_install(
+    code: &mut Bytecode,
+    c: &Ctx,
+    report: RefFun,
+    rs: &RsFns,
+    rs_push: RefFun,
+    cap_t: RefType,
+) -> Result<RefFun> {
+    let (k0, k_argb) = (int_const(code, 0), int_const(code, HANDLE_ARGB));
+    let f_side = float_const(code, HANDLE_PX);
+    let mut r = Regs(vec![c.flow_t, c.str_t]);
+    let (panel, key) = (Reg(0), Reg(1));
+    let (v, exc, ct, rows, z, b, it, w) = (
+        r.r(c.void_t),
+        r.r(c.dyn_t),
+        r.r(c.rs.cont_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.bool_t),
+        r.r(c.inter_t),
+        r.r(c.f64_t),
+    );
+    let (sh, nb, pr, fa, fv, cx, cl) = (
+        r.r(c.rs.shape_t),
+        r.r(c.rs.nint_t),
+        r.r(c.fprops_t),
+        r.r(c.ha_t),
+        r.r(c.va_t),
+        r.r(cap_t),
+        r.r(c.push_t),
+    );
+    let gd = Guard { exc, v };
+    let mut a = Asm::new();
+    guard_open(&mut a, &gd);
+    a.jmp(
+        Opcode::JNull {
+            reg: panel,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call1 {
+        dst: ct,
+        fun: rs.content,
+        arg0: panel,
+    });
+    a.jmp(Opcode::JNull { reg: ct, offset: 0 }, "out");
+    a.op(Opcode::Call1 {
+        dst: rows,
+        fun: rs.read,
+        arg0: key,
+    });
+    a.op(Opcode::Int { dst: z, ptr: k0 });
+    a.jmp(
+        Opcode::JSLte {
+            a: rows,
+            b: z,
+            offset: 0,
+        },
+        "handle",
+    );
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: rs.apply,
+        arg0: ct,
+        arg1: rows,
+        arg2: b,
+    });
+    a.label("handle");
+    a.op(Opcode::New { dst: it });
+    a.op(Opcode::Float {
+        dst: w,
+        ptr: f_side,
+    });
+    a.op(Opcode::Null { dst: sh });
+    a.op(Opcode::CallN {
+        dst: v,
+        fun: c.rs.inter_ctor,
+        args: vec![it, w, w, panel, sh],
+    });
+    a.op(Opcode::Int {
+        dst: z,
+        ptr: k_argb,
+    });
+    a.op(Opcode::ToDyn { dst: nb, src: z });
+    a.op(Opcode::SetField {
+        obj: it,
+        field: c.rs.bg_color,
+        src: nb,
+    });
+    get_props(&mut a, c, pr, panel, it, "out");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetField {
+        obj: pr,
+        field: c.is_abs,
+        src: b,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: fa,
+        global: c.rs.fa_left,
+    });
+    a.op(Opcode::SetField {
+        obj: pr,
+        field: c.h_align,
+        src: fa,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: fv,
+        global: c.rs.fa_bottom,
+    });
+    a.op(Opcode::SetField {
+        obj: pr,
+        field: c.v_align,
+        src: fv,
+    });
+    a.op(Opcode::MakeEnum {
+        dst: cx,
+        construct: RefEnumConstruct(0),
+        args: vec![panel, key],
+    });
+    a.op(Opcode::InstanceClosure {
+        dst: cl,
+        fun: rs_push,
+        obj: cx,
+    });
+    a.op(Opcode::SetField {
+        obj: it,
+        field: c.on_push,
+        src: cl,
+    });
+    guard_close(&mut a, &gd, report);
+    push_fn(
+        code,
+        vec![c.flow_t, c.str_t],
+        c.void_t,
+        r.0,
+        a.finish(),
+        c.dbg_file,
+    )
+}
+
 /// `stop()`: `g.obj = null; if (g.scene != null) g.scene.stopCapture();`
 fn stop_drag(a: &mut Asm, c: &Ctx, g: &Globals, v: Reg, nobj: Reg, sc: Reg, end: &'static str) {
     a.op(Opcode::Null { dst: nobj });
@@ -1220,6 +2264,7 @@ fn add_event(
     g: &Globals,
     report: RefFun,
     save: RefFun,
+    rs_move: RefFun,
 ) -> Result<RefFun> {
     let (k0, k_push, k_move, k_rel, k_relo) = (
         int_const(code, 0),
@@ -1386,6 +2431,18 @@ fn add_event(
         global: g.moved,
         src: b,
     });
+    // A row resize (handle) changes the size, not the position.
+    a.op(Opcode::GetGlobal {
+        dst: b,
+        global: g.rs_on,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "pos");
+    a.op(Opcode::Call0 {
+        dst: v,
+        fun: rs_move,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "out");
+    a.label("pos");
     a.op(Opcode::GetGlobal {
         dst: sc,
         global: g.scene,
@@ -1691,6 +2748,11 @@ fn add_begin(
     });
     a.op(Opcode::SetGlobal {
         global: g.moved,
+        src: mv,
+    });
+    // A move drag (the resize push sets it again after this).
+    a.op(Opcode::SetGlobal {
+        global: g.rs_on,
         src: mv,
     });
     for (gl, src) in [
@@ -2102,7 +3164,7 @@ fn add_panel_late(
     save_base: RefFun,
     restore: RefFun,
     save: RefFun,
-    clamp: RefFun,
+    (rs_install, rs_reflow): (RefFun, RefFun),
     cap_t: RefType,
 ) -> Result<RefFun> {
     let mut r = Regs(vec![cap_t]);
@@ -2169,10 +3231,17 @@ fn add_panel_late(
         arg0: panel,
         arg1: key,
     });
+    // Row resize: handle + saved size; the reflow handler clamps and keeps the rows built.
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: rs_install,
+        arg0: panel,
+        arg1: key,
+    });
     a.op(Opcode::InstanceClosure {
         dst: rc,
-        fun: clamp,
-        obj: panel,
+        fun: rs_reflow,
+        obj: cx,
     });
     a.op(Opcode::SetField {
         obj: panel,
@@ -2695,12 +3764,7 @@ fn add_win_reflow(
     // Title row: pushes on its non-button elements reach the drag. Only for
     // windows that can be dragged (modal): the HUD (GameUI is a ui.Window,
     // modal None) keeps its pushes where they were.
-    let (zf, md, mi, kn) = (
-        r.r(c.f64_t),
-        r.r(c.modal_t),
-        r.r(c.i32_t),
-        r.r(c.i32_t),
-    );
+    let (zf, md, mi, kn) = (r.r(c.f64_t), r.r(c.modal_t), r.r(c.i32_t), r.r(c.i32_t));
     a.op(Opcode::Field {
         dst: md,
         obj: win,
@@ -3504,8 +4568,8 @@ mod tests {
             }
         }
         let api = DragApi {
-            panel: back.functions[n + 11].findex,
-            win_install: back.functions[n + 16].findex,
+            panel: back.functions[n + 18].findex,
+            win_install: back.functions[n + 23].findex,
         };
         assert!(
             matches!(b.ops[end], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == api.win_install)
@@ -3542,7 +4606,7 @@ mod tests {
             check_types(&back, f, 0..f.ops.len());
             traps += traps_ok(f);
         }
-        assert_eq!(traps, 13);
+        assert_eq!(traps, 17);
 
         // Idempotent: a second pass refuses both sites and leaves the image as is.
         let mut again = read(&patched);
@@ -3651,8 +4715,10 @@ mod tests {
         event: RefFun,
         cancel: RefFun,
         begin: RefFun,
-        clamp: RefFun,
         late: RefFun,
+        rs_push: RefFun,
+        rs_reflow: RefFun,
+        rs_install: RefFun,
         head_push: RefFun,
         head: RefFun,
     }
@@ -3667,19 +4733,21 @@ mod tests {
     fn fns(code: &Bytecode, n: usize) -> Fns {
         let f = |k: usize| code.functions[n + k].findex;
         Fns {
-            event: f(5),
-            cancel: f(6),
-            begin: f(7),
-            clamp: f(8),
-            late: f(10),
-            head_push: f(13),
-            head: f(14),
+            event: f(9),
+            cancel: f(10),
+            begin: f(11),
+            late: f(17),
+            rs_push: f(14),
+            rs_reflow: f(15),
+            rs_install: f(16),
+            head_push: f(20),
+            head: f(21),
         }
     }
 
     /// Mouse position comes from maps["in"]["mx"/"my"]; vanilla calls are logged.
     fn sim<'a>(code: &'a Bytecode, n: usize, c: &'a Ctx) -> Sim<'a> {
-        Sim::new(
+        let mut s = Sim::new(
             code,
             n,
             move |k: &mut Core, f: RefFun, a: &[V]| {
@@ -3696,7 +4764,33 @@ mod tests {
                     Some(k.map("in", "now"))
                 } else if f == c.get_props {
                     log(k, "getProperties");
-                    Some(k.map("in", "props"))
+                    // The resize handle has props of its own (made by its constructor).
+                    let own = k.key_get(&a[1], "props");
+                    Some(if own != V::Null {
+                        own
+                    } else {
+                        k.map("in", "props")
+                    })
+                } else if f == c.rs.inter_ctor {
+                    log(k, "handle");
+                    let pr = k.obj(&[]);
+                    k.key_set(&a[0], "props".into(), pr);
+                    Some(V::Null)
+                } else if f == c.rs.get_inv {
+                    Some(k.key_get(&a[0], "inv"))
+                } else if f == c.rs.force_update {
+                    log(k, "forceUpdate");
+                    Some(V::Null)
+                } else if f == c.rs.set_min_h || f == c.rs.set_max_h {
+                    log(
+                        k,
+                        if f == c.rs.set_min_h {
+                            "minHeight"
+                        } else {
+                            "maxHeight"
+                        },
+                    );
+                    Some(a[1].clone())
                 } else if f == c.set_need_reflow {
                     log(k, "needReflow");
                     Some(V::B(true))
@@ -3718,7 +4812,12 @@ mod tests {
                     };
                     Some(k.map("ud", key))
                 } else if f == c.is_of_type {
-                    Some(V::B(k.key_get(&a[0], "inter") == V::B(true)))
+                    let cls = if a[1] == V::S("cont".into()) {
+                        "cont"
+                    } else {
+                        "inter"
+                    };
+                    Some(V::B(k.key_get(&a[0], cls) == V::B(true)))
                 } else if f == c.str_add {
                     let st = |v: &V| match v {
                         V::S(x) => x.clone(),
@@ -3749,7 +4848,16 @@ mod tests {
                 }
             },
             |_: &mut Core, field: usize, _: &[V]| panic!("virtual call #{field}"),
-        )
+        );
+        for (gl, v) in [
+            (c.inter_cls, "inter"),
+            (c.rs.cont_cls, "cont"),
+            (c.rs.fa_left, "L"),
+            (c.rs.fa_bottom, "B"),
+        ] {
+            s.c.globals.insert(gl.0, V::S(v.into()));
+        }
+        s
     }
 
     /// A panel (offset 0,0 at x 100 / y 50) in a flow, a 1920x1080 scene.
@@ -4031,7 +5139,11 @@ mod tests {
         mouse(&mut s, 300.0, 20.0);
         s.c.take("needReflow");
         let kd = s.c.enm(c.ev_push, vec![]);
-        let e = s.c.obj(&[(c.kind, kd), (c.propagate, V::B(false)), (c.button, V::I(0))]);
+        let e = s.c.obj(&[
+            (c.kind, kd),
+            (c.propagate, V::B(false)),
+            (c.button, V::I(0)),
+        ]);
         assert_eq!(s.c.key_get(&cap, "e1"), win);
         s.run(hf, vec![*cap, e.clone()]);
         assert_eq!(s.c.take("needReflow").len(), 1, "own onPush ran");
@@ -4120,7 +5232,7 @@ mod tests {
         assert_eq!(s.c.get(&pr, c.off_y), V::I(-300));
         assert_eq!(
             s.c.get(&obj, c.on_after_reflow),
-            V::Clo(f.clamp, Box::new(obj.clone()))
+            V::Clo(f.rs_reflow, Box::new(cap.clone()))
         );
 
         // Double push: back to the styled spot, saved as such.
@@ -4230,5 +5342,216 @@ mod tests {
         event(&mut s, &c, &f, c.ev_move);
         event(&mut s, &c, &f, c.ev_release);
         assert!(s.c.take("setAttribute").is_empty());
+    }
+
+    /// An inventory panel (scroll area 330 px = 6 rows, grid built for 6)
+    /// whose top is at y 500 and 400 px tall on a 1080 px screen: room for 3
+    /// more rows below it. Returns (panel, props, content, grid).
+    fn rs_panel(s: &mut Sim, c: &Ctx) -> (V, V, V, V) {
+        let (panel, pr) = scene(s, c);
+        let k = &mut s.c;
+        let inv = k.obj(&[(c.rs.vis_h, V::I(6)), (c.rs.base_h, V::I(6))]);
+        let cont = k.obj(&[(c.rs.calc_h, V::F(330.0))]);
+        k.key_set(&cont, "cont".into(), V::B(true));
+        k.key_set(&cont, "inv".into(), inv.clone());
+        let kids = k.arr(c.arr_len, c.arr_arr, vec![V::Null, cont.clone()]);
+        for (fl, v) in [
+            (c.children, kids),
+            (c.abs_y, V::F(500.0)),
+            (c.rs.calc_h, V::F(400.0)),
+        ] {
+            k.set(&panel, fl, v);
+        }
+        (panel, pr, cont, inv)
+    }
+
+    fn rs_height(rows: i32) -> V {
+        V::I(rows * ROW_PX + ROW_PAD)
+    }
+
+    /// Row resize: the handle sits bottom-left; dragging it snaps the scroll
+    /// area to whole rows, clamps to [MIN_ROWS, what fits on screen], builds
+    /// enough grid rows, keeps the top (offsetY += added height: the panels
+    /// are bottom-anchored, so they grow downward) and saves the rows; a
+    /// header drag afterwards moves (not resizes), and its double-click reset
+    /// keeps the size; a new panel gets the saved size back.
+    #[test]
+    fn resize_snaps_clamps_and_persists() {
+        let Some(image) = game() else { return };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (panel, pr, cont, inv) = rs_panel(&mut s, &c);
+        let key = V::S("k".into());
+
+        // Install: no saved size, a handle at the bottom-left corner.
+        s.run(f.rs_install, vec![panel.clone(), key.clone()]);
+        assert!(s.c.take("maxHeight").is_empty(), "no size to restore");
+        let made = s.c.take("handle");
+        assert_eq!(made.len(), 1);
+        let it = made[0][0].clone();
+        assert_eq!(made[0][3], panel, "the handle is the panel's child");
+        assert_eq!(s.c.get(&it, c.rs.bg_color), V::I(HANDLE_ARGB), "visible");
+        let hp = s.c.key_get(&it, "props");
+        assert_eq!(s.c.get(&hp, c.is_abs), V::B(true));
+        assert_eq!(s.c.get(&hp, c.h_align), V::S("L".into()));
+        assert_eq!(s.c.get(&hp, c.v_align), V::S("B".into()));
+        let push = s.c.get(&it, c.on_push);
+        let V::Clo(pf, cap) = push else {
+            panic!("handle onPush: {push:?}")
+        };
+        assert_eq!(pf, f.rs_push);
+
+        // Push the handle at y 600.
+        mouse(&mut s, 20.0, 600.0);
+        let kd = s.c.enm(c.ev_push, vec![]);
+        let e = s.c.obj(&[(c.kind, kd), (c.button, V::I(0))]);
+        s.run(f.rs_push, vec![(*cap).clone(), e]);
+        assert_eq!(
+            s.c.take("startCapture").len(),
+            1,
+            "the drag capture runs it"
+        );
+        s.c.take("getProperties");
+
+        // +80 px: rounds to 2 rows -> 8; the top kept (offsetY +106).
+        mouse(&mut s, 20.0, 680.0);
+        assert_eq!(
+            event(&mut s, &c, &f, c.ev_move),
+            V::B(false),
+            "move consumed"
+        );
+        let mh = s.c.take("maxHeight");
+        assert_eq!(mh.len(), 1);
+        assert_eq!(mh[0][0], cont);
+        assert_eq!(mh[0][1], rs_height(8));
+        assert_eq!(s.c.take("minHeight")[0][1], rs_height(8));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(2 * ROW_PX));
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(0), "width / x unchanged");
+        assert_eq!(s.c.get(&inv, c.rs.vis_h), V::I(8));
+        assert_eq!(s.c.get(&inv, c.rs.base_h), V::I(8));
+        assert_eq!(s.c.take("forceUpdate").len(), 1, "rows built");
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(8));
+        // Within the same row: nothing changes.
+        mouse(&mut s, 25.0, 690.0);
+        s.c.take("setUserData");
+        event(&mut s, &c, &f, c.ev_move);
+        assert!(s.c.take("maxHeight").is_empty() && s.c.take("setUserData").is_empty());
+        // +30 px: 7 rows; built rows stay, offset follows.
+        mouse(&mut s, 20.0, 630.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.take("maxHeight")[0][1], rs_height(7));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(ROW_PX));
+        assert_eq!(s.c.get(&inv, c.rs.vis_h), V::I(8));
+        assert!(s.c.take("forceUpdate").is_empty());
+        // Far down: clamped to 6 + 3 rows (fits on screen).
+        mouse(&mut s, 20.0, 1600.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.take("maxHeight")[0][1], rs_height(9));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(3 * ROW_PX));
+        // Far up: clamped to MIN_ROWS.
+        mouse(&mut s, 20.0, -400.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.take("maxHeight")[0][1], rs_height(MIN_ROWS));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I((MIN_ROWS - 6) * ROW_PX));
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(MIN_ROWS));
+        // Release: the position (offset) saved as for a move.
+        assert_eq!(event(&mut s, &c, &f, c.ev_release), V::B(false));
+        assert_eq!(
+            s.c.map("ud", "mpWinPos:k"),
+            packed(0, (MIN_ROWS - 6) * ROW_PX)
+        );
+
+        // A header drag now moves the panel; the size stays.
+        s.c.put("in", "now", V::F(20.0));
+        mouse(&mut s, 500.0, 300.0);
+        press(&mut s, &f, &panel);
+        mouse(&mut s, 530.0, 300.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
+        assert!(s.c.take("maxHeight").is_empty());
+        event(&mut s, &c, &f, c.ev_release);
+        // Double click on the header: position reset, size kept.
+        s.c.put("in", "now", V::F(30.0));
+        press(&mut s, &f, &panel);
+        event(&mut s, &c, &f, c.ev_release);
+        s.c.put("in", "now", V::F(30.1));
+        s.run(f.begin, vec![panel.clone(), V::Null, key.clone()]);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(0));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(0));
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(MIN_ROWS));
+
+        // Reopened (a new panel): the saved size comes back; its reflow
+        // rebuilds rows that vanilla dropped (showInventory: 6, scroll: fewer).
+        let (p2, _, c2, inv2) = rs_panel(&mut s, &c);
+        s.c.set(&inv2, c.rs.vis_h, V::I(1));
+        s.run(f.rs_install, vec![p2.clone(), key.clone()]);
+        let mh = s.c.take("maxHeight");
+        assert_eq!(
+            (mh[0][0].clone(), mh[0][1].clone()),
+            (c2, rs_height(MIN_ROWS))
+        );
+        assert_eq!(s.c.get(&inv2, c.rs.vis_h), V::I(MIN_ROWS));
+        s.c.set(&inv2, c.rs.vis_h, V::I(1));
+        s.c.take("forceUpdate");
+        let cap2 = s.c.enm(0, vec![p2.clone(), key.clone()]);
+        s.run(f.rs_reflow, vec![cap2.clone()]);
+        assert_eq!(s.c.get(&inv2, c.rs.vis_h), V::I(MIN_ROWS));
+        assert_eq!(s.c.take("forceUpdate").len(), 1);
+        assert!(
+            s.c.take("maxHeight").is_empty(),
+            "reflow never resets the height (no reflow loop)"
+        );
+        s.run(f.rs_reflow, vec![cap2]);
+        assert!(
+            s.c.take("forceUpdate").is_empty(),
+            "rows already built: no rebuild"
+        );
+    }
+
+    /// The chest (CSS offset-y -410, dragged to 30,-300): a resize grows it
+    /// downward from its dragged spot, and the release pins the new offset
+    /// so a style refresh keeps it.
+    #[test]
+    fn chest_resize_keeps_drag_offset() {
+        let Some(image) = game() else { return };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (panel, pr, _, _) = rs_panel(&mut s, &c);
+        let (al_h, al_v) = (s.c.enm(0, vec![]), s.c.enm(2, vec![]));
+        s.c.set(&pr, c.is_abs, V::B(true));
+        s.c.set(&pr, c.h_align, al_h);
+        s.c.set(&pr, c.v_align, al_v);
+        s.c.set(&pr, c.off_y, V::I(-410));
+        let dom = s.c.obj(&[(c.need_style, V::B(false))]);
+        s.c.set(&panel, c.dom, dom);
+        s.c.put("ud", "mpWinPos:k", packed(30, -300));
+        let cap = s.c.enm(0, vec![panel.clone(), V::S("k".into())]);
+        s.run(f.late, vec![cap.clone()]);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-300));
+        let it = s.c.take("handle")[0][0].clone();
+        let V::Clo(_, hcap) = s.c.get(&it, c.on_push) else {
+            panic!("no handle push")
+        };
+        mouse(&mut s, 20.0, 600.0);
+        let kd = s.c.enm(c.ev_push, vec![]);
+        let e = s.c.obj(&[(c.kind, kd), (c.button, V::I(0))]);
+        s.run(f.rs_push, vec![*hcap, e]);
+        mouse(&mut s, 20.0, 653.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-300 + ROW_PX), "grows downward");
+        event(&mut s, &c, &f, c.ev_release);
+        assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(30, -300 + ROW_PX));
+        restyle(&mut s, &c, &pr);
+        assert_eq!(
+            s.c.get(&pr, c.off_y),
+            V::I(-300 + ROW_PX),
+            "pinned over the CSS offset"
+        );
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(7));
     }
 }

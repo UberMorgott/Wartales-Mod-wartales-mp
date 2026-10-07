@@ -274,6 +274,8 @@ impl<'a> Sim<'a> {
                 Opcode::Mul { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) * num(&r[rr(b)])),
                 Opcode::Add { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) + num(&r[rr(b)])),
                 Opcode::Sub { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) - num(&r[rr(b)])),
+                // i32 division truncates toward zero, like the JIT's idiv.
+                Opcode::SDiv { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) / num(&r[rr(b)])),
                 Opcode::And { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) & num(&r[rr(b)])),
                 Opcode::Or { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) | num(&r[rr(b)])),
                 Opcode::Shl { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) << num(&r[rr(b)])),

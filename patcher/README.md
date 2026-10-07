@@ -411,7 +411,16 @@ panel gets it back when it is built. After every reflow (window resize
 included) a moved window / panel is pushed back so 48 px of it stay on screen
 and its top edge stays reachable. The map keeps its vanilla whole-body drag
 (no saving). Windows whose own `init` replaces `interactive.onPush` after the
-base init stay fixed. Every appended function runs under a trap (exceptions
+base init stay fixed. Header-row elements of a window (default cursor, top
+70 px) get their `onPush` wrapped (own handler, then the drag) instead of
+passing events on, so their hover and tooltips stay intact. Inventory panels
+(chest, inventory, co-op AllInv) also get a small resize handle at the
+bottom-left corner: dragging it sets the scroll area to whole 53 px rows
+(min 2, max what fits below the panel on screen; width unchanged); the top
+stays put (the panels are bottom-anchored, so the offset grows with the
+height); the rows are saved as `mpWinSize:<key>` and restored when the panel
+is built, and its reflow keeps that many grid rows built (vanilla resets to 6
+on open). Every appended function runs under a trap (exceptions
 logged as `mp: drag: ...`). The shared functions (`mpDragBegin`,
 `mpDragRestore`, `mpDragClamp`, `mpDragPanel`) are reusable for more panels.
 Each part is skipped (logged) on mismatch.
