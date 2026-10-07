@@ -39,7 +39,7 @@
 //        would follow the pause / settings icons (game-option-icons, created
 //        last by the constructor).
 //      - Toggle: in GameUI's dom (HUD root) an absolute horizontal flow at the
-//        left edge (BOX_ATTRS) gets, per other
+//        left edge, past the HUD docked there (BOX_ATTRS, BOX_MARGIN) gets, per other
 //        connected player j, a panel shaped like the vanilla #inventory one
 //        (`element#inventory` > `.title` (getName: nickname in the player
 //        colour; Close icon) + (styled inline: PANEL_ATTRS / TITLE_ATTRS / ...,
@@ -102,8 +102,15 @@ const BOX_ATTRS: &[(&str, &str)] = &[
     ("content-valign", "bottom"),
     ("position", "absolute"),
     ("align", "left bottom"),
-    ("offset", "10 -70"),
 ];
+/// The box's offset: x = BOX_MARGIN past the right edge of the HUD docked at
+/// the left edge (GameUI root children that are visible flows starting within
+/// LEFT_X of it and narrower than LEFT_W: #gameInfo with the place name and the
+/// craft / units rows, ...), so the panels open beside it; y = BOX_Y.
+const BOX_MARGIN: i32 = 10;
+const BOX_Y: &str = " -70";
+const LEFT_X: f64 = 50.0;
+const LEFT_W: f64 = 600.0;
 const TIP: &str = "Co-op inventories";
 // The panels live on the HUD root, outside game-inventory, so none of the
 // `game-inventory #inventory ...` rules (style.css) reach them: the look of
@@ -442,6 +449,7 @@ pub(crate) struct UiPlan {
     void_t: RefType,
     bool_t: RefType,
     i32_t: RefType,
+    f64_t: RefType,
     dyn_t: RefType,
     dynobj_t: RefType,
     str_t: RefType,
@@ -482,6 +490,8 @@ pub(crate) struct UiPlan {
     parent: RefField,
     children: RefField,
     visible: RefField,
+    obj_x: RefField,
+    flow_calc_w: RefField,
     dom: RefField,
     arr_len: RefField,
     arr_raw: RefField,
@@ -679,6 +689,12 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
     }
     let children = typed(code, obj_t, "children", arr_t)?;
     let visible = typed(code, obj_t, "visible", bool_t)?;
+    let f64_t = field(code, obj_t, "x")?.1;
+    if !matches!(code.types[f64_t.0], Type::F64) {
+        bail!("h2d.Object.x is not an f64");
+    }
+    let obj_x = field(code, obj_t, "x")?.0;
+    let flow_calc_w = typed(code, flow_t, "calculatedWidth", f64_t)?;
     let (dom, dk_t) = field(code, obj_t, "dom")?;
 
     let game_t = obj_type(code, "Game")?;
@@ -987,6 +1003,9 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
         parent,
         children,
         visible,
+        obj_x,
+        flow_calc_w,
+        f64_t,
         dom,
         arr_len,
         arr_raw,
@@ -1203,6 +1222,23 @@ fn emit_create(
     arg: Option<RefGlobal>,
     attrs: &[(&str, &'static str)],
 ) {
+    emit_create_dyn(a, code, p, r, dst, parent, comp, arg, attrs, None)
+}
+
+/// emit_create with one more attribute whose String value is in a register.
+#[allow(clippy::too_many_arguments)]
+fn emit_create_dyn(
+    a: &mut Asm,
+    code: &mut Bytecode,
+    p: &UiPlan,
+    r: &CRegs,
+    dst: Reg,
+    parent: Reg,
+    comp: &'static str,
+    arg: Option<RefGlobal>,
+    attrs: &[(&str, &'static str)],
+    dyn_attr: Option<(&str, Reg)>,
+) {
     let b = &p.blk;
     let comp_g = str_global(code, p.str_t, comp);
     a.op(Opcode::GetGlobal {
@@ -1261,7 +1297,7 @@ fn emit_create(
         arg0: r.wrapped,
         arg1: r.rb,
     });
-    if attrs.is_empty() {
+    if attrs.is_empty() && dyn_attr.is_none() {
         a.op(Opcode::Null { dst: r.attrs });
     } else {
         a.op(Opcode::New { dst: r.attrs });
@@ -1276,6 +1312,14 @@ fn emit_create(
                 obj: r.attrs,
                 field: ks,
                 src: r.sv,
+            });
+        }
+        if let Some((k, src)) = dyn_attr {
+            let ks = string_ref(code, k);
+            a.op(Opcode::DynSet {
+                obj: r.attrs,
+                field: ks,
+                src,
             });
         }
     }
@@ -2528,6 +2572,28 @@ fn add_toggle(
         r.r(p.i32_t),
         r.r(p.inv_t),
     );
+    let (best, uo, ka, kn, kraw, ki, kd, ko, kb, kf) = (
+        r.r(p.i32_t),
+        r.r(p.obj_t),
+        r.r(p.arr_t),
+        r.r(p.i32_t),
+        r.r(p.raw_t),
+        r.r(p.i32_t),
+        r.r(p.dyn_t),
+        r.r(p.obj_t),
+        r.r(p.bool_t),
+        r.r(p.flow_t),
+    );
+    let (kx, lim, kw, cur, kc, kdy, koff, ky) = (
+        r.r(p.f64_t),
+        r.r(p.f64_t),
+        r.r(p.f64_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.dyn_t),
+        r.r(p.str_t),
+        r.r(p.str_t),
+    );
     let mut a = Asm::new();
     open_trap(&mut a, exc);
     a.op(Opcode::Field {
@@ -2612,7 +2678,162 @@ fn add_toggle(
         },
         "out",
     );
-    emit_create(&mut a, code, p, &c, bp, dom, "flow", None, BOX_ATTRS);
+    // Left-docked HUD: the box starts past its right edge.
+    a.op(Opcode::Int {
+        dst: best,
+        ptr: int_const(code, BOX_MARGIN),
+    });
+    a.op(Opcode::Field {
+        dst: uo,
+        obj: dom,
+        field: p.blk.props_obj,
+    });
+    a.jmp(Opcode::JNull { reg: uo, offset: 0 }, "placed");
+    a.op(Opcode::Field {
+        dst: ka,
+        obj: uo,
+        field: p.children,
+    });
+    a.jmp(Opcode::JNull { reg: ka, offset: 0 }, "placed");
+    a.op(Opcode::Field {
+        dst: kn,
+        obj: ka,
+        field: p.arr_len,
+    });
+    a.op(Opcode::Field {
+        dst: kraw,
+        obj: ka,
+        field: p.arr_raw,
+    });
+    a.op(Opcode::Int {
+        dst: ki,
+        ptr: int_const(code, 0),
+    });
+    a.loop_head("kl");
+    a.jmp(
+        Opcode::JSGte {
+            a: ki,
+            b: kn,
+            offset: 0,
+        },
+        "placed",
+    );
+    a.op(Opcode::GetArray {
+        dst: kd,
+        array: kraw,
+        index: ki,
+    });
+    a.op(Opcode::Incr { dst: ki });
+    a.op(Opcode::UnsafeCast { dst: ko, src: kd });
+    a.jmp(Opcode::JNull { reg: ko, offset: 0 }, "kl");
+    a.op(Opcode::Field {
+        dst: kb,
+        obj: ko,
+        field: p.visible,
+    });
+    a.jmp(
+        Opcode::JFalse {
+            cond: kb,
+            offset: 0,
+        },
+        "kl",
+    );
+    a.op(Opcode::SafeCast { dst: kf, src: ko });
+    a.jmp(Opcode::JNull { reg: kf, offset: 0 }, "kl");
+    a.op(Opcode::Field {
+        dst: kx,
+        obj: ko,
+        field: p.obj_x,
+    });
+    a.op(Opcode::Float {
+        dst: lim,
+        ptr: float_const(code, LEFT_X),
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: kx,
+            b: lim,
+            offset: 0,
+        },
+        "kl",
+    );
+    a.op(Opcode::Field {
+        dst: kw,
+        obj: kf,
+        field: p.flow_calc_w,
+    });
+    a.op(Opcode::Float {
+        dst: lim,
+        ptr: float_const(code, LEFT_W),
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: kw,
+            b: lim,
+            offset: 0,
+        },
+        "kl",
+    );
+    a.op(Opcode::Add {
+        dst: kx,
+        a: kx,
+        b: kw,
+    });
+    a.op(Opcode::ToInt { dst: cur, src: kx });
+    a.op(Opcode::Int {
+        dst: kc,
+        ptr: int_const(code, BOX_MARGIN),
+    });
+    a.op(Opcode::Add {
+        dst: cur,
+        a: cur,
+        b: kc,
+    });
+    a.jmp(
+        Opcode::JSLte {
+            a: cur,
+            b: best,
+            offset: 0,
+        },
+        "kl",
+    );
+    a.op(Opcode::Mov {
+        dst: best,
+        src: cur,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "kl");
+    a.label("placed");
+    a.op(Opcode::ToDyn {
+        dst: kdy,
+        src: best,
+    });
+    a.op(Opcode::Call1 {
+        dst: koff,
+        fun: p.std_string,
+        arg0: kdy,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: ky,
+        global: str_global(code, p.str_t, BOX_Y),
+    });
+    a.op(Opcode::Call2 {
+        dst: koff,
+        fun: p.str_add,
+        arg0: koff,
+        arg1: ky,
+    });
+    emit_create_dyn(
+        &mut a,
+        code,
+        p,
+        &c,
+        bp,
+        dom,
+        "flow",
+        None,
+        BOX_ATTRS,
+        Some(("offset", koff)),
+    );
     a.op(Opcode::Field {
         dst: bo,
         obj: bp,
@@ -3855,6 +4076,7 @@ mod tests {
         Null,
         B(bool),
         I(i32),
+        F(f64),
         O(usize),
         En(usize, Vec<V>),
         Clo(RefFun, Box<V>),
@@ -3867,6 +4089,10 @@ mod tests {
     const ITEM: usize = usize::MAX - 2;
     const COUNT: usize = usize::MAX - 3;
     const LOCKED: usize = usize::MAX - 4;
+    /// createNew's attrs object, on the created object.
+    const ATTRS: usize = usize::MAX - 5;
+    /// DynSet fields: DYN + the field name's string index.
+    const DYN: usize = 1 << 40;
 
     struct Sim<'a> {
         code: &'a Bytecode,
@@ -3959,7 +4185,7 @@ mod tests {
                 V::B(true)
             } else if f == p.blk.create {
                 // createNew(comp, parentProps, args, attrs): a child object of the parent's
-                let o = self.obj(&[(TAG, a[0].clone())]);
+                let o = self.obj(&[(TAG, a[0].clone()), (ATTRS, a[3].clone())]);
                 let props = self.obj(&[(p.blk.props_obj.0, o.clone())]);
                 if a[1] != V::Null {
                     let po = self.get(&a[1], p.blk.props_obj.0);
@@ -4068,8 +4294,17 @@ mod tests {
                     Opcode::Label
                     | Opcode::Trap { .. }
                     | Opcode::EndTrap { .. }
-                    | Opcode::SetArray { .. }
-                    | Opcode::DynSet { .. } => {}
+                    | Opcode::SetArray { .. } => {}
+                    // kept under DYN + the field name's string index
+                    Opcode::DynSet { obj, field, src } => {
+                        let o = r[rr(obj)].clone();
+                        self.set(&o, DYN + field.0, r[rr(src)].clone());
+                    }
+                    Opcode::Float { dst, ptr } => r[rr(dst)] = V::F(code.floats[ptr.0]),
+                    Opcode::ToInt { dst, src } => {
+                        let V::F(x) = r[rr(src)] else { panic!("ToInt") };
+                        r[rr(dst)] = V::I(x as i32)
+                    }
                     Opcode::Type { dst, .. } => r[rr(dst)] = V::Null,
                     Opcode::NullCheck { reg } => assert_ne!(r[rr(reg)], V::Null, "null check"),
                     Opcode::Bool { dst, value } => r[rr(dst)] = V::B(value.0),
@@ -4100,7 +4335,12 @@ mod tests {
                     }
                     Opcode::Incr { dst } => r[rr(dst)] = V::I(num(&r[rr(dst)]) + 1),
                     Opcode::Sub { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) - num(&r[rr(b)])),
-                    Opcode::Add { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) + num(&r[rr(b)])),
+                    Opcode::Add { dst, a, b } => {
+                        r[rr(dst)] = match (&r[rr(a)], &r[rr(b)]) {
+                            (V::F(x), V::F(y)) => V::F(x + y),
+                            (x, y) => V::I(num(x) + num(y)),
+                        }
+                    }
                     Opcode::EnumIndex { dst, value } => {
                         let V::En(k, _) = &r[rr(value)] else {
                             panic!("not an enum")
@@ -4161,7 +4401,11 @@ mod tests {
                     Opcode::JSGte { a, b, offset }
                     | Opcode::JSGt { a, b, offset }
                     | Opcode::JSLte { a, b, offset } => {
-                        let (x, y) = (num(&r[rr(a)]), num(&r[rr(b)]));
+                        let fl = |v: &V| match v {
+                            V::F(x) => *x,
+                            o => num(o) as f64,
+                        };
+                        let (x, y) = (fl(&r[rr(a)]), fl(&r[rr(b)]));
                         let t = match op {
                             Opcode::JSGte { .. } => x >= y,
                             Opcode::JSGt { .. } => x > y,
@@ -4639,8 +4883,33 @@ mod tests {
 
         // co-op: panels for B and D (C is offline, A is me)
         sim.multi = true;
+        // HUD at the left edge: #gameInfo (x 0, 270 wide) and a hidden one;
+        // a full-width layer and a flow further right do not count.
+        let hud = |sim: &mut Sim, x: i32, w: f64, vis: bool| {
+            let o = sim.obj(&[
+                (u.obj_x.0, V::F(x as f64)),
+                (u.flow_calc_w.0, V::F(w)),
+                (u.visible.0, V::B(vis)),
+            ]);
+            o
+        };
+        let left = vec![
+            hud(&mut sim, 0, 270.0, true),
+            hud(&mut sim, 0, 400.0, false),
+            hud(&mut sim, 0, 1920.0, true),
+            hud(&mut sim, 800, 200.0, true),
+        ];
+        sim.set_children(&ui_o, left.clone());
         sim.run(toggle, vec![bar.clone()]);
         let bx = sim.global(gbox);
+        let k_off = (0..code.strings.len())
+            .find(|&i| super::s(&code, RefString(i)) == "offset")
+            .expect("offset string");
+        let attrs = sim.get(&bx, ATTRS);
+        assert_eq!(sim.get(&attrs, DYN + k_off), V::S("280 -70".into()));
+        let mut kids = sim.children(&ui_o);
+        assert_eq!(kids.split_off(4), [bx.clone()]);
+        sim.set_children(&ui_o, vec![bx.clone()]);
         // on the HUD root (left edge), not inside GameInventory
         assert_eq!(sim.children(&ui_o), [bx.clone()]);
         assert!(sim.children(&gi_o).is_empty());
