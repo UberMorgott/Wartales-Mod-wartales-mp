@@ -488,8 +488,16 @@ struct CellPlan {
     get_pos: RefFun,
     set_outline: RefFun,
     // tint: each pass holding the prefab's (shared) ColorSet gets its own
-    // new ColorSet(color) instead
+    // new ColorSet(color) instead. getMaterials is virtual: the square is a
+    // Mesh, whose override adds its own material; the base Object one only
+    // collects the children's (none here).
+    #[allow(dead_code)] // validated in plan; the tests assert it is never called directly
     get_mats: RefFun,
+    get_mats_pi: RefField,
+    // shim.log: `mp: ping cell <key> color=<hex> passes=<n>`
+    println: RefFun,
+    std_string: RefFun,
+    hex: RefFun,
     raw_arr_t: RefType,
     a_len: RefField,
     a_arr: RefField,
@@ -611,13 +619,31 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
     want(remove, "Object.remove", &[obj_t], void_)?;
     let set_visible = proto(code, obj_t, "set_visible")?;
     want(set_visible, "Object.set_visible", &[obj_t, bool_], bool_)?;
-    let (get_mats, _) = vproto(code, obj_t, "getMaterials")?;
+    let (get_mats, mats_pi) = vproto(code, obj_t, "getMaterials")?;
     want(
         get_mats,
         "Object.getMaterials",
         &[obj_t, arr_t, ref_bool],
         arr_t,
     )?;
+    // The square (orangeSquare.prefab) is a Mesh: only the virtual call reaches
+    // Mesh.getMaterials, which adds the mesh's own material before the children.
+    let mesh_t = obj_type(code, "h3d.scene.Mesh")?;
+    let (mesh_mats, mesh_pi) = vproto(code, mesh_t, "getMaterials")?;
+    if mats_pi < 0 || mesh_pi != mats_pi || mesh_mats == get_mats {
+        bail!("Mesh.getMaterials is not a virtual override of Object.getMaterials");
+    }
+    let (println, std_string) = (
+        crate::diag::static_fn(code, "$Sys", "println")?.findex,
+        crate::diag::static_fn(code, "$Std", "string")?.findex,
+    );
+    want(println, "Sys.println", &[dyn_t], void_)?;
+    want(std_string, "Std.string", &[dyn_t], str_t)?;
+    let hex = crate::diag::static_fn(code, "$StringTools", "hex")?.findex;
+    let (ha, hr) = sig(code, hex)?;
+    if ha.len() != 2 || ha[0] != i32_ || hr != str_t {
+        bail!("unexpected StringTools.hex signature");
+    }
     let get_shader = proto(code, m_pass.1, "getShader")?;
     let (ga, gr) = sig(code, get_shader)?;
     if ga.len() != 2 || ga[0] != m_pass.1 || gr != shader_t {
@@ -878,6 +904,10 @@ fn cell_plan(code: &Bytecode) -> Result<CellPlan> {
         get_pos,
         set_outline,
         get_mats,
+        get_mats_pi: RefField(mats_pi as usize),
+        println,
+        std_string,
+        hex,
         raw_arr_t,
         a_len,
         a_arr,
@@ -1168,6 +1198,12 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         float_const(code, DURATION),
     );
     let (i0, i1) = (int_const(code, 0), int_const(code, 1));
+    let (s_tag, s_col, s_pas) = (
+        str_global(code, p.str_t, "mp: ping cell "),
+        str_global(code, p.str_t, " color="),
+        str_global(code, p.str_t, " passes="),
+    );
+    let hex_digits_t = sig(code, p.hex)?.0[1];
     let mut r = Regs(vec![p.ctrl_t, p.f64_, p.f64_, p.player_t]);
     let (ctrl, x, y, player) = (Reg(0), Reg(1), Reg(2), Reg(3));
     let res = r.r(p.bool_);
@@ -1242,6 +1278,13 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         r.r(p.wait_cb_t),
         r.r(p.until_cb_t),
         r.r(p.void_),
+    );
+    let (npass, lg, ls, ld, hd) = (
+        r.r(p.i32_),
+        r.r(p.str_t),
+        r.r(p.str_t),
+        r.r(p.dyn_t),
+        r.r(hex_digits_t),
     );
     let mut a = Asm::new();
     a.op(Opcode::Bool {
@@ -1563,19 +1606,23 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
     a.jmp(Opcode::JNull { reg: ob, offset: 0 }, "untrap");
     // tint: every pass of the square's materials that holds a ColorSet (the
     // prefab's, one instance shared by all squares) gets its own
-    // new ColorSet(color) in its place
+    // new ColorSet(color) in its place. ob.getMaterials(null, true) by its
+    // virtual slot, as Battle.addPrefab calls it: the square is a Mesh, and
+    // only Mesh.getMaterials returns the mesh's own material.
+    a.op(Opcode::Int {
+        dst: npass,
+        ptr: i0,
+    });
     a.op(Opcode::Null { dst: nul_arr });
     a.op(Opcode::Bool {
         dst: tb,
         value: ValBool(true),
     });
     a.op(Opcode::Ref { dst: rtb, src: tb });
-    a.op(Opcode::Call3 {
+    a.op(Opcode::CallMethod {
         dst: mats,
-        fun: p.get_mats,
-        arg0: ob,
-        arg1: nul_arr,
-        arg2: rtb,
+        field: p.get_mats_pi,
+        args: vec![ob, nul_arr, rtb],
     });
     a.jmp(
         Opcode::JNull {
@@ -1657,6 +1704,7 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
         arg0: pass,
         arg1: cset,
     });
+    a.op(Opcode::Incr { dst: npass });
     a.label("next");
     a.op(Opcode::Field {
         dst: pass,
@@ -1665,6 +1713,53 @@ fn add_cell(code: &mut Bytecode, p: &CellPlan, blink: RefFun, sound: RefFun) -> 
     });
     a.jmp(Opcode::JAlways { offset: 0 }, "pass");
     a.label("tinted");
+    // println("mp: ping cell " + key + " color=" + hex(color) + " passes=" + npass)
+    let cat = |a: &mut Asm, x: Reg, y: Reg| {
+        a.op(Opcode::Call2 {
+            dst: lg,
+            fun: p.add_str,
+            arg0: x,
+            arg1: y,
+        })
+    };
+    a.op(Opcode::GetGlobal {
+        dst: lg,
+        global: s_tag,
+    });
+    cat(&mut a, lg, key);
+    a.op(Opcode::GetGlobal {
+        dst: ls,
+        global: s_col,
+    });
+    cat(&mut a, lg, ls);
+    a.op(Opcode::Null { dst: hd });
+    a.op(Opcode::Call2 {
+        dst: ls,
+        fun: p.hex,
+        arg0: ci,
+        arg1: hd,
+    });
+    cat(&mut a, lg, ls);
+    a.op(Opcode::GetGlobal {
+        dst: ls,
+        global: s_pas,
+    });
+    cat(&mut a, lg, ls);
+    a.op(Opcode::ToDyn {
+        dst: ld,
+        src: npass,
+    });
+    a.op(Opcode::Call1 {
+        dst: ls,
+        fun: p.std_string,
+        arg0: ld,
+    });
+    cat(&mut a, lg, ls);
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: lg,
+    });
     // blink state { o, u, c }; removed after DURATION, blinking until then
     a.op(Opcode::New { dst: stv });
     a.op(Opcode::DynSet {
@@ -1911,6 +2006,13 @@ mod tests {
         assert_eq!(calls(cell, cp.cset_ctor), 1);
         assert_eq!(calls(cell, cp.add_shader), 1);
         assert_eq!(calls(cell, sound.findex), 1);
+        // the square's materials by the virtual getMaterials (Mesh's), never the
+        // base Object one directly
+        assert_eq!(calls(cell, cp.get_mats), 0);
+        assert!(cell.ops.iter().any(
+            |o| matches!(o, Opcode::CallMethod { field, args, .. } if *field == cp.get_mats_pi && args.len() == 3)
+        ));
+        assert_eq!(calls(cell, cp.println), 1);
         assert_eq!(calls(blink, cp.set_outline), 3);
         assert_eq!(calls(sound, cp.sfx), 1);
         assert!(cell
@@ -1980,20 +2082,33 @@ mod tests {
                     } else if f == p.get_loader || f == p.load_cache {
                         c.obj(&[])
                     } else if f == p.add_socle {
-                        // material: overlay pass (shared ColorSet) -> second pass (none)
+                        // orangeSquare.prefab: one Mesh, no scene children; its
+                        // own material: overlay pass (shared ColorSet) -> second
+                        // pass (none)
                         let shared = c.map("t", "shared");
                         let p2 = c.obj(&[]);
                         let p1 = c.obj(&[(p.p_next, p2.clone())]);
                         c.key_set(&p1, "cs".into(), shared);
                         let m = c.obj(&[(p.m_pass.0, p1.clone())]);
-                        let mats = c.arr(p.a_len, p.a_arr, vec![m]);
                         let o = c.obj(&[]);
-                        c.put("t", "mats", mats);
+                        c.key_set(&o, "mesh_mat".into(), m);
                         c.put("t", "p1", p1);
                         c.put("t", "p2", p2);
                         o
                     } else if f == p.get_mats {
-                        c.map("t", "mats")
+                        // Object.getMaterials: the children's materials only
+                        name("Object.getMaterials", a, c);
+                        c.arr(p.a_len, p.a_arr, vec![])
+                    } else if f == p.hex {
+                        let V::I(x) = a[0] else { panic!("hex {a:?}") };
+                        assert_eq!(a[1], V::Null, "hex digits");
+                        V::S(format!("{x:X}"))
+                    } else if f == p.std_string {
+                        let V::I(x) = a[0] else { panic!("Std.string {a:?}") };
+                        V::S(x.to_string())
+                    } else if f == p.println {
+                        name("println", a, c);
+                        V::Null
                     } else if f == p.get_shader {
                         c.key_get(&a[0], "cs")
                     } else if f == p.remove_shaders {
@@ -2014,7 +2129,15 @@ mod tests {
                         return None;
                     })
                 },
-                |_, _, _| panic!("no virtual call expected"),
+                move |c, field, a| {
+                    // Mesh.getMaterials(null, true): its own material, then the
+                    // (empty) children's
+                    assert_eq!(field, p.get_mats_pi.0, "virtual call");
+                    assert_eq!(a.len(), 3);
+                    assert_eq!((&a[1], &a[2]), (&V::Null, &V::B(true)));
+                    let m = c.key_get(&a[0], "mesh_mat");
+                    c.arr(p.a_len, p.a_arr, vec![m])
+                },
             );
             let shared = sim.c.obj(&[]);
             sim.c.put("t", "shared", shared.clone());
@@ -2043,6 +2166,14 @@ mod tests {
             assert_eq!(sim.c.take("addShader"), vec![vec![p1.clone(), own.clone()]]);
             assert_eq!(sim.c.key_get(&p1, "cs"), own);
             assert_eq!(sim.c.key_get(&p2, "cs"), V::Null);
+            // the base Object.getMaterials (children only) is never called
+            assert!(sim.c.take("Object.getMaterials").is_empty());
+            assert_eq!(
+                sim.c.take("println"),
+                vec![vec![V::S(format!(
+                    "mp: ping cell PlayerColor{pinger} color={want:X} passes=1"
+                ))]]
+            );
             // the shared prefab instance is never written
             assert!(sim.c.heap[match shared {
                 V::O(i) => i,
