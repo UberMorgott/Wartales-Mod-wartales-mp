@@ -122,7 +122,9 @@ func (l *lobby) info() map[string]any {
 		}
 		users = append(users, map[string]any{"id": u.ID, "name": u.Name, "data": data})
 	}
-	data := l.data
+	// A copy: the reply is marshalled after the store lock is released, while
+	// the owner may be setting data on the live map.
+	data := maps.Clone(l.data)
 	if data == nil {
 		data = map[string]json.RawMessage{}
 	}
@@ -498,14 +500,15 @@ func (s *Server) lobbySetData(a lobbyArgs, p Peer) error {
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
-	if l.owner != l.idOf(p) {
-		return wireErrf("Cannot set data if not owner")
-	}
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(a.Data, &data); err != nil {
 		return wireErrf("Invalid data")
 	}
 	s.lobbies.mu.Lock()
+	if l.owner != l.idOf(p) {
+		s.lobbies.mu.Unlock()
+		return wireErrf("Cannot set data if not owner")
+	}
 	if l.data == nil {
 		l.data = map[string]json.RawMessage{}
 	}
@@ -617,14 +620,15 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
-	if l.owner != l.idOf(p) {
-		return wireErrf("Cannot transfer if not owner")
-	}
 	// The new owner comes from the client, so it is only ever accepted when it
 	// names a member of this lobby: member ids are rendered by us (idOf) and
 	// echoing back an arbitrary id would put one the lobby's transport does
 	// not expect into every LobbyInfo we serve.
 	s.lobbies.mu.Lock()
+	if l.owner != l.idOf(p) {
+		s.lobbies.mu.Unlock()
+		return wireErrf("Cannot transfer if not owner")
+	}
 	known := false
 	for _, u := range l.users {
 		if u.ID == a.UID {
