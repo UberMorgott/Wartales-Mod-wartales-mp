@@ -3633,7 +3633,7 @@ mod tests {
             check_types(&back, f, 0..f.ops.len());
             traps += traps_ok(f);
         }
-        assert_eq!(traps, 10 + 8); // window_drag's 10 (cancel added) + ours
+        assert_eq!(traps, 13 + 8); // window_drag's 13 + ours
 
         // Idempotent: every part refuses, the image stays as is.
         let mut again = read(&patched);

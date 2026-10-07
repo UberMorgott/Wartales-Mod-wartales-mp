@@ -258,6 +258,9 @@ impl<'a> Sim<'a> {
                 Opcode::Or { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) | num(&r[rr(b)])),
                 Opcode::Shl { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) << num(&r[rr(b)])),
                 Opcode::SShr { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) >> num(&r[rr(b)])),
+                Opcode::UShr { dst, a, b } => {
+                    r[rr(dst)] = V::I(((num(&r[rr(a)]) as u32) >> num(&r[rr(b)])) as i32)
+                }
                 Opcode::InstanceClosure { dst, fun, obj } => {
                     r[rr(dst)] = V::Clo(*fun, Box::new(r[rr(obj)].clone()))
                 }

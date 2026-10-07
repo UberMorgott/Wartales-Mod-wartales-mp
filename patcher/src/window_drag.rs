@@ -31,8 +31,8 @@
 // Shared appended functions (reusable through `api()`, e.g. for more
 // inventory panels keyed "AllInv#<slot>"):
 //   mpDragBegin(obj, follow, key)   on push: a second push on the same object
-//       within DOUBLE_S resets it (offset 0 on obj and follow, saved key
-//       removed); otherwise starts a scene capture (with an onCancel: a capture
+//       within DOUBLE_S resets it (offset 0 on obj and follow, then the
+//       `mpWinBase:<key>` offsets if any; saved); otherwise starts a scene capture (with an onCancel: a capture
 //       taken over / stopped by other code drops the drag and saves). Moves set
 //       obj's (and follow's) offsets in its parent flow to mouse - start, the
 //       mouse clamped to the scene, and shift x/y by the change at once: no
@@ -46,15 +46,22 @@
 //       title row (top HEADER_PX of the window) get propagateEvents, so a push
 //       on the title reaches the window's drag; buttons (cursor: button) stay.
 //   mpDragRestore(obj, follow, key) applies the saved offset, if any.
-//   mpDragClamp(obj)  for an onAfterReflow: a visible, non-absolute `obj`
+//   Absolute children count as placed by their flow (moved, clamped) on an
+//       axis with an align: Flow.hx:1779-1806 adds the offsets there (the chest
+//       panel is `position: absolute; align: bottom left; offset-y: -410`).
+//   mpDragClamp(obj)  for an onAfterReflow: a visible, flow-placed `obj`
 //       with a non-zero offset in its parent flow is pushed back so at least
 //       KEEP_PX of it stays inside the scene horizontally and its top edge
 //       stays within [0, height - KEEP_PX] (header reachable). Position: parent
 //       absX/absY (local x/y before its first sync) + obj.x/y; width: the
 //       flow's calculatedWidth for it. Covers restore at a smaller resolution
 //       and a window resize.
-//   mpDragPanel(panel, key)  restores the panel, sets `panel.onAfterReflow =
-//       mpDragClamp(panel)`, then puts an interactive on its first child with
+//   mpDragPanel(panel, key)  sets `panel.onAfterReflow = panelLate(panel, key)`:
+//       once the panel's dom has no style refresh pending (domkit styles a new
+//       element on the next sync; that first pass writes the CSS offsets), its
+//       offsets are stored as `mpWinBase:<key>` (the double-push reset target;
+//       removed at 0,0), the saved offset is restored and onAfterReflow becomes
+//       `mpDragClamp(panel)`. It then puts an interactive on its first child with
 //       dom class "title" (the header; skipped when that child already has
 //       one) whose push starts `mpDragBegin(panel, null, key)`. Header buttons
 //       sit above that interactive and keep their clicks. The caller must own
@@ -79,6 +86,7 @@ const KEEP_PX: f64 = 48.0;
 const DOUBLE_S: f64 = 0.35;
 const LOG_CAP: i32 = 20;
 pub(crate) const PREFIX: &str = "mpWinPos:";
+const BASE_PREFIX: &str = "mpWinBase:";
 pub(crate) const KEY_CHEST: &str = "GameInventory#chest";
 pub(crate) const KEY_INV: &str = "GameInventory#inv";
 const HEADER_CLASS: &str = "title";
@@ -88,10 +96,11 @@ const N_RESTORE: &str = "mpDragRestore";
 const N_CLAMP: &str = "mpDragClamp";
 const N_PANEL: &str = "mpDragPanel";
 const N_WIN_INSTALL: &str = "mpWinInstall";
-/// Functions appended by `api()` (report, save, restore, event, cancel, begin,
-/// clamp, panel push, panel, head, win reflow, win push, win install).
+/// Functions appended by `api()` (report, save, restore, save base, restore
+/// base, event, cancel, begin, clamp, panel push, panel late, panel, head, win
+/// reflow, win push, win install).
 #[cfg(test)]
-pub(crate) const API_FNS: usize = 13;
+pub(crate) const API_FNS: usize = 16;
 
 /// The shared drag functions (findexes).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,6 +143,8 @@ struct Ctx {
     modal_t: RefType,
     inter_t: RefType,
     cursor_t: RefType,
+    ha_t: RefType,
+    va_t: RefType,
     // fields
     parent: RefField,
     children: RefField,
@@ -151,6 +162,9 @@ struct Ctx {
     off_x: RefField,
     off_y: RefField,
     is_abs: RefField,
+    h_align: RefField,
+    v_align: RefField,
+    need_style: RefField,
     p_calc_w: RefField,
     sc_w: RefField,
     sc_h: RefField,
@@ -284,6 +298,10 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
     let off_x = typed(code, fprops_t, "offsetX", i32_t)?;
     let off_y = typed(code, fprops_t, "offsetY", i32_t)?;
     let is_abs = typed(code, fprops_t, "isAbsolute", bool_t)?;
+    // Absolute children with an align are still placed by the flow, offsets included (Flow.hx:1779-1806).
+    let (h_align, ha_t) = field(code, fprops_t, "horizontalAlign")?;
+    let (v_align, va_t) = field(code, fprops_t, "verticalAlign")?;
+    let need_style = typed(code, dk_t, "needStyleRefresh", bool_t)?;
     let p_calc_w = typed(code, fprops_t, "calculatedWidth", i32_t)?;
     let sc_w = typed(code, scene_t, "width", i32_t)?;
     let sc_h = typed(code, scene_t, "height", i32_t)?;
@@ -417,6 +435,8 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         modal_t,
         inter_t,
         cursor_t,
+        ha_t,
+        va_t,
         parent,
         children,
         x,
@@ -433,6 +453,9 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         off_x,
         off_y,
         is_abs,
+        h_align,
+        v_align,
+        need_style,
         p_calc_w,
         sc_w,
         sc_h,
@@ -492,6 +515,8 @@ struct Globals {
     moved: RefGlobal,
     logs: RefGlobal,
     prefix: RefGlobal,
+    /// "mpWinBase:": a panel's styled (CSS) offsets, what a double push resets to.
+    base: RefGlobal,
     err: RefGlobal,
     title: RefGlobal,
 }
@@ -582,27 +607,22 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         moved: new_global(code, c.bool_t),
         logs: new_global(code, c.i32_t),
         prefix: str_global(code, c.str_t, PREFIX),
+        base: str_global(code, c.str_t, BASE_PREFIX),
         err: str_global(code, c.str_t, S_ERR),
         title: str_global(code, c.str_t, HEADER_CLASS),
     };
     let report = add_report(code, c, &g)?;
-    let save = add_save(code, c, &g, report)?;
-    let restore = add_restore(code, c, &g, report)?;
+    let save = add_save(code, c, g.prefix, report)?;
+    let restore = add_restore(code, c, g.prefix, report)?;
+    let save_base = add_save(code, c, g.base, report)?;
+    let restore_base = add_restore(code, c, g.base, report)?;
     let event = add_event(code, c, &g, report, save)?;
     let cancel = add_cancel(code, c, &g, report, save)?;
-    let begin = add_begin(code, c, &g, report, save, event, cancel)?;
+    let begin = add_begin(code, c, &g, report, save, restore_base, event, cancel)?;
     let clamp = add_clamp(code, c, report)?;
-    let panel_push = add_panel_push(code, c, begin)?;
-    let panel = add_panel(
-        code,
-        c,
-        &g,
-        report,
-        restore,
-        clamp,
-        panel_push.0,
-        panel_push.1,
-    )?;
+    let (panel_push, cap_t) = add_panel_push(code, c, begin)?;
+    let late = add_panel_late(code, c, report, save_base, restore, clamp, cap_t)?;
+    let panel = add_panel(code, c, &g, report, late, panel_push, cap_t)?;
     let head = add_head(code, c)?;
     let win_reflow = add_win_reflow(code, c, report, clamp, head)?;
     let win_push = add_win_push(code, c, report, begin)?;
@@ -728,11 +748,11 @@ fn set_offsets(a: &mut Asm, c: &Ctx, pr: Reg, ox: Reg, oy: Reg) {
     });
 }
 
-/// `full = PREFIX + key`
-fn full_key(a: &mut Asm, c: &Ctx, g: &Globals, full: Reg, key: Reg) {
+/// `full = prefix + key`
+fn full_key(a: &mut Asm, c: &Ctx, prefix: RefGlobal, full: Reg, key: Reg) {
     a.op(Opcode::GetGlobal {
         dst: full,
-        global: g.prefix,
+        global: prefix,
     });
     a.op(Opcode::Call2 {
         dst: full,
@@ -743,7 +763,7 @@ fn full_key(a: &mut Asm, c: &Ctx, g: &Globals, full: Reg, key: Reg) {
 }
 
 /// `save(obj, key)`: stores obj's offsets in its parent flow (removes the key at 0,0).
-fn add_save(code: &mut Bytecode, c: &Ctx, g: &Globals, report: RefFun) -> Result<RefFun> {
+fn add_save(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) -> Result<RefFun> {
     let (k0, k16, kh, km) = (
         int_const(code, 0),
         int_const(code, 16),
@@ -781,7 +801,7 @@ fn add_save(code: &mut Bytecode, c: &Ctx, g: &Globals, report: RefFun) -> Result
         obj: pr,
         field: c.off_y,
     });
-    full_key(&mut a, c, g, full, key);
+    full_key(&mut a, c, prefix, full, key);
     a.op(Opcode::Int { dst: k, ptr: k0 });
     a.jmp(
         Opcode::JNotEq {
@@ -855,7 +875,7 @@ fn add_save(code: &mut Bytecode, c: &Ctx, g: &Globals, report: RefFun) -> Result
 }
 
 /// `restore(obj, follow, key)`: applies the saved offset of `key`, if any.
-fn add_restore(code: &mut Bytecode, c: &Ctx, g: &Globals, report: RefFun) -> Result<RefFun> {
+fn add_restore(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) -> Result<RefFun> {
     let (k16, kh, km) = (
         int_const(code, 16),
         int_const(code, 32768),
@@ -890,7 +910,7 @@ fn add_restore(code: &mut Bytecode, c: &Ctx, g: &Globals, report: RefFun) -> Res
         },
         "out",
     );
-    full_key(&mut a, c, g, full, key);
+    full_key(&mut a, c, prefix, full, key);
     a.op(Opcode::Null { dst: nd });
     a.op(Opcode::Call2 {
         dst: d,
@@ -1053,8 +1073,10 @@ fn props_raw(
 
 /// Moves `obj` to the offsets (ox, oy) right away: the flow offsets are set
 /// (a later reflow keeps the spot) and obj.x/y shift by the change, so the
-/// next sync draws it there without any reflow. Absolute children (the flow
-/// does not place them) jump to `skip`.
+/// next sync draws it there without any reflow. Per axis, an absolute child
+/// is placed by the flow (offset included) only when it has an align on that
+/// axis (Flow.hx:1779-1806: the chest panel, `position: absolute; align:
+/// bottom left`); an axis the flow does not place is left alone.
 #[allow(clippy::too_many_arguments)]
 fn shift(
     a: &mut Asm,
@@ -1063,15 +1085,27 @@ fn shift(
     obj: Reg,
     (ox, oy): (Reg, Reg),
     (old, df, t, b): (Reg, Reg, Reg, Reg),
-    skip: &'static str,
+    (ha, va): (Reg, Reg),
+    labels: [&'static str; 4],
 ) {
-    a.op(Opcode::Field {
-        dst: b,
-        obj: pr,
-        field: c.is_abs,
-    });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, skip);
-    for (off, pos, o) in [(c.off_x, c.x, ox), (c.off_y, c.y, oy)] {
+    let [dx, sx, dy, sy] = labels;
+    for (off, pos, o, al, align, go, skip) in [
+        (c.off_x, c.x, ox, ha, c.h_align, dx, sx),
+        (c.off_y, c.y, oy, va, c.v_align, dy, sy),
+    ] {
+        a.op(Opcode::Field {
+            dst: b,
+            obj: pr,
+            field: c.is_abs,
+        });
+        a.jmp(Opcode::JFalse { cond: b, offset: 0 }, go);
+        a.op(Opcode::Field {
+            dst: al,
+            obj: pr,
+            field: align,
+        });
+        a.jmp(Opcode::JNull { reg: al, offset: 0 }, skip);
+        a.label(go);
         a.op(Opcode::Field {
             dst: old,
             obj: pr,
@@ -1103,6 +1137,7 @@ fn shift(
             field: pos,
             src: t,
         });
+        a.label(skip);
     }
     a.op(Opcode::Bool {
         dst: b,
@@ -1178,6 +1213,7 @@ fn add_event(
         r.r(c.dyn_t),
     );
     let tmp = (r.r(c.i32_t), r.r(c.f64_t), r.r(c.f64_t), b);
+    let al = (r.r(c.ha_t), r.r(c.va_t));
     let mut a = Asm::new();
     a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
     a.op(Opcode::Field {
@@ -1341,7 +1377,16 @@ fn add_event(
         b: dd,
     });
     a.op(Opcode::ToInt { dst: oy, src: my });
-    shift(&mut a, c, pr, obj, (ox, oy), tmp, "follow");
+    shift(
+        &mut a,
+        c,
+        pr,
+        obj,
+        (ox, oy),
+        tmp,
+        al,
+        ["dx0", "sx0", "dy0", "sy0"],
+    );
     a.label("follow");
     a.op(Opcode::GetGlobal {
         dst: fo,
@@ -1349,7 +1394,16 @@ fn add_event(
     });
     a.jmp(Opcode::JNull { reg: fo, offset: 0 }, "out");
     props_raw(&mut a, c, fl, fo, raw, fp, "out");
-    shift(&mut a, c, fp, fo, (ox, oy), tmp, "out");
+    shift(
+        &mut a,
+        c,
+        fp,
+        fo,
+        (ox, oy),
+        tmp,
+        al,
+        ["dx1", "sx1", "dy1", "sy1"],
+    );
 
     a.label("out");
     a.op(Opcode::EndTrap { exc });
@@ -1433,6 +1487,7 @@ fn add_begin(
     g: &Globals,
     report: RefFun,
     save: RefFun,
+    restore_base: RefFun,
     event: RefFun,
     cancel: RefFun,
 ) -> Result<RefFun> {
@@ -1511,7 +1566,8 @@ fn add_begin(
         "press",
     );
 
-    // Double push: back to the layout position, saved key removed.
+    // Double push: back to the layout position (the styled offsets a panel's
+    // CSS gives it, else 0,0), saved key reset.
     a.op(Opcode::Int { dst: z, ptr: k0 });
     set_offsets(&mut a, c, pr, z, z);
     a.jmp(
@@ -1524,6 +1580,13 @@ fn add_begin(
     get_props(&mut a, c, fp, fl, follow, "reset_save");
     set_offsets(&mut a, c, fp, z, z);
     a.label("reset_save");
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: restore_base,
+        arg0: obj,
+        arg1: follow,
+        arg2: key,
+    });
     a.op(Opcode::Null { dst: nobj });
     a.op(Opcode::SetGlobal {
         global: g.last,
@@ -1624,6 +1687,7 @@ fn add_clamp(code: &mut Bytecode, c: &Ctx, report: RefFun) -> Result<RefFun> {
         r.r(c.dyn_t),
         r.r(c.fprops_t),
     );
+    let (ha, va) = (r.r(c.ha_t), r.r(c.va_t));
     let (idx, n, z, ox, oy, nx, ny, si, wi) = (
         r.r(c.i32_t),
         r.r(c.i32_t),
@@ -1698,8 +1762,14 @@ fn add_clamp(code: &mut Bytecode, c: &Ctx, report: RefFun) -> Result<RefFun> {
     });
     a.op(Opcode::UnsafeCast { dst: pr, src: d });
     a.jmp(Opcode::JNull { reg: pr, offset: 0 }, "out");
+    // Absolute: only with an align does the flow place it (offsets included).
     fld(&mut a, b, pr, c.is_abs);
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "out");
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "placed");
+    fld(&mut a, ha, pr, c.h_align);
+    a.jmp(Opcode::JNotNull { reg: ha, offset: 0 }, "placed");
+    fld(&mut a, va, pr, c.v_align);
+    a.jmp(Opcode::JNull { reg: va, offset: 0 }, "out");
+    a.label("placed");
     fld(&mut a, ox, pr, c.off_x);
     fld(&mut a, oy, pr, c.off_y);
     a.jmp(
@@ -1952,26 +2022,112 @@ fn add_panel_push(code: &mut Bytecode, c: &Ctx, begin: RefFun) -> Result<(RefFun
     Ok((f, cap_t))
 }
 
-/// `panel(panel, key)`: restore, then a drag interactive on the "title" header child.
-#[allow(clippy::too_many_arguments)]
+/// `panelLate(cap(panel, key))`, the panel's onAfterReflow until its style is
+/// applied: domkit styles a new element later (Properties.hx:106 puts it on
+/// the dirty list; CssStyle.hx:414-418 applies it on the next style sync), and
+/// that first pass sets the CSS offsets (the chest panel: `offset-y: -410`),
+/// overwriting a restore done in the constructor. So, once `panel.dom` has no
+/// style refresh pending: the styled offsets are kept as the panel's base (the
+/// double-push reset target), the saved offset is restored, and onAfterReflow
+/// becomes the plain clamp.
+fn add_panel_late(
+    code: &mut Bytecode,
+    c: &Ctx,
+    report: RefFun,
+    save_base: RefFun,
+    restore: RefFun,
+    clamp: RefFun,
+    cap_t: RefType,
+) -> Result<RefFun> {
+    let mut r = Regs(vec![cap_t]);
+    let cx = Reg(0);
+    let (v, exc, b, nf, panel, key, dm, rc) = (
+        r.r(c.void_t),
+        r.r(c.dyn_t),
+        r.r(c.bool_t),
+        r.r(c.obj_t),
+        r.r(c.flow_t),
+        r.r(c.str_t),
+        r.r(c.dk_t),
+        r.r(c.reflow_t),
+    );
+    let gd = Guard { exc, v };
+    let mut a = Asm::new();
+    guard_open(&mut a, &gd);
+    for (dst, i) in [(panel, 0), (key, 1)] {
+        a.op(Opcode::EnumField {
+            dst,
+            value: cx,
+            construct: RefEnumConstruct(0),
+            field: RefField(i),
+        });
+    }
+    a.jmp(
+        Opcode::JNull {
+            reg: panel,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Field {
+        dst: dm,
+        obj: panel,
+        field: c.dom,
+    });
+    a.jmp(Opcode::JNull { reg: dm, offset: 0 }, "styled");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: dm,
+        field: c.need_style,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "out");
+    a.label("styled");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: save_base,
+        arg0: panel,
+        arg1: key,
+    });
+    a.op(Opcode::Null { dst: nf });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: restore,
+        arg0: panel,
+        arg1: nf,
+        arg2: key,
+    });
+    a.op(Opcode::InstanceClosure {
+        dst: rc,
+        fun: clamp,
+        obj: panel,
+    });
+    a.op(Opcode::SetField {
+        obj: panel,
+        field: c.on_after_reflow,
+        src: rc,
+    });
+    guard_close(&mut a, &gd, report);
+    push_fn(code, vec![cap_t], c.void_t, r.0, a.finish(), c.dbg_file)
+}
+
+/// `panel(panel, key)`: onAfterReflow = panelLate (run once now: restore at
+/// once if already styled), then a drag interactive on the "title" header child.
 fn add_panel(
     code: &mut Bytecode,
     c: &Ctx,
     g: &Globals,
     report: RefFun,
-    restore: RefFun,
-    clamp: RefFun,
+    late: RefFun,
     panel_push: RefFun,
     cap_t: RefType,
 ) -> Result<RefFun> {
     let k0 = int_const(code, 0);
     let mut r = Regs(vec![c.flow_t, c.str_t]);
     let (panel, key) = (Reg(0), Reg(1));
-    let (v, exc, b, nf, cls, ch, raw, d) = (
+    let (v, exc, b, cls, ch, raw, d) = (
         r.r(c.void_t),
         r.r(c.dyn_t),
         r.r(c.bool_t),
-        r.r(c.obj_t),
         r.r(c.str_t),
         r.r(c.arr_t),
         r.r(c.raw_t),
@@ -1998,23 +2154,25 @@ fn add_panel(
         },
         "out",
     );
-    a.op(Opcode::Null { dst: nf });
-    a.op(Opcode::Call3 {
-        dst: v,
-        fun: restore,
-        arg0: panel,
-        arg1: nf,
-        arg2: key,
+    a.op(Opcode::MakeEnum {
+        dst: cx,
+        construct: RefEnumConstruct(0),
+        args: vec![panel, key],
     });
     a.op(Opcode::InstanceClosure {
         dst: rc,
-        fun: clamp,
-        obj: panel,
+        fun: late,
+        obj: cx,
     });
     a.op(Opcode::SetField {
         obj: panel,
         field: c.on_after_reflow,
         src: rc,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: late,
+        arg0: cx,
     });
     a.op(Opcode::GetGlobal {
         dst: cls,
@@ -3225,11 +3383,11 @@ mod tests {
             }
         }
         let api = DragApi {
-            begin: back.functions[n + 5].findex,
+            begin: back.functions[n + 7].findex,
             restore: back.functions[n + 2].findex,
-            clamp: back.functions[n + 6].findex,
-            panel: back.functions[n + 8].findex,
-            win_install: back.functions[n + 12].findex,
+            clamp: back.functions[n + 8].findex,
+            panel: back.functions[n + 11].findex,
+            win_install: back.functions[n + 15].findex,
         };
         assert!(
             matches!(b.ops[end], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == api.win_install)
@@ -3266,7 +3424,7 @@ mod tests {
             check_types(&back, f, 0..f.ops.len());
             traps += traps_ok(f);
         }
-        assert_eq!(traps, 10);
+        assert_eq!(traps, 13);
 
         // Idempotent: a second pass refuses both sites and leaves the image as is.
         let mut again = read(&patched);
@@ -3377,6 +3535,8 @@ mod tests {
         event: RefFun,
         cancel: RefFun,
         begin: RefFun,
+        clamp: RefFun,
+        late: RefFun,
         head: RefFun,
     }
 
@@ -3390,10 +3550,12 @@ mod tests {
     fn fns(code: &Bytecode, n: usize) -> Fns {
         let f = |k: usize| code.functions[n + k].findex;
         Fns {
-            event: f(3),
-            cancel: f(4),
-            begin: f(5),
-            head: f(9),
+            event: f(5),
+            cancel: f(6),
+            begin: f(7),
+            clamp: f(8),
+            late: f(10),
+            head: f(12),
         }
     }
 
@@ -3428,7 +3590,15 @@ mod tests {
                     Some(V::Null)
                 } else if f == c.set_ud {
                     log(k, "setUserData");
+                    if let V::S(key) = &a[0] {
+                        k.put("ud", key, a[1].clone());
+                    }
                     Some(V::Null)
+                } else if f == c.get_ud {
+                    let V::S(key) = &a[0] else {
+                        panic!("getUserData key")
+                    };
+                    Some(k.map("ud", key))
                 } else if f == c.is_of_type {
                     Some(V::B(k.key_get(&a[0], "inter") == V::B(true)))
                 } else if f == c.str_add {
@@ -3692,5 +3862,119 @@ mod tests {
         ] {
             assert_eq!(s.c.get(it, c.it_propagate), V::B(false), "{what}");
         }
+    }
+
+    fn packed(x: i32, y: i32) -> V {
+        V::I(((x + 32768) << 16) | ((y + 32768) & 0xFFFF))
+    }
+
+    /// The chest panel is `position: absolute; align: bottom left` (style.css
+    /// game-inventory #chestInventory): the flow still places it, offsets
+    /// included, so it drags. An absolute child without an align stays put.
+    #[test]
+    fn absolute_aligned_panel_drags() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (obj, pr) = scene(&mut s, &c);
+        let (al_h, al_v) = (s.c.enm(0, vec![]), s.c.enm(2, vec![]));
+        s.c.set(&pr, c.is_abs, V::B(true));
+        s.c.set(&pr, c.h_align, al_h);
+        s.c.set(&pr, c.v_align, al_v);
+        s.c.set(&pr, c.off_y, V::I(-410));
+        mouse(&mut s, 500.0, 300.0);
+        press(&mut s, &f, &obj);
+        mouse(&mut s, 530.0, 320.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-390));
+        assert_eq!(s.c.get(&obj, c.x), V::F(130.0));
+        assert_eq!(s.c.get(&obj, c.y), V::F(70.0));
+        event(&mut s, &c, &f, c.ev_release);
+        assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(30, -390));
+
+        // Absolute, no align: the flow does not place it, nothing moves.
+        s.c.set(&pr, c.h_align, V::Null);
+        s.c.set(&pr, c.v_align, V::Null);
+        s.c.put("in", "now", V::F(20.0));
+        mouse(&mut s, 0.0, 0.0);
+        press(&mut s, &f, &obj);
+        mouse(&mut s, 50.0, 50.0);
+        event(&mut s, &c, &f, c.ev_move);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
+        assert_eq!(s.c.get(&obj, c.x), V::F(130.0));
+    }
+
+    /// Chest panel life cycle: built in the constructor before its style is
+    /// applied (restore waits), styled (CSS offset-y -410 becomes the base,
+    /// the saved spot is restored, onAfterReflow becomes the clamp), then a
+    /// double push (as when clicking the header twice) goes back to the styled
+    /// spot, not to offset 0,0 (bottom left, under the inventory panel, which
+    /// looked like a chest that never reopens).
+    #[test]
+    fn panel_restores_after_style_and_resets_to_base() {
+        let Ok(image) = std::fs::read(HLBOOT) else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (obj, pr) = scene(&mut s, &c);
+        let (al_h, al_v) = (s.c.enm(0, vec![]), s.c.enm(2, vec![]));
+        s.c.set(&pr, c.is_abs, V::B(true));
+        s.c.set(&pr, c.h_align, al_h);
+        s.c.set(&pr, c.v_align, al_v);
+        let dom = s.c.obj(&[(c.need_style, V::B(true))]);
+        s.c.set(&obj, c.dom, dom.clone());
+        s.c.put("ud", "mpWinPos:k", packed(30, -300));
+        let cap = s.c.enm(0, vec![obj.clone(), V::S("k".into())]);
+
+        // Style pending: nothing restored, the handler stays.
+        s.run(f.late, vec![cap.clone()]);
+        assert!(s.c.take("getProperties").is_empty());
+        assert!(s.c.take("setUserData").is_empty());
+        assert_eq!(s.c.get(&obj, c.on_after_reflow), V::Null);
+
+        // Styled: CSS offset kept as base, saved spot restored, clamp installed.
+        s.c.set(&pr, c.off_y, V::I(-410));
+        s.c.set(&dom, c.need_style, V::B(false));
+        s.run(f.late, vec![cap.clone()]);
+        assert_eq!(s.c.map("ud", "mpWinBase:k"), packed(0, -410));
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-300));
+        assert_eq!(
+            s.c.get(&obj, c.on_after_reflow),
+            V::Clo(f.clamp, Box::new(obj.clone()))
+        );
+
+        // Double push: back to the styled spot, saved as such.
+        mouse(&mut s, 500.0, 300.0);
+        press(&mut s, &f, &obj);
+        event(&mut s, &c, &f, c.ev_release);
+        s.c.put("in", "now", V::F(10.1));
+        s.run(f.begin, vec![obj.clone(), V::Null, V::S("k".into())]);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(0));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-410));
+        assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(0, -410));
+
+        // A panel without a CSS offset: base removed, reset to 0,0.
+        s.c.set(&pr, c.off_y, V::I(0));
+        s.run(f.late, vec![cap]);
+        assert_eq!(s.c.map("ud", "mpWinBase:k"), V::Null);
+        s.c.set(&pr, c.off_x, V::I(70));
+        s.c.put("in", "now", V::F(30.0));
+        press(&mut s, &f, &obj);
+        event(&mut s, &c, &f, c.ev_release);
+        s.c.put("in", "now", V::F(30.1));
+        s.run(f.begin, vec![obj.clone(), V::Null, V::S("k".into())]);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(0));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(0));
     }
 }
