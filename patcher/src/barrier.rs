@@ -2301,9 +2301,7 @@ mod tests {
     }
 
     fn sim_image() -> Option<(Bytecode, Bytecode)> {
-        let Some(image) = game() else {
-            return None;
-        };
+        let image = game()?;
         let orig = read(&image);
         let mut code = read(&image);
         patch_barrier(&mut code);

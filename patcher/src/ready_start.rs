@@ -1699,9 +1699,7 @@ mod tests {
     }
 
     fn images() -> Option<(Bytecode, Bytecode)> {
-        let Some(image) = game() else {
-            return None;
-        };
+        let image = game()?;
         let orig = read(&image);
         let mut code = read(&image);
         patch_ready_start(&mut code);
