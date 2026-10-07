@@ -161,12 +161,33 @@ impl<'a> Sim<'a> {
         for (i, a) in args.into_iter().enumerate() {
             r[i] = a;
         }
-        let mut pc = 0usize;
+        match self.exec(f, &mut r, 0, &[]) {
+            Ok(v) => v,
+            Err(_) => unreachable!(),
+        }
+    }
+
+    /// Runs `f` (vanilla or appended) from op `from` with registers `r` until
+    /// the pc reaches one of `stops` (returned) or the function returns (panic).
+    pub(crate) fn span(&mut self, f: RefFun, r: &mut [V], from: usize, stops: &[usize]) -> usize {
+        match self.exec(f, r, from, stops) {
+            Ok(v) => panic!("returned {v:?} before a stop"),
+            Err(pc) => pc,
+        }
+    }
+
+    fn exec(&mut self, f: RefFun, r: &mut [V], from: usize, stops: &[usize]) -> Result<V, usize> {
+        let code = self.code;
+        let fun = &code.functions[fun_index(code, f).unwrap()];
+        let mut pc = from;
         let num = |v: &V| match v {
             V::I(x) => *x,
             o => panic!("not an int: {o:?}"),
         };
         loop {
+            if stops.contains(&pc) {
+                return Err(pc);
+            }
             let op = &fun.ops[pc];
             let mut next = pc + 1;
             let jump = |off: i32| (pc as i64 + 1 + off as i64) as usize;
@@ -337,7 +358,9 @@ impl<'a> Sim<'a> {
                 Opcode::JSGte { a, b, offset }
                 | Opcode::JSLte { a, b, offset }
                 | Opcode::JSLt { a, b, offset }
-                | Opcode::JSGt { a, b, offset } => {
+                | Opcode::JSGt { a, b, offset }
+                | Opcode::JNotLt { a, b, offset }
+                | Opcode::JNotGte { a, b, offset } => {
                     let f = |v: &V| match v {
                         V::F(x) => *x,
                         o => num(o) as f64,
@@ -347,6 +370,14 @@ impl<'a> Sim<'a> {
                         Opcode::JSGte { .. } => x >= y,
                         Opcode::JSLte { .. } => x <= y,
                         Opcode::JSLt { .. } => x < y,
+                        // NaN compares false, so the negated tests jump.
+                        Opcode::JNotLt { .. } => {
+                            x.partial_cmp(&y) != Some(std::cmp::Ordering::Less)
+                        }
+                        Opcode::JNotGte { .. } => !matches!(
+                            x.partial_cmp(&y),
+                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                        ),
                         _ => x > y,
                     };
                     if t {
@@ -399,7 +430,7 @@ impl<'a> Sim<'a> {
                     let a = args.iter().map(|x| r[rr(x)].clone()).collect();
                     r[rr(dst)] = self.call(*fun, a)
                 }
-                Opcode::Ret { ret } => return r[rr(ret)].clone(),
+                Opcode::Ret { ret } => return Ok(r[rr(ret)].clone()),
                 o => panic!("interpreter: unsupported {o:?}"),
             }
             pc = next;

@@ -11,6 +11,7 @@ mod all_inv;
 mod alt_world;
 mod asm;
 mod barrier;
+mod battle_camera;
 mod camp_any_unit;
 mod camp_choice;
 mod camp_talk;
@@ -121,6 +122,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     style_guard::patch_style_guard(&mut code);
     all_inv::patch_all_inv(&mut code);
     alt_world::patch_alt_world(&mut code);
+    battle_camera::patch_battle_camera(&mut code);
     title_version::patch_title_version(&mut code);
     jit_names::patch_jit_names(&mut code);
     let mut out = Vec::with_capacity(image.len() + 4096);
