@@ -997,6 +997,35 @@ closesocket(s);
 		}
 
 }
+	// A connection that never authenticates blocks nobody and is dropped at
+	// its deadline; a new authenticated helper replaces a stuck one.
+	{
+		SOCKET silent = bridge_connect((unsigned short)port), a, b;
+		DWORD t0;
+		int r;
+		DWORD wait = 8000; // past the shim's deadline: a timeout here is not a close
+		check(silent != INVALID_SOCKET, "a silent connection is open");
+		setsockopt(silent, SOL_SOCKET, SO_RCVTIMEO, (const char *)&wait, sizeof(wait));
+		t0 = GetTickCount();
+		a = bridge_connect((unsigned short)port);
+		check(a != INVALID_SOCKET && send_frame(a, FR_AUTH, 0, token, 32) && send_frame(a, FR_SEND, PEER, "fence", 5) &&
+				recv_frame(a, &type, &peer, buf, sizeof(buf), &len) && type == FR_RECV && GetTickCount() - t0 < 2000,
+			"a helper is served at once while a silent connection is open");
+		b = bridge_connect((unsigned short)port);
+		check(b != INVALID_SOCKET && send_frame(b, FR_AUTH, 0, token, 32) && send_frame(b, FR_SEND, PEER, "fence2", 6) &&
+				recv_frame(b, &type, &peer, buf, sizeof(buf), &len) && type == FR_RECV && len == 6,
+			"a second helper authenticates and is served");
+		r = recv(a, (char *)buf, 1, 0);
+		check(r == 0 || r == SOCKET_ERROR, "the helper it replaced has its connection shut down");
+		check(wait_log(log, "bridge: a new helper connection replaces the previous one", 2000), "shim.log records the replacement");
+		check(recv_frame(silent, &type, &peer, buf, sizeof(buf), &len) == 0 && GetTickCount() - t0 < 7000 &&
+				wait_log(log, "bridge: connection did not authenticate within 5000 ms, closed", 2000),
+			"the silent connection is closed at the 5 s authentication deadline");
+		closesocket(silent);
+		closesocket(a);
+		closesocket(b);
+		check(wait_log(log, "bridge: helper connection closed", 5000), "the last helper leaves");
+	}
 	stats(&st);
 	check(st.allocated == st.released, "bridge released every message it pulled");
 }

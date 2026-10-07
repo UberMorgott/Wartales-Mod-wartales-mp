@@ -49,11 +49,18 @@
 
 enum { FR_AUTH = 0, FR_SEND = 1, FR_RECV = 2, FR_ERR = 3, FR_LOBBY = 4 };
 
+// Every connection is served on its own thread, so a peer that connects and
+// says nothing (or a helper that hung) never blocks the next one: a connection
+// must authenticate within BRIDGE_AUTH_MS, at most BRIDGE_PENDING_MAX may be
+// waiting to, and an authenticated one replaces the current helper.
+#define BRIDGE_AUTH_MS 5000
+#define BRIDGE_PENDING_MAX 4
+
 static SOCKET listener = INVALID_SOCKET;
-static SOCKET client = INVALID_SOCKET;
-static BOOL client_authed;
-static CRITICAL_SECTION out_lock; // serialises writes to the client socket
-static CRITICAL_SECTION client_lock;
+static SOCKET client = INVALID_SOCKET; // the authenticated helper; set under client_lock + out_lock
+static CRITICAL_SECTION out_lock;     // serialises writes to the client socket
+static CRITICAL_SECTION client_lock;  // who the client is, and the lobby state it owns
+static volatile LONG pending_n;       // connections not authenticated yet
 static char token[33];
 static unsigned short port;
 static unsigned long frames_in, frames_out, bytes_in, bytes_out, dropped;
@@ -105,7 +112,7 @@ static BOOL write_frame(unsigned char type, uint64_t peer, const void *payload, 
 	put_u32(head + 9, len);
 	EnterCriticalSection(&out_lock);
 	s = client;
-	ok = s != INVALID_SOCKET && client_authed && send_all(s, head, FRAME_HEAD) && (len == 0 || send_all(s, payload, len));
+	ok = s != INVALID_SOCKET && send_all(s, head, FRAME_HEAD) && (len == 0 || send_all(s, payload, len));
 	if (ok) {
 		frames_out++;
 		bytes_out += len;
@@ -152,13 +159,46 @@ static DWORD WINAPI pump_thread(LPVOID unused) {
 	return 0; // not reached
 }
 
-// serve_client runs one helper connection until it ends.
+// become_client makes the just-authenticated s the helper. The one it
+// replaces is shut down, which also frees a write stuck on it (out_lock), and
+// its thread then finds itself replaced and leaves the state alone. A new
+// helper starts with nothing published: it republishes what it wants.
+static void become_client(SOCKET s) {
+	SOCKET old;
+	EnterCriticalSection(&client_lock);
+	old = client;
+	if (old != INVALID_SOCKET) {
+		shim_log("bridge: a new helper connection replaces the previous one");
+		shutdown(old, SD_BOTH);
+	}
+	EnterCriticalSection(&out_lock);
+	client = s;
+	LeaveCriticalSection(&out_lock);
+	lobby_set_invite(NULL, 0);
+	LeaveCriticalSection(&client_lock);
+}
+
+// leave_client withdraws s and what it published, unless it was replaced.
+static void leave_client(SOCKET s) {
+	EnterCriticalSection(&client_lock);
+	if (client == s) {
+		EnterCriticalSection(&out_lock);
+		client = INVALID_SOCKET;
+		LeaveCriticalSection(&out_lock);
+		lobby_set_invite(NULL, 0);
+	}
+	LeaveCriticalSection(&client_lock);
+}
+
+// serve_client runs one connection until it ends.
 static void serve_client(SOCKET s) {
 	unsigned char head[FRAME_HEAD];
 	unsigned char *payload = NULL;
 	size_t cap = 0;
 	BOOL authed = FALSE;
+	DWORD tmo = BRIDGE_AUTH_MS;
 
+	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tmo, sizeof(tmo));
 	for (;;) {
 		unsigned char type;
 		uint64_t peer;
@@ -187,14 +227,23 @@ static void serve_client(SOCKET s) {
 				break;
 			}
 			authed = TRUE;
-			EnterCriticalSection(&out_lock);
-			client_authed = TRUE;
-			LeaveCriticalSection(&out_lock);
+			InterlockedDecrement(&pending_n);
+			tmo = 0; // an authenticated helper may stay quiet for as long as it likes
+			setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tmo, sizeof(tmo));
+			become_client(s);
 			shim_log("bridge: helper connected and authenticated");
 			continue;
 		}
 		if (type == FR_LOBBY) {
-			if (peer != 0 || !lobby_set_invite(payload, len))
+			BOOL current, ok = FALSE;
+			EnterCriticalSection(&client_lock);
+			current = client == s;
+			if (current)
+				ok = peer == 0 && lobby_set_invite(payload, len);
+			LeaveCriticalSection(&client_lock);
+			if (!current)
+				break; // replaced: its publication is no longer ours to change
+			if (!ok)
 				shim_log("bridge: invalid lobby publication frame ignored");
 			continue;
 		}
@@ -211,41 +260,48 @@ static void serve_client(SOCKET s) {
 		}
 		shim_log("bridge: unexpected frame type %u from the helper, ignored", type);
 	}
-	if (authed) lobby_set_invite(NULL, 0);
+	if (authed) {
+		leave_client(s);
+	} else {
+		if (WSAGetLastError() == WSAETIMEDOUT)
+			shim_log("bridge: connection did not authenticate within %d ms, closed", BRIDGE_AUTH_MS);
+		InterlockedDecrement(&pending_n);
+	}
 	free(payload);
+}
+
+static DWORD WINAPI conn_thread(LPVOID arg) {
+	SOCKET s = (SOCKET)(UINT_PTR)arg;
+	serve_client(s);
+	closesocket(s); // only here: become_client merely shuts a replaced socket down
+	shim_log("bridge: helper connection closed; %lu frames/%lu bytes in, %lu frames/%lu bytes out, %lu dropped",
+		frames_in, bytes_in, frames_out, bytes_out, dropped);
+	return 0;
 }
 
 static DWORD WINAPI accept_thread(LPVOID unused) {
 	(void)unused;
 	for (;;) {
 		SOCKET s = accept(listener, NULL, NULL);
-		SOCKET old;
+		HANDLE t;
 		if (s == INVALID_SOCKET) {
 			shim_log("bridge: accept failed (%d), listener closed", WSAGetLastError());
 			return 0;
 		}
-		// One helper at a time; a newcomer replaces a stale connection.
-		EnterCriticalSection(&client_lock);
-		EnterCriticalSection(&out_lock);
-		old = client;
-		client = s;
-		client_authed = FALSE;
-		LeaveCriticalSection(&out_lock);
-		LeaveCriticalSection(&client_lock);
-		if (old != INVALID_SOCKET) {
-			shim_log("bridge: a new helper connection replaces the previous one");
-			closesocket(old);
+		if (InterlockedIncrement(&pending_n) > BRIDGE_PENDING_MAX) {
+			InterlockedDecrement(&pending_n);
+			closesocket(s);
+			shim_log("bridge: %d connections already waiting to authenticate, one more refused", BRIDGE_PENDING_MAX);
+			continue;
 		}
-		serve_client(s);
-		EnterCriticalSection(&out_lock);
-		if (client == s) {
-			client = INVALID_SOCKET;
-			client_authed = FALSE;
+		t = CreateThread(NULL, 0, conn_thread, (LPVOID)(UINT_PTR)s, 0, NULL);
+		if (t == NULL) {
+			InterlockedDecrement(&pending_n);
+			closesocket(s);
+			shim_log("bridge: CreateThread for a connection failed (%lu)", (unsigned long)GetLastError());
+			continue;
 		}
-		LeaveCriticalSection(&out_lock);
-		closesocket(s);
-		shim_log("bridge: helper connection closed; %lu frames/%lu bytes in, %lu frames/%lu bytes out, %lu dropped",
-			frames_in, bytes_in, frames_out, bytes_out, dropped);
+		CloseHandle(t);
 	}
 }
 
