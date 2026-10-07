@@ -80,9 +80,9 @@
 // Validated before editing; a mismatch skips the pass (logged).
 
 use super::*;
+use crate::asm::{push_fn, Asm, Regs};
 use crate::job_xp::{const_str, str_global};
 use hlbc::types::{RefGlobal, RefString, ValBool};
-use std::collections::HashMap;
 
 pub(crate) const FOLLOW_ON: &str = "Follow: ON";
 pub(crate) const FOLLOW_OFF: &str = "Follow: OFF";
@@ -123,75 +123,6 @@ fn static_fn(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Res
     match hits[..] {
         [f] => Ok(f),
         _ => bail!("expected one {name}{args:?}, found {}", hits.len()),
-    }
-}
-
-/// Function-local assembler with symbolic jump labels.
-struct Asm {
-    ops: Vec<Opcode>,
-    fix: Vec<(usize, &'static str)>,
-    labels: HashMap<&'static str, usize>,
-}
-
-impl Asm {
-    fn new() -> Self {
-        Asm {
-            ops: vec![],
-            fix: vec![],
-            labels: HashMap::new(),
-        }
-    }
-    fn op(&mut self, o: Opcode) {
-        self.ops.push(o);
-    }
-    /// A jump op (offset placeholder) to `label`.
-    fn jmp(&mut self, o: Opcode, label: &'static str) {
-        self.fix.push((self.ops.len(), label));
-        self.ops.push(o);
-    }
-    fn label(&mut self, l: &'static str) {
-        assert!(
-            self.labels.insert(l, self.ops.len()).is_none(),
-            "label {l} twice"
-        );
-    }
-    fn finish(mut self) -> Vec<Opcode> {
-        for (i, l) in std::mem::take(&mut self.fix) {
-            let t = *self.labels.get(l).unwrap_or_else(|| panic!("label {l}"));
-            let off = t as i32 - i as i32 - 1;
-            match &mut self.ops[i] {
-                Opcode::JTrue { offset, .. }
-                | Opcode::JFalse { offset, .. }
-                | Opcode::JNull { offset, .. }
-                | Opcode::JNotNull { offset, .. }
-                | Opcode::JSLt { offset, .. }
-                | Opcode::JSGte { offset, .. }
-                | Opcode::JSGt { offset, .. }
-                | Opcode::JSLte { offset, .. }
-                | Opcode::JEq { offset, .. }
-                | Opcode::JNotEq { offset, .. }
-                | Opcode::JAlways { offset }
-                | Opcode::Trap { offset, .. } => *offset = off,
-                o => panic!("not a jump: {o:?}"),
-            }
-            if off < 0 {
-                assert!(
-                    matches!(self.ops[t], Opcode::Label),
-                    "backward jump to a non-Label"
-                );
-            }
-        }
-        self.ops
-    }
-}
-
-/// Register list of a new function.
-struct Regs(Vec<RefType>);
-
-impl Regs {
-    fn r(&mut self, t: RefType) -> Reg {
-        self.0.push(t);
-        Reg((self.0.len() - 1) as u32)
     }
 }
 
@@ -550,34 +481,6 @@ struct Globals {
     host_own_at: RefGlobal,
 }
 
-/// Appends `ops` as a new function `args -> void` and returns its findex.
-fn push_fn(
-    code: &mut Bytecode,
-    p: &Plan,
-    args: Vec<RefType>,
-    regs: Vec<RefType>,
-    ops: Vec<Opcode>,
-) -> Result<RefFun> {
-    let findex = next_findex(code)?;
-    code.types.push(Type::Fun(TypeFun {
-        args,
-        ret: p.t.void,
-    }));
-    let fun_t = RefType(code.types.len() - 1);
-    let n = ops.len();
-    code.functions.push(Function {
-        name: RefString(0),
-        t: fun_t,
-        findex,
-        regs,
-        ops,
-        debug_info: Some(vec![(p.dbg_file, 1); n]),
-        assigns: Some(vec![]),
-        parent: None,
-    });
-    Ok(findex)
-}
-
 /// `notify(game, on)`: `game.ui.localNotify("ArenaNotif", {title: on ? ON : OFF})`.
 fn add_notify(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     let id = str_global(code, p.t.str_, NOTIFY_ID);
@@ -637,7 +540,14 @@ fn add_notify(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     });
     a.label("end");
     a.op(Opcode::Ret { ret: v });
-    push_fn(code, p, vec![p.game_t, p.t.bool_], r.0, a.finish())
+    push_fn(
+        code,
+        vec![p.game_t, p.t.bool_],
+        p.t.void,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
 }
 
 /// `followCancel(game, claim)`: a manual move by this machine's player pauses
@@ -711,7 +621,14 @@ fn add_cancel(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
     });
     a.label("end");
     a.op(Opcode::Ret { ret: v });
-    push_fn(code, p, vec![p.game_t, p.t.bool_], r.0, a.finish())
+    push_fn(
+        code,
+        vec![p.game_t, p.t.bool_],
+        p.t.void,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
 }
 
 /// `followLoad()`: `fOff = Storage.getUserData(PREF_KEY, null) != null`; a throw keeps fOff.
@@ -756,7 +673,7 @@ fn add_load(code: &mut Bytecode, p: &Plan, g: &Globals, key: RefGlobal) -> Resul
     a.op(Opcode::Ret { ret: v });
     a.label("catch");
     a.op(Opcode::Ret { ret: v });
-    push_fn(code, p, vec![], r.0, a.finish())
+    push_fn(code, vec![], p.t.void, r.0, a.finish(), p.dbg_file)
 }
 
 /// `followSave(off)`: `Storage.setUserData(PREF_KEY, off ? true : null)`; a throw is dropped.
@@ -792,7 +709,7 @@ fn add_save(code: &mut Bytecode, p: &Plan, key: RefGlobal) -> Result<RefFun> {
     a.op(Opcode::Ret { ret: v });
     a.label("catch");
     a.op(Opcode::Ret { ret: v });
-    push_fn(code, p, vec![p.t.bool_], r.0, a.finish())
+    push_fn(code, vec![p.t.bool_], p.t.void, r.0, a.finish(), p.dbg_file)
 }
 
 /// `followUpdate(world, dt)`, see the module comment.
@@ -1756,7 +1673,14 @@ fn add_update(
         src: best,
     });
     a.op(Opcode::Ret { ret: v });
-    push_fn(code, p, vec![p.world_t, t.f64_], r.0, a.finish())
+    push_fn(
+        code,
+        vec![p.world_t, t.f64_],
+        p.t.void,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
 }
 
 /// `followReset()`: World.dispose (quit to the menu or load) forgets the session.
@@ -1784,7 +1708,7 @@ fn add_reset(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
         src: pl,
     });
     a.op(Opcode::Ret { ret: v });
-    push_fn(code, p, vec![], r.0, a.finish())
+    push_fn(code, vec![], p.t.void, r.0, a.finish(), p.dbg_file)
 }
 
 fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
@@ -1942,189 +1866,8 @@ pub(crate) fn patch_follow(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{game, read};
-
-    fn ops(o: &[Opcode]) -> String {
-        format!("{o:?}")
-    }
-
-    /// `b` is `a` with `n` ops inserted at `at`: every original jump keeps its target.
-    fn shifted(a: &Function, b: &Function, at: usize, n: usize) {
-        assert_eq!(b.ops.len(), a.ops.len() + n);
-        let map = |t: usize| if t < at { t } else { t + n };
-        for i in 0..a.ops.len() {
-            let tb: Vec<usize> = jump_targets(a, i).into_iter().map(map).collect();
-            assert_eq!(jump_targets(b, map(i)), tb, "fn@{} op {i}", a.findex.0);
-            if tb.is_empty() {
-                assert_eq!(ops(&b.ops[map(i)..=map(i)]), ops(&a.ops[i..=i]));
-            }
-        }
-        for i in 0..b.ops.len() {
-            for t in jump_targets(b, i) {
-                assert!(t < b.ops.len(), "fn@{} op {i} out of range", b.findex.0);
-            }
-        }
-    }
-
-    fn assignable(code: &Bytecode, from: RefType, to: RefType) -> bool {
-        from == to
-            || matches!(code.types[to.0], Type::Dyn)
-            || (code.types[from.0].get_type_obj().is_some()
-                && code.types[to.0].get_type_obj().is_some()
-                && is_sub(code, from, to))
-    }
-
-    fn field_type(code: &Bytecode, t: RefType, f: RefField) -> RefType {
-        match &code.types[t.0] {
-            Type::Virtual { fields } => fields[f.0].t,
-            _ => obj(code, t).expect("object").fields[f.0].t,
-        }
-    }
-
-    fn callee(code: &Bytecode, f: RefFun) -> TypeFun {
-        let t = code
-            .functions
-            .iter()
-            .find(|g| g.findex == f)
-            .map(|g| g.t)
-            .or_else(|| code.natives.iter().find(|n| n.findex == f).map(|n| n.t))
-            .expect("callee");
-        t.as_fun(code).expect("fun type").clone()
-    }
-
-    /// Register types agree with every field, global, call and arithmetic op in `range`.
-    fn check_types(code: &Bytecode, f: &Function, range: std::ops::Range<usize>) {
-        let rt = |r: &Reg| f.regs[r.0 as usize];
-        let is = |r: &Reg, want: fn(&Type) -> bool| want(&code.types[rt(r).0]);
-        for i in range {
-            let op = &f.ops[i];
-            let ok = match op {
-                Opcode::Field { dst, obj, field } => {
-                    assignable(code, field_type(code, rt(obj), *field), rt(dst))
-                }
-                Opcode::SetField { obj, field, src } => {
-                    assignable(code, rt(src), field_type(code, rt(obj), *field))
-                }
-                Opcode::GetGlobal { dst, global } => {
-                    assignable(code, code.globals[global.0], rt(dst))
-                }
-                Opcode::SetGlobal { global, src } => {
-                    assignable(code, rt(src), code.globals[global.0])
-                }
-                Opcode::Mov { dst, src } => assignable(code, rt(src), rt(dst)),
-                Opcode::Bool { dst, .. } | Opcode::Not { dst, .. } => {
-                    is(dst, |t| matches!(t, Type::Bool))
-                }
-                Opcode::Int { dst, .. } | Opcode::Incr { dst } => {
-                    is(dst, |t| matches!(t, Type::I32))
-                }
-                Opcode::Float { dst, .. } => is(dst, |t| matches!(t, Type::F64)),
-                Opcode::Add { dst, a, b }
-                | Opcode::Sub { dst, a, b }
-                | Opcode::Mul { dst, a, b }
-                | Opcode::SDiv { dst, a, b }
-                | Opcode::And { dst, a, b } => {
-                    rt(dst) == rt(a)
-                        && rt(a) == rt(b)
-                        && is(dst, |t| matches!(t, Type::I32 | Type::F64))
-                }
-                Opcode::JSLt { a, b, .. }
-                | Opcode::JSGte { a, b, .. }
-                | Opcode::JSLte { a, b, .. } => rt(a) == rt(b),
-                Opcode::JEq { a, b, .. } | Opcode::JNotEq { a, b, .. } => {
-                    assignable(code, rt(a), rt(b)) || assignable(code, rt(b), rt(a))
-                }
-                Opcode::JTrue { cond, .. } | Opcode::JFalse { cond, .. } => {
-                    is(cond, |t| matches!(t, Type::Bool))
-                }
-                Opcode::Ref { dst, src } => {
-                    matches!(code.types[rt(dst).0], Type::Ref(t) if t == rt(src))
-                }
-                Opcode::Call0 { dst, fun } => {
-                    let t = callee(code, *fun);
-                    t.args.is_empty() && assignable(code, t.ret, rt(dst))
-                }
-                Opcode::Call1 { dst, fun, arg0 } => {
-                    let t = callee(code, *fun);
-                    t.args.len() == 1
-                        && assignable(code, rt(arg0), t.args[0])
-                        && (assignable(code, t.ret, rt(dst))
-                            || is(dst, |t| matches!(t, Type::Void)))
-                }
-                Opcode::Call2 {
-                    dst,
-                    fun,
-                    arg0,
-                    arg1,
-                } => {
-                    let t = callee(code, *fun);
-                    t.args.len() == 2
-                        && assignable(code, rt(arg0), t.args[0])
-                        && assignable(code, rt(arg1), t.args[1])
-                        && (assignable(code, t.ret, rt(dst))
-                            || is(dst, |t| matches!(t, Type::Void)))
-                }
-                Opcode::Call3 {
-                    dst,
-                    fun,
-                    arg0,
-                    arg1,
-                    arg2,
-                } => {
-                    let t = callee(code, *fun);
-                    t.args.len() == 3
-                        && [arg0, arg1, arg2]
-                            .iter()
-                            .zip(&t.args)
-                            .all(|(r, a)| assignable(code, rt(r), *a))
-                        && (assignable(code, t.ret, rt(dst))
-                            || is(dst, |t| matches!(t, Type::Void)))
-                }
-                Opcode::Call4 {
-                    dst,
-                    fun,
-                    arg0,
-                    arg1,
-                    arg2,
-                    arg3,
-                } => {
-                    let t = callee(code, *fun);
-                    t.args.len() == 4
-                        && [arg0, arg1, arg2, arg3]
-                            .iter()
-                            .zip(&t.args)
-                            .all(|(r, a)| assignable(code, rt(r), *a))
-                        && (assignable(code, t.ret, rt(dst))
-                            || is(dst, |t| matches!(t, Type::Void)))
-                }
-                Opcode::CallN { .. } => panic!("unexpected CallN"),
-                _ => true,
-            };
-            assert!(
-                ok,
-                "fn@{} op {i} {op:?}: register types do not match",
-                f.findex.0
-            );
-        }
-    }
-
-    /// Jumps stay in range, backward jumps land on a Label, the function ends in Ret.
-    fn check_flow(f: &Function) {
-        let n = f.ops.len();
-        for i in 0..n {
-            for t in jump_targets(f, i) {
-                assert!(t < n, "fn@{} op {i} jumps out of range", f.findex.0);
-                if t <= i {
-                    assert!(
-                        matches!(f.ops[t], Opcode::Label),
-                        "fn@{} op {i}",
-                        f.findex.0
-                    );
-                }
-            }
-        }
-        assert!(matches!(f.ops[n - 1], Opcode::Ret { .. }));
-    }
+    use crate::asm::testutil::{check_flow, check_types, game, read, shifted};
+    use std::collections::HashMap;
 
     /// Patches a copy of the installed game's bytecode (skipped when absent):
     /// six functions are appended and well typed, only World.update,
@@ -2180,7 +1923,9 @@ mod tests {
                     check_types(&back, b, at..at + n);
                 }
                 None => assert!(
-                    ops(&a.ops) == ops(&b.ops) && a.regs == b.regs && a.debug_info == b.debug_info,
+                    format!("{:?}", a.ops) == format!("{:?}", b.ops)
+                        && a.regs == b.regs
+                        && a.debug_info == b.debug_info,
                     "function #{i} (fn@{}) changed",
                     a.findex.0
                 ),
@@ -2376,21 +2121,6 @@ mod tests {
         assert!(
             matches!(update.ops[goto_at + 2], Opcode::SetGlobal { global, .. } if global == issuing)
         );
-
-        // The type check is not vacuous: a float load into an i32 register fails it.
-        let mut bad = update.clone();
-        let fi = bad
-            .ops
-            .iter()
-            .position(|o| matches!(o, Opcode::Float { .. }))
-            .unwrap();
-        let i32_reg = Reg(bad.regs.iter().position(|t| *t == p.t.i32_).unwrap() as u32);
-        if let Opcode::Float { dst, .. } = &mut bad.ops[fi] {
-            *dst = i32_reg;
-        }
-        let n = bad.ops.len();
-        let back_ref = &back;
-        assert!(std::panic::catch_unwind(|| check_types(back_ref, &bad, 0..n)).is_err());
 
         // A second pass finds it applied and leaves the image alone.
         let mut again = read(&patched);
