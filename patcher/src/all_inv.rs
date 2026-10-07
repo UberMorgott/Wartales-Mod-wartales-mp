@@ -147,8 +147,12 @@ const PANEL_ATTRS: &[(&str, &str)] = &[
     ("background", "url(\"ui/elements/InventoryBg.png\") 50 50"),
 ];
 /// The header row (the drag handle): nickname left, close button right.
+/// `fill-width`: the row spans the panel (the vanilla `.title` is a fixed
+/// `width: 220` with the X on the panel itself), so the X sits at the panel's
+/// right edge and the whole top bar is the drag area.
 const TITLE_ATTRS: &[(&str, &str)] = &[
     ("class", "title"),
+    ("fill-width", "true"),
     ("height", "50"),
     ("min-width", "220"),
     ("padding-left", "20"),
@@ -5744,6 +5748,9 @@ mod tests {
             .expect("offset string");
         let attrs = sim.get(&bx, ATTRS);
         assert_eq!(sim.get(&attrs, DYN + k_off), V::S("280 -70".into()));
+        let k_fill = (0..code.strings.len())
+            .find(|&i| super::s(&code, RefString(i)) == "fill-width")
+            .expect("fill-width string");
         let mut kids = sim.children(&ui_o);
         assert_eq!(kids.split_off(4), [bx.clone()]);
         sim.set_children(&ui_o, vec![bx.clone()]);
@@ -5775,6 +5782,9 @@ mod tests {
             let ch = sim.children(pnl);
             assert_eq!(ch.len(), 2, "title + inventory-content");
             assert_eq!(sim.get(&ch[1], TAG), s("inventory-content"));
+            // the header row spans the panel: X at its right edge, all of it drags
+            let t_attrs = sim.get(&ch[0], ATTRS);
+            assert_eq!(sim.get(&t_attrs, DYN + k_fill), s("true"));
             let title = sim.children(&ch[0]);
             assert_eq!(
                 title.iter().map(|o| sim.get(o, TAG)).collect::<Vec<_>>(),
