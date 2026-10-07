@@ -34,7 +34,10 @@
 //        "button" flow with an icon (ICON_ID, the inventory chest, with a
 //        BADGE_ID companions badge on it; tooltip TIP) whose click is
 //        `mpAllInvToggle(bar)`; visible only in multiplayer, enabled
-//        like btInventory (`mpAllInvTick`).
+//        like btInventory (`mpAllInvTick`). It is moved right after
+//        btInventory's flow in the bar's row (`addChildAt`): appended, it
+//        would follow the pause / settings icons (game-option-icons, created
+//        last by the constructor).
 //      - Toggle: in GameUI's dom (HUD root) an absolute horizontal flow at the
 //        left edge (BOX_ATTRS) gets, per other
 //        connected player j, a panel shaped like the vanilla #inventory one
@@ -481,6 +484,8 @@ pub(crate) struct UiPlan {
     str_add: RefFun,
     println: RefFun,
     remove: RefFun,
+    child_index: RefFun,
+    bar_add_at: RefFun,
     flow_set_visible: RefFun,
     set_enable: RefFun,
     set_tip: RefFun,
@@ -710,6 +715,20 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
     want(code, println, "Sys.println", &[dyn_t], void_t)?;
     let remove = method(code, obj_t, "remove")?.findex;
     want(code, remove, "Object.remove", &[obj_t], void_t)?;
+    let child_index = method(code, obj_t, "getChildIndex")?.findex;
+    want(
+        code,
+        child_index,
+        "Object.getChildIndex",
+        &[obj_t, obj_t],
+        i32_t,
+    )?;
+    // The bar's own addChildAt (Flow's: it keeps the FlowProperties in step).
+    let bar_add_at = proto_up(code, bar_t, "addChildAt")?;
+    let baa = sig(code, bar_add_at)?;
+    if baa.args.len() != 3 || baa.args[1] != obj_t || baa.args[2] != i32_t || baa.ret != void_t {
+        bail!("WorldButtonsBar.addChildAt signature");
+    }
     let flow_set_visible = proto_up(code, flow_t, "set_visible")?;
     let fsv = sig(code, flow_set_visible)?;
     if fsv.args.len() != 2 || fsv.args[1] != bool_t {
@@ -966,6 +985,8 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
         str_add,
         println,
         remove,
+        child_index,
+        bar_add_at,
         flow_set_visible,
         set_enable,
         set_tip,
@@ -2739,6 +2760,15 @@ fn add_button(
         r.r(p.flow_t),
     );
     let (bp, bo, badge) = (r.r(dk_t), r.r(p.obj_t), r.r(p.icon_t));
+    let (bt, btp, root, rb, idx, one) = (
+        r.r(p.icon_t),
+        r.r(p.obj_t),
+        r.r(p.obj_t),
+        r.r(p.bar_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+    );
+    let k1 = int_const(code, 1);
     let icon_g = str_global(code, p.str_t, ICON_ID);
     let badge_g = str_global(code, p.str_t, BADGE_ID);
     let tip_g = str_global(code, p.str_t, TIP);
@@ -2783,6 +2813,80 @@ fn add_button(
         obj: cp,
         field: p.blk.props_obj,
     });
+    // Right after btInventory's "button inventory" flow, in the bar's own row:
+    // created last, the flow would follow the game-option-icons (pause /
+    // settings) the constructor appends at its end (WorldButtonsBar.hx:59).
+    a.op(Opcode::Field {
+        dst: bt,
+        obj: Reg(0),
+        field: p.bar_bt,
+    });
+    a.jmp(Opcode::JNull { reg: bt, offset: 0 }, "placed");
+    a.op(Opcode::Field {
+        dst: btp,
+        obj: bt,
+        field: p.parent,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: btp,
+            offset: 0,
+        },
+        "placed",
+    );
+    a.op(Opcode::Field {
+        dst: root,
+        obj: btp,
+        field: p.parent,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: root,
+            offset: 0,
+        },
+        "placed",
+    );
+    a.jmp(Opcode::JNull { reg: co, offset: 0 }, "placed");
+    a.op(Opcode::Field {
+        dst: btp,
+        obj: co,
+        field: p.parent,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: btp,
+            b: root,
+            offset: 0,
+        },
+        "placed",
+    );
+    a.op(Opcode::Field {
+        dst: btp,
+        obj: bt,
+        field: p.parent,
+    });
+    a.op(Opcode::SafeCast { dst: rb, src: root });
+    a.jmp(Opcode::JNull { reg: rb, offset: 0 }, "placed");
+    a.op(Opcode::Call2 {
+        dst: idx,
+        fun: p.child_index,
+        arg0: root,
+        arg1: btp,
+    });
+    a.op(Opcode::Int { dst: one, ptr: k1 });
+    a.op(Opcode::Add {
+        dst: idx,
+        a: idx,
+        b: one,
+    });
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: p.bar_add_at,
+        arg0: rb,
+        arg1: co,
+        arg2: idx,
+    });
+    a.label("placed");
     a.op(Opcode::Field {
         dst: io,
         obj: ip,
@@ -3830,8 +3934,9 @@ mod tests {
                 if a[1] != V::Null {
                     let po = self.get(&a[1], p.blk.props_obj.0);
                     let mut ch = self.children(&po);
-                    ch.push(o);
+                    ch.push(o.clone());
                     self.set_children(&po, ch);
+                    self.set(&o, p.parent.0, po);
                 }
                 self.log.push(("create", vec![a[0].clone()]));
                 props
@@ -3861,6 +3966,23 @@ mod tests {
                 V::Null
             } else if Some(f) == self.drag {
                 self.log.push(("drag", a.to_vec()));
+                V::Null
+            } else if f == p.child_index {
+                let ch = self.children(&a[0]);
+                V::I(ch.iter().position(|c| *c == a[1]).map_or(-1, |i| i as i32))
+            } else if f == p.bar_add_at {
+                let bo = a[0].clone();
+                let mut ch: Vec<V> = self
+                    .children(&bo)
+                    .into_iter()
+                    .filter(|c| *c != a[1])
+                    .collect();
+                let V::I(i) = a[2] else {
+                    panic!("addChildAt index")
+                };
+                ch.insert(i as usize, a[1].clone());
+                self.set_children(&bo, ch);
+                self.log.push(("addChildAt", a.to_vec()));
                 V::Null
             } else if f == p.select_amount {
                 self.log.push(("select", a.to_vec()));
@@ -3948,6 +4070,7 @@ mod tests {
                     }
                     Opcode::Incr { dst } => r[rr(dst)] = V::I(num(&r[rr(dst)]) + 1),
                     Opcode::Sub { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) - num(&r[rr(b)])),
+                    Opcode::Add { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) + num(&r[rr(b)])),
                     Opcode::EnumIndex { dst, value } => {
                         let V::En(k, _) = &r[rr(value)] else {
                             panic!("not an enum")
@@ -4434,12 +4557,26 @@ mod tests {
         let ui_dom = sim.obj(&[(u.blk.props_obj.0, ui_o.clone())]);
         let ui = sim.obj(&[(u.ui_gi.0, gi.clone()), (u.dom.0, ui_dom)]);
         let game = sim.obj(&[(u.game_me.0, a), (u.game_state.0, st), (u.game_ui.0, ui)]);
+        // The bar's row: ..., the inventory button flow, the pause / settings icons.
         let bar_o = sim.obj(&[]);
+        let bt_flow = sim.obj(&[(u.parent.0, bar_o.clone())]);
+        let bt = sim.obj(&[(u.parent.0, bt_flow.clone())]);
+        let options = sim.obj(&[(u.parent.0, bar_o.clone())]);
+        let first = sim.obj(&[(u.parent.0, bar_o.clone())]);
+        sim.set_children(
+            &bar_o,
+            vec![first.clone(), bt_flow.clone(), options.clone()],
+        );
         let bar_dom = sim.obj(&[(u.blk.props_obj.0, bar_o.clone())]);
-        let bar = sim.obj(&[(u.bar_game.0, game.clone()), (u.dom.0, bar_dom)]);
+        let bar = sim.obj(&[
+            (u.bar_game.0, game.clone()),
+            (u.dom.0, bar_dom),
+            (u.bar_bt.0, bt),
+        ]);
         let s = |x: &str| V::S(x.to_string());
 
-        // the button: a "button" flow with the icon, hidden in solo
+        // the button: a "button" flow with the icon, hidden in solo, placed
+        // right after the inventory button (before pause / settings)
         sim.run(button, vec![bar.clone()]);
         let creates: Vec<V> = sim
             .log
@@ -4448,7 +4585,12 @@ mod tests {
             .map(|(_, a)| a[0].clone())
             .collect();
         assert_eq!(creates, [s("flow"), s("icon"), s("icon")]);
-        let btn = sim.children(&bar_o)[0].clone();
+        let row = sim.children(&bar_o);
+        assert_eq!(row.len(), 4);
+        assert_eq!(row[0], first);
+        assert_eq!(row[1], bt_flow);
+        assert_eq!(row[3], options);
+        let btn = row[2].clone();
         let icon = sim.children(&btn)[0].clone();
         assert!(matches!(sim.get(&icon, u.blk.onclick.0), V::Clo(f, _) if f == toggle));
         // the two-people badge sits on the icon and clicks like it
