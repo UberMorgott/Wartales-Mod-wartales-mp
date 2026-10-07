@@ -373,6 +373,20 @@ session is not bricked. The shim now writes every line of a multi-line game
 message (exception + "Called from" stack) and continues long lines instead of
 cutting them at 300 characters. Skipped (logged) per part on mismatch.
 
+**Drop-in** (`src/drop_in.rs`): a player who was not in the session can join
+a running co-op game by code or Steam invite. Vanilla built the host's in-game
+reconnect lobby only when the Pause menu opened (`Game.createLobby`, Pause.hx:133),
+and its `getServerID` (Game.hx:3058-3061) refused every user without a
+`state.players` entry. Now `Game.gameplayStart` creates that lobby on a co-op
+host right away (same guards as Pause, plus `!get_isLocalP2P()`), and
+`getServerID` admits an unknown user while `state.players.length` is below the
+lobby's `maxPlayers` (4, read from `createLobby`); a full party is still
+refused. Log: `mp: drop-in: new player admitted <uid>`. The newcomer owns no
+units until someone gives them some: unit sheet, Transfer (vanilla
+`UnitInfo.transferUnit` / `PlayersPanel`, available to the unit's owner; the
+host owns the units of players who were absent at load). Shapes are validated;
+a mismatch skips the pass (logged).
+
 **Camp: any unit** (`src/camp_any_unit.rs`): in co-op camp only a unit's
 owner could drag it, assign it to a camp tool or move it between camp and
 reserve: four client-side UI gates call `st.Unit.isControllable()`, which

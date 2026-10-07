@@ -27,6 +27,7 @@ mod debrief_enable;
 mod diag;
 mod dialog_recruit;
 mod dlc_untouched;
+mod drop_in;
 mod follow;
 mod force_leave;
 mod forge_mirror;
@@ -91,6 +92,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     job_confirm::patch_job_confirm(&mut code);
     barrier::patch_barrier(&mut code);
     ready_start::patch_ready_start(&mut code);
+    drop_in::patch_drop_in(&mut code);
     diag::patch_diag(&mut code);
     activity_diag::patch_activity_diag(&mut code);
     follow::patch_follow(&mut code);
