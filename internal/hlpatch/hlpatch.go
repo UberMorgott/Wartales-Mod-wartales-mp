@@ -64,6 +64,7 @@ package hlpatch
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"strings"
 )
@@ -182,15 +183,38 @@ var Patches = []Patch{
 	},
 }
 
+// IntConst is an entry of the image's int constant pool that the patches rely
+// on. A needle pins the index an Int op loads, never the value behind it, so
+// a game update that reorders the pool would still match every needle.
+type IntConst struct {
+	Index int
+	Value int32
+}
+
+// Ints are the pool entries patches 3..6 read or redirect to.
+var Ints = []IntConst{
+	{Index: 30, Value: 5},  // the vanilla code length the needles load
+	{Index: 19, Value: 32}, // what maxLen and substr are redirected to
+}
+
 // Magic is the first bytes of a HashLink bytecode image; the proxy refuses to
 // patch an hlboot.dat that does not start with it.
 const Magic = "HLB"
 
-// Apply rewrites buf in place. Every patch must match exactly once and find the
-// byte it expects, or nothing is written at all and an error is returned: a
-// game update that moves this code must leave the bytecode alone, not corrupt
-// it.
+// Apply rewrites buf in place. The int pool must hold Ints, and every patch
+// must match exactly once and find the byte it expects, or nothing is written
+// at all and an error is returned: a game update that moves this code must
+// leave the bytecode alone, not corrupt it.
 func Apply(buf []byte) error {
+	pool, err := intPool(buf)
+	if err != nil {
+		return err
+	}
+	for _, c := range Ints {
+		if c.Index >= len(pool) || pool[c.Index] != c.Value {
+			return fmt.Errorf("hlpatch: int constant #%d is not %d", c.Index, c.Value)
+		}
+	}
 	at := make([]int, len(Patches))
 	for i, p := range Patches {
 		n := bytes.Count(buf, p.Needle)
@@ -207,6 +231,66 @@ func Apply(buf []byte) error {
 		buf[at[i]] = p.To
 	}
 	return nil
+}
+
+// intPool reads the int constant pool of a HashLink image: after "HLB" and
+// the version byte come the flags and the table sizes as hl indexes (nints
+// first), and the ints follow them as little-endian int32s (HashLink
+// hl_code_read; hlbc read.rs).
+func intPool(buf []byte) ([]int32, error) {
+	if len(buf) < len(Magic)+1 || string(buf[:len(Magic)]) != Magic {
+		return nil, fmt.Errorf("hlpatch: not a HashLink image")
+	}
+	version := buf[len(Magic)]
+	if version < 4 || version > 5 {
+		return nil, fmt.Errorf("hlpatch: unsupported bytecode version %d", version)
+	}
+	pos := len(Magic) + 1
+	// flags, nints, nfloats, nstrings, [nbytes], ntypes, nglobals, nnatives,
+	// nfunctions, nconstants, entrypoint
+	fields := 10
+	if version >= 5 {
+		fields++
+	}
+	var nints int
+	for i := range fields {
+		v, n, err := hlIndex(buf[pos:])
+		if err != nil {
+			return nil, err
+		}
+		if i == 1 {
+			nints = v
+		}
+		pos += n
+	}
+	if nints > (len(buf)-pos)/4 {
+		return nil, fmt.Errorf("hlpatch: int pool of %d entries runs past the image", nints)
+	}
+	pool := make([]int32, nints)
+	for i := range pool {
+		pool[i] = int32(binary.LittleEndian.Uint32(buf[pos+4*i:])) //nolint:gosec // a two's complement reinterpretation
+	}
+	return pool, nil
+}
+
+// hlIndex decodes one non-negative hl index (HashLink hl_read_index): 7 bits
+// in one byte, 13 bits in two (0x80 set), 29 bits in four (0xc0 set); 0x20 in
+// the first byte of the longer forms is a sign.
+func hlIndex(b []byte) (v, n int, err error) {
+	switch {
+	case len(b) >= 1 && b[0]&0x80 == 0:
+		return int(b[0]), 1, nil
+	case len(b) >= 2 && b[0]&0x40 == 0:
+		v, n = int(b[0]&31)<<8|int(b[1]), 2
+	case len(b) >= 4 && b[0]&0x40 != 0:
+		v, n = int(b[0]&31)<<24|int(b[1])<<16|int(b[2])<<8|int(b[3]), 4
+	default:
+		return 0, 0, fmt.Errorf("hlpatch: truncated header")
+	}
+	if b[0]&0x20 != 0 {
+		return 0, 0, fmt.Errorf("hlpatch: negative table size in the header")
+	}
+	return v, n, nil
 }
 
 // Header returns the C header tools/hlpatchgen writes for the winmm.dll proxy,

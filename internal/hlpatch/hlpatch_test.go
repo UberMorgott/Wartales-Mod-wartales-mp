@@ -2,6 +2,7 @@ package hlpatch
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,29 +57,30 @@ func TestApplyPatchesLiveBytecode(t *testing.T) {
 func TestApplyRequiresExactlyOneMatch(t *testing.T) {
 	p := Patches[0]
 	t.Run("missing", func(t *testing.T) {
-		buf := make([]byte, 4096)
+		buf := append(image(goodInts()), make([]byte, 4096)...)
 		if err := Apply(buf); err == nil {
 			t.Fatal("want error for an image without the signature")
 		}
 	})
 	t.Run("duplicate", func(t *testing.T) {
-		buf := append(append([]byte{0, 1, 2}, p.Needle...), p.Needle...)
+		buf := append(append(image(goodInts()), p.Needle...), p.Needle...)
 		if err := Apply(buf); err == nil {
 			t.Fatal("want error for an ambiguous signature")
 		}
 	})
 	t.Run("brokenSignature", func(t *testing.T) {
-		buf := make([]byte, 0, 64)
+		buf := image(goodInts())
+		hdr := len(buf)
 		for _, q := range Patches {
 			buf = append(buf, q.Needle...)
 		}
-		buf[p.Index] = 0xff // the byte the patch would rewrite, changed by a game update
+		buf[hdr+p.Index] = 0xff // the byte the patch would rewrite, changed by a game update
 		if err := Apply(buf); err == nil {
 			t.Fatal("want error when the signature no longer matches")
 		}
 	})
 	t.Run("nothingWrittenOnFailure", func(t *testing.T) {
-		buf := append([]byte(nil), p.Needle...) // only the first patch matches
+		buf := append(image(goodInts()), p.Needle...) // only the first patch matches
 		before := append([]byte(nil), buf...)
 		if err := Apply(buf); err == nil {
 			t.Fatal("want error when a later patch does not match")
@@ -129,7 +131,8 @@ func patched(p Patch) []byte {
 // the loop instead rejects a fourth player in a three-human, one-animal party.
 func TestAllPlayersAssignedAllowsPlayerWithoutHuman(t *testing.T) {
 	head := []byte{0x42, 0x47, 0x04, 0x26, 0x09, 0x04, 0x00, 0x31, 0x07, 0x09, 0x30, 0x00, 0x08, 0x07, 0x16, 0x07, 0x26, 0x09, 0x04, 0x00, 0x34, 0x08, 0x09, 0x02}
-	buf := append([]byte(nil), head...)
+	hdr := image(goodInts())
+	buf := append(append([]byte(nil), hdr...), head...)
 	for _, p := range Patches {
 		if !bytes.Contains(p.Needle, head) {
 			buf = append(buf, p.Needle...)
@@ -138,6 +141,7 @@ func TestAllPlayersAssignedAllowsPlayerWithoutHuman(t *testing.T) {
 	if err := Apply(buf); err != nil {
 		t.Fatal(err)
 	}
+	buf = buf[len(hdr):]
 	// Evaluate the actual JSGte operands for the loop index and player count.
 	for players := 1; players <= 4; players++ {
 		var regs [10]int
@@ -147,6 +151,75 @@ func TestAllPlayersAssignedAllowsPlayerWithoutHuman(t *testing.T) {
 		}
 		if regs[buf[8]] < regs[buf[9]] {
 			t.Fatalf("%d players: still enters the mandatory-human assignment loop", players)
+		}
+	}
+}
+
+// goodInts is an int pool holding every constant in Ints.
+func goodInts() []int32 {
+	pool := make([]int32, 40)
+	for _, c := range Ints {
+		pool[c.Index] = c.Value
+	}
+	return pool
+}
+
+// image is the header of a version 4 HashLink image with the given int pool:
+// "HLB", the version, flags, nints, eight more table sizes and the
+// entrypoint (all one-byte hl indexes here), then the ints.
+func image(ints []int32) []byte {
+	b := []byte(Magic + "\x04")
+	b = append(b, 0, byte(len(ints)), 0, 0, 0, 0, 0, 0, 0, 0) //nolint:gosec // test pools are under 128 entries
+	for _, v := range ints {
+		b = binary.LittleEndian.AppendUint32(b, uint32(v)) //nolint:gosec // two's complement
+	}
+	return b
+}
+
+// The needles pin an int pool index, not its value: an image whose pool was
+// reordered is refused even though every needle still matches.
+func TestApplyChecksTheIntPool(t *testing.T) {
+	code := []byte{}
+	for _, p := range Patches {
+		code = append(code, p.Needle...)
+	}
+	if err := Apply(append(image(goodInts()), code...)); err != nil {
+		t.Fatalf("a matching pool: %v", err)
+	}
+	for _, c := range Ints {
+		pool := goodInts()
+		pool[c.Index] = 1
+		buf := append(image(pool), code...)
+		before := append([]byte(nil), buf...)
+		if err := Apply(buf); err == nil {
+			t.Fatalf("int #%d changed to 1: want an error", c.Index)
+		}
+		if !bytes.Equal(buf, before) {
+			t.Fatal("a refused Apply wrote to the image")
+		}
+	}
+	if err := Apply(append(image(goodInts()[:20]), code...)); err == nil {
+		t.Fatal("a pool too short for #30: want an error")
+	}
+}
+
+func TestHLIndex(t *testing.T) {
+	for _, c := range []struct {
+		in   []byte
+		v, n int
+	}{
+		{[]byte{0x1e}, 30, 1},
+		{[]byte{0x81, 0x02}, 0x102, 2},
+		{[]byte{0xc1, 0x02, 0x03, 0x04}, 0x01020304, 4},
+	} {
+		v, n, err := hlIndex(c.in)
+		if err != nil || v != c.v || n != c.n {
+			t.Fatalf("hlIndex(% x) = %d, %d, %v; want %d, %d", c.in, v, n, err, c.v, c.n)
+		}
+	}
+	for _, bad := range [][]byte{{}, {0x81}, {0xa1, 0}, {0xc1, 0, 0}} {
+		if _, _, err := hlIndex(bad); err == nil {
+			t.Fatalf("hlIndex(% x): want an error", bad)
 		}
 	}
 }
