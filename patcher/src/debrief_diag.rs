@@ -69,13 +69,6 @@ struct Plan {
     debug_file: usize,
 }
 
-fn index(code: &Bytecode, fun: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == fun)
-        .context("function missing")
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     if code.strings.iter().any(|s| s.as_str() == MARKER) {
         bail!("already applied");
@@ -99,12 +92,12 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let sys_time = native(code, "sys_time", f64_)?;
     let rebuild = method(code, debrief, "rebuild")?;
     let update = method(code, debrief, "update")?;
-    let update_fi = index(code, update.findex)?;
+    let update_fi = fun_index(code, update.findex)?;
     // The rate site precedes update's mismatch sites: hooks are inserted in
     // reverse site order, so later (higher) offsets in update go in first.
     let mut sites = vec![
         Site {
-            fi: index(code, rebuild.findex)?,
+            fi: fun_index(code, rebuild.findex)?,
             at: 0,
             tag: MARKER,
             src: Src::Debrief,
@@ -218,7 +211,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         let [fun] = matches_[..] else {
             bail!("expected one interactive {event} closure");
         };
-        let fi = index(code, fun)?;
+        let fi = fun_index(code, fun)?;
         if code.functions[fi].regs.first() != Some(&element) {
             bail!("unexpected event context");
         }
@@ -241,7 +234,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     ] {
         let f = method(code, obj_type(code, class)?, method_)?;
         sites.push(Site {
-            fi: index(code, f.findex)?,
+            fi: fun_index(code, f.findex)?,
             at: 0,
             tag,
             src: Src::Element,
@@ -270,7 +263,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         (w_update, set + 1, "[mp debrief] trigger dirty", Src::Window),
         (do_rebuild, 0, "[mp debrief] trigger net", Src::Window),
     ] {
-        let fi = index(code, f.findex)?;
+        let fi = fun_index(code, f.findex)?;
         if code.functions[fi].regs.first() != Some(&window) {
             bail!("unexpected trigger context");
         }

@@ -20,6 +20,7 @@
 use super::asm::{push_fn, Asm, Regs, Snap};
 use super::job_xp::str_global;
 use super::*;
+use crate::marker_names::vproto;
 
 /// The repo's VERSION file (single source of the release version).
 const VERSION_FILE: &str = include_str!("../../VERSION");
@@ -47,20 +48,6 @@ struct Plan {
     /// `s`, the "v." + VERSION string.
     text: Reg,
     dbg_file: usize,
-}
-
-/// Proto `name` of class `t` or its nearest ancestor: (function, vtable index).
-fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, RefField)> {
-    let mut cur = Some(t);
-    while let Some(c) = cur {
-        let o = obj(code, c)?;
-        if let Some(p) = o.protos.iter().find(|p| s(code, p.name) == name) {
-            let i = usize::try_from(p.pindex).context("negative proto index")?;
-            return Ok((p.findex, RefField(i)));
-        }
-        cur = o.super_;
-    }
-    bail!("proto {name} not found on type {} or its ancestors", t.0)
 }
 
 fn plan(code: &Bytecode) -> Result<Plan> {

@@ -52,15 +52,6 @@ struct Plan {
     gate_at: usize,
 }
 
-fn calls(f: &Function, want: RefFun) -> bool {
-    f.ops.iter().any(|o| {
-        matches!(o,
-            Opcode::Call0 { fun, .. } | Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. }
-            | Opcode::Call3 { fun, .. } | Opcode::Call4 { fun, .. } | Opcode::CallN { fun, .. }
-            if *fun == want)
-    })
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     let debrief_t = obj_type(code, "ui.win.Debrief")?;
     let init = method(code, debrief_t, "init")?;

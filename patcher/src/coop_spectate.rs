@@ -134,14 +134,6 @@ fn want(code: &Bytecode, f: RefFun, what: &str, args: &[RefType], ret: RefType) 
     Ok(())
 }
 
-fn want_field(code: &Bytecode, t: RefType, name: &str, ty: RefType) -> Result<RefField> {
-    let (f, ft) = field(code, t, name)?;
-    if ft != ty {
-        bail!("field {name} has type {}, want {}", ft.0, ty.0);
-    }
-    Ok(f)
-}
-
 /// The register an op writes, if any (every opcode names it `dst`).
 pub(crate) fn dst_of(op: &Opcode) -> Option<Reg> {
     let d = format!("{op:?}");
@@ -182,12 +174,12 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     let obj2_t = obj_type(code, "h2d.Object")?;
     let ctrl_t = obj_type(code, "st.Controller")?;
 
-    let a_game = want_field(code, act_t, "game", game_t)?;
-    let a_host = want_field(code, act_t, "__host", host_t)?;
-    let a_unit = want_field(code, act_t, "unit", unit_t)?;
-    let a_int = want_field(code, act_t, "int", int_t)?;
-    let a_cc = want_field(code, act_t, "changeCamera", bool_)?;
-    let a_prev = want_field(code, act_t, "prevInventory", bool_)?;
+    let a_game = typed(code, act_t, "game", game_t)?;
+    let a_host = typed(code, act_t, "__host", host_t)?;
+    let a_unit = typed(code, act_t, "unit", unit_t)?;
+    let a_int = typed(code, act_t, "int", int_t)?;
+    let a_cc = typed(code, act_t, "changeCamera", bool_)?;
+    let a_prev = typed(code, act_t, "prevInventory", bool_)?;
     let (a_cam, cam_t) = field(code, act_t, "cameraSave")?;
     if !matches!(code.types[cam_t.0], Type::Virtual { .. }) {
         bail!("Activity.cameraSave is not a virtual");
@@ -197,15 +189,15 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     if id_t != str_t {
         bail!("activity inf.id is not a String");
     }
-    let u_owner = want_field(code, unit_t, "owner", player_t)?;
-    let g_me = want_field(code, game_t, "me", player_t)?;
-    let g_mode = want_field(code, game_t, "mode", mode_t)?;
-    let g_gui = want_field(code, game_t, "globalUI", gui_t)?;
-    let g_ui = want_field(code, game_t, "ui", ui_t)?;
-    let m_lock = want_field(code, mode_t, "lockCamera", bool_)?;
-    let gui_pad = want_field(code, gui_t, "padCursor", pad_t)?;
-    let pad_locked = want_field(code, pad_t, "locked", bool_)?;
-    let w_root = want_field(code, win_t, "windowRoot", flow_t)?;
+    let u_owner = typed(code, unit_t, "owner", player_t)?;
+    let g_me = typed(code, game_t, "me", player_t)?;
+    let g_mode = typed(code, game_t, "mode", mode_t)?;
+    let g_gui = typed(code, game_t, "globalUI", gui_t)?;
+    let g_ui = typed(code, game_t, "ui", ui_t)?;
+    let m_lock = typed(code, mode_t, "lockCamera", bool_)?;
+    let gui_pad = typed(code, gui_t, "padCursor", pad_t)?;
+    let pad_locked = typed(code, pad_t, "locked", bool_)?;
+    let w_root = typed(code, win_t, "windowRoot", flow_t)?;
 
     let show_inv = method(code, ui_t, "showInventory")?.findex;
     want(

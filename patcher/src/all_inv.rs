@@ -77,8 +77,9 @@ use super::asm::{push_fn, string_ref, Asm, Regs, Snap};
 use super::chest_buttons::{plan_icon_block, IconBlock};
 use super::diag::static_fn;
 use super::job_xp::str_global;
+use super::window_drag::{find_named, name_fn};
 use super::*;
-use hlbc::types::{RefEnumConstruct, RefGlobal, RefString, ValBool};
+use hlbc::types::{RefEnumConstruct, RefGlobal, ValBool};
 
 const LOG_CAP: i32 = 20;
 const S_ERR: &str = "mp: allinv: ";
@@ -605,19 +606,6 @@ fn proto_up(code: &Bytecode, t: RefType, name: &str) -> Result<RefFun> {
     bail!("{name} not found on type {} or its parents", t.0)
 }
 
-fn find_named(code: &Bytecode, name: &str) -> Option<RefFun> {
-    code.functions
-        .iter()
-        .find(|f| f.name != RefString(0) && s(code, f.name) == name)
-        .map(|f| f.findex)
-}
-
-fn name_fn(code: &mut Bytecode, f: RefFun, name: &str) {
-    let n = string_ref(code, name);
-    let i = code.functions.iter().position(|x| x.findex == f).unwrap();
-    code.functions[i].name = n;
-}
-
 /// The global vanilla initialises with the argument-less enum value `construct`
 /// (the init code: `g = SafeCast($Enum.__evalues__[construct])`).
 fn enum_value_global(code: &Bytecode, enum_t: RefType, construct: usize) -> Result<RefGlobal> {
@@ -1093,18 +1081,6 @@ fn window_found(code: &Bytecode, mode_t: RefType) -> Result<i32> {
             .context("ItemSlotMode.FoundItems not found"),
         _ => bail!("ItemSlotMode is not an enum"),
     }
-}
-
-fn existing_str(code: &Bytecode, str_t: RefType, value: &str) -> Result<RefGlobal> {
-    code.constants
-        .iter()
-        .flatten()
-        .find(|c| {
-            code.globals.get(c.global.0) == Some(&str_t)
-                && matches!(c.fields[..], [si, _] if code.strings.get(si).is_some_and(|x| x.as_str() == value))
-        })
-        .map(|c| c.global)
-        .with_context(|| format!("string global {value:?} not found"))
 }
 
 fn virtual_field_t(code: &Bytecode, t: RefType, f: RefField) -> Option<&Type> {

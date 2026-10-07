@@ -112,13 +112,6 @@ struct Plan {
     type_t: RefType,
 }
 
-fn fun_named(code: &Bytecode, f: RefFun) -> Option<&str> {
-    code.functions
-        .iter()
-        .find(|g| g.findex == f)
-        .map(|g| s(code, g.name))
-}
-
 /// Last op before `at` that writes register `r` (by its `dst`).
 fn writer(f: &Function, at: usize, r: Reg) -> Option<usize> {
     f.ops[..at].iter().rposition(|o| {
@@ -189,15 +182,6 @@ fn plan_create(f: &Function, ci: usize) -> Result<Create> {
     })
 }
 
-fn calls(f: &Function, want: RefFun) -> bool {
-    f.ops.iter().any(|o| {
-        matches!(o,
-            Opcode::Call0 { fun, .. } | Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. }
-            | Opcode::Call3 { fun, .. } | Opcode::Call4 { fun, .. } | Opcode::CallN { fun, .. }
-            if *fun == want)
-    })
-}
-
 fn plan_take(code: &Bytecode, mode_t: RefType, found: usize) -> Result<Take> {
     let slot_t = obj_type(code, "ui.comp.ItemSlot")?;
     let (slot_mode, sm_t) = field(code, slot_t, "mode")?;
@@ -219,7 +203,7 @@ fn plan_take(code: &Bytecode, mode_t: RefType, found: usize) -> Result<Take> {
     else {
         bail!("onRightClick does not start with get_item");
     };
-    if src != g || fun_named(code, *get_item) != Some("get_item") {
+    if src != g || fname(code, *get_item) != "get_item" {
         bail!("onRightClick does not start with get_item");
     }
     let (item_k, k_r, get_locked) = (2..o.len().min(12))
@@ -233,7 +217,7 @@ fn plan_take(code: &Bytecode, mode_t: RefType, found: usize) -> Result<Take> {
                 Opcode::NullCheck { .. },
             ) if obj == item_r => o[i + 1..i + 3].iter().find_map(|x| match x {
                 Opcode::Call1 { fun, arg0, .. }
-                    if arg0 == k && fun_named(code, *fun) == Some("get_locked") =>
+                    if arg0 == k && fname(code, *fun) == "get_locked" =>
                 {
                     Some((*kf, *k, *fun))
                 }
@@ -307,7 +291,7 @@ fn plan_take(code: &Bytecode, mode_t: RefType, found: usize) -> Result<Take> {
             _ => None,
         })
         .context("onRightClick: FoundItems case does not take the whole stack")?;
-    if fun_named(code, get_count) != Some("get_count") {
+    if fname(code, get_count) != "get_count" {
         bail!("onRightClick: stack count is not get_count");
     }
     // The body must be vanilla's host-authoritative take: MoveTo through the slot

@@ -41,25 +41,6 @@ struct Plan {
     dbg: usize,
 }
 
-fn index(code: &Bytecode, fun: RefFun) -> Result<usize> {
-    code.functions
-        .iter()
-        .position(|f| f.findex == fun)
-        .context("function missing")
-}
-
-fn class(code: &Bytecode, name: &str) -> Result<(RefGlobal, RefType)> {
-    let g = obj(code, obj_type(code, name)?)?
-        .global
-        .0
-        .checked_sub(1)
-        .context("class global missing")?;
-    Ok((
-        RefGlobal(g),
-        *code.globals.get(g).context("class global invalid")?,
-    ))
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     if code.strings.iter().any(|v| v.as_str() == MARKER) {
         bail!("already applied");
@@ -199,7 +180,8 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         .filter_map(|op| match op {
             Opcode::Call0 { dst, fun }
                 if sync.regs[dst.0 as usize] == bool_
-                    && s(code, code.functions[index(code, *fun).ok()?].name) == "get_active" =>
+                    && s(code, code.functions[fun_index(code, *fun).ok()?].name)
+                        == "get_active" =>
             {
                 Some(*fun)
             }
@@ -212,7 +194,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("tooltip gamepad predicate ambiguous");
     };
     let check = method(code, obj_type(code, "hl.BaseType")?, "check")?.findex;
-    let sig = code.functions[index(code, check)?]
+    let sig = code.functions[fun_index(code, check)?]
         .t
         .as_fun(code)
         .context("check signature missing")?;
@@ -223,7 +205,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("unexpected tooltip hierarchy fields");
     }
     Ok(Plan {
-        fi: index(code, f.findex)?,
+        fi: fun_index(code, f.findex)?,
         at,
         interactive,
         event,
@@ -247,10 +229,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         prefs_t,
         keep,
         classes: [
-            class(code, "ui.comp.TipContent")?,
-            class(code, CONTENTS[0])?,
-            class(code, CONTENTS[1])?,
-            class(code, CONTENTS[2])?,
+            class_global(code, "ui.comp.TipContent")?,
+            class_global(code, CONTENTS[0])?,
+            class_global(code, CONTENTS[1])?,
+            class_global(code, CONTENTS[2])?,
         ],
         dbg: debug_file(code, "h2d/Scene.hx")?,
     })
@@ -866,7 +848,7 @@ mod tests {
             V::Null
         }
         fn run(&mut self, fun: RefFun, args: &[V], start: usize, stop: Option<usize>) -> V {
-            let f = self.code.functions[index(self.code, fun).unwrap()].clone();
+            let f = self.code.functions[fun_index(self.code, fun).unwrap()].clone();
             let mut r = vec![V::Null; f.regs.len()];
             r[..args.len()].clone_from_slice(args);
             let mut pc = start;

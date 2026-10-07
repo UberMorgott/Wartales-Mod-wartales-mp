@@ -385,6 +385,29 @@ fn native(code: &Bytecode, name: &str, args: &[RefType], ret: RefType) -> Result
     }
 }
 
+/// `f` calls `want` directly.
+fn calls(f: &Function, want: RefFun) -> bool {
+    f.ops.iter().any(|o| {
+        matches!(o,
+            Opcode::Call0 { fun, .. } | Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. }
+            | Opcode::Call3 { fun, .. } | Opcode::Call4 { fun, .. } | Opcode::CallN { fun, .. }
+            if *fun == want)
+    })
+}
+
+/// Global of an existing String constant `value` (built by the game, not appended).
+fn existing_str(code: &Bytecode, str_t: RefType, value: &str) -> Result<RefGlobal> {
+    code.constants
+        .iter()
+        .flatten()
+        .find(|c| {
+            code.globals.get(c.global.0) == Some(&str_t)
+                && matches!(c.fields[..], [si, _] if code.strings.get(si).is_some_and(|x| x.as_str() == value))
+        })
+        .map(|c| c.global)
+        .with_context(|| format!("string global {value:?} not found"))
+}
+
 fn string_index(code: &Bytecode, value: &str) -> Result<RefString> {
     code.strings
         .iter()

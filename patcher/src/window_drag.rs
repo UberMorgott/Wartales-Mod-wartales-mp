@@ -526,13 +526,13 @@ fn guard_close(a: &mut Asm, g: &Guard, report: RefFun) {
     a.op(Opcode::Ret { ret: g.v });
 }
 
-fn name_fn(code: &mut Bytecode, f: RefFun, name: &str) {
+pub(crate) fn name_fn(code: &mut Bytecode, f: RefFun, name: &str) {
     let n = string_ref(code, name);
     let i = code.functions.iter().position(|x| x.findex == f).unwrap();
     code.functions[i].name = n;
 }
 
-fn find_named(code: &Bytecode, name: &str) -> Option<RefFun> {
+pub(crate) fn find_named(code: &Bytecode, name: &str) -> Option<RefFun> {
     code.functions
         .iter()
         .find(|f| f.name != RefString(0) && s(code, f.name) == name)

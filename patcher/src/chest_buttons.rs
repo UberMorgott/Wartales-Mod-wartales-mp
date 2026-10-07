@@ -316,19 +316,6 @@ fn fun_sig(code: &Bytecode, f: RefFun) -> Result<TypeFun> {
         .with_context(|| format!("function @{} has no function type", f.0))
 }
 
-/// A global holding the String constant `value` (must exist).
-fn existing_str_global(code: &Bytecode, str_t: RefType, value: &str) -> Result<RefGlobal> {
-    code.constants
-        .iter()
-        .flatten()
-        .find(|c| {
-            code.globals.get(c.global.0) == Some(&str_t)
-                && matches!(c.fields[..], [si, _] if code.strings.get(si).is_some_and(|x| x.as_str() == value))
-        })
-        .map(|c| c.global)
-        .with_context(|| format!("string global {value:?} not found"))
-}
-
 /// Class global of enum `name` (its `$Name` BaseType object), found as the global
 /// a function loads right before `$Type.createEnumIndex` with that enum's result.
 fn enum_class_global(
@@ -578,7 +565,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if tool_inv.1 != inv_t {
         bail!("Tool.inventory is not st.Inventory");
     }
-    let chest_s = existing_str_global(code, str_t, "Chest")?;
+    let chest_s = existing_str(code, str_t, "Chest")?;
     let net_sort_f = proto_fn(code, inv_t, "netSortBy")?;
     let ns = net_sort_f.t.as_fun(code).unwrap().clone();
     if ns.args.len() != 3 || !matches!(code.types[ns.args[1].0], Type::Enum { .. }) {
@@ -608,15 +595,15 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if sfx_sig.args.len() != 3 || sfx_sig.args[1] != str_t || sfx_sig.args[2] != t.dyn_ {
         bail!("GameUI.sfx is not (String, Dyn)");
     }
-    let sfx_confirm = existing_str_global(code, str_t, "InventorySortConfirm")?;
-    let flow_g = existing_str_global(code, str_t, "flow")?;
+    let sfx_confirm = existing_str(code, str_t, "InventorySortConfirm")?;
+    let flow_g = existing_str(code, str_t, "flow")?;
     if job_xp::const_str(code, blk.icon_g) != Some("icon") {
         bail!("ctor: sortButton component is not \"icon\"");
     }
-    let sort_icon_g = existing_str_global(code, str_t, "SortButton")?;
+    let sort_icon_g = existing_str(code, str_t, "SortButton")?;
     let t = Types { ref_bool, ..t };
     let mut mv = plan_move(code, &t, game_t, icon_t)?;
-    mv.stack_icon_g = existing_str_global(code, str_t, "CampChestButton")?;
+    mv.stack_icon_g = existing_str(code, str_t, "CampChestButton")?;
     Ok(Plan {
         t,
         mv,

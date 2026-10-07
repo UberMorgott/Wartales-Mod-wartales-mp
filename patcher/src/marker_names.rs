@@ -55,7 +55,7 @@ struct Plan {
 }
 
 /// Proto `name` of class `t` or its nearest ancestor: (function, vtable index).
-fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, RefField)> {
+pub(crate) fn vproto(code: &Bytecode, t: RefType, name: &str) -> Result<(RefFun, RefField)> {
     let mut cur = Some(t);
     while let Some(c) = cur {
         let o = obj(code, c)?;

@@ -38,22 +38,6 @@ struct Plan {
     heal: RefFun,
 }
 
-fn calls(f: &Function, want: RefFun) -> bool {
-    f.ops.iter().any(|o| {
-        matches!(o,
-            Opcode::Call0 { fun, .. } | Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. }
-            | Opcode::Call3 { fun, .. } | Opcode::Call4 { fun, .. } | Opcode::CallN { fun, .. }
-            if *fun == want)
-    })
-}
-
-fn named(code: &Bytecode, f: RefFun) -> Option<&str> {
-    code.functions
-        .iter()
-        .find(|g| g.findex == f)
-        .map(|g| s(code, g.name))
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     let debrief_t = obj_type(code, "ui.win.Debrief")?;
     let update = method(code, debrief_t, "update")?;
@@ -101,9 +85,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let tail = &o[at..];
     let has = |name: &str| {
         tail.iter().any(|x| match x {
-            Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. } => {
-                named(code, *fun) == Some(name)
-            }
+            Opcode::Call1 { fun, .. } | Opcode::Call2 { fun, .. } => fname(code, *fun) == name,
             _ => false,
         })
     };
@@ -204,7 +186,7 @@ mod tests {
         let injuries: Vec<usize> = (at..code.functions[fi].ops.len())
             .filter(|&i| {
                 matches!(code.functions[fi].ops[i], Opcode::Call1 { fun, .. }
-                    if named(&code, fun) == Some("getInjuries"))
+                    if fname(&code, fun) == "getInjuries")
             })
             .collect();
         assert!(!injuries.is_empty());

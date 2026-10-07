@@ -44,7 +44,7 @@
 use super::asm::{push_fn, Asm, Regs};
 
 use super::job_xp::{const_str, str_global};
-use super::mirror::{self, emit_log, emit_play_once, int, want_field, writer, Base, Camp};
+use super::mirror::{self, emit_log, emit_play_once, int, writer, Base, Camp};
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
@@ -87,16 +87,16 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
             bail!("type {} is not a ui.Window", t.0);
         }
     }
-    let ua_act = want_field(code, ua_t, "activity", b.act_t)?;
-    let ar_act = want_field(code, ar_t, "activity", b.act_t)?;
-    let w_game = want_field(code, win_t, "game", b.game_t)?;
+    let ua_act = typed(code, ua_t, "activity", b.act_t)?;
+    let ar_act = typed(code, ar_t, "activity", b.act_t)?;
+    let w_game = typed(code, win_t, "game", b.game_t)?;
     // the same Window.game slot on both window classes
     for t in [ua_t, ar_t] {
-        if want_field(code, t, "game", b.game_t)? != w_game {
+        if typed(code, t, "game", b.game_t)? != w_game {
             bail!("Window.game moved on type {}", t.0);
         }
     }
-    let a_game = want_field(code, b.act_t, "game", b.game_t)?;
+    let a_game = typed(code, b.act_t, "game", b.game_t)?;
 
     let m = |t: RefType, name: &str| -> Result<usize> {
         let f = method(code, t, name)?;

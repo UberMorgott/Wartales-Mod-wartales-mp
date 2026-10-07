@@ -124,18 +124,6 @@ fn fun_t(code: &Bytecode, f: RefFun) -> Result<TypeFun> {
         .with_context(|| format!("function @{} is not a function", f.0))
 }
 
-fn string_global(code: &Bytecode, str_t: RefType, value: &str) -> Result<RefGlobal> {
-    code.constants
-        .iter()
-        .flatten()
-        .find(|c| {
-            code.globals.get(c.global.0) == Some(&str_t)
-                && matches!(c.fields[..], [si, _] if code.strings.get(si).is_some_and(|x| x.as_str() == value))
-        })
-        .map(|c| c.global)
-        .with_context(|| format!("string global {value:?} not found"))
-}
-
 fn types(code: &Bytecode) -> Result<T> {
     let prim = |what, pred: fn(&Type) -> bool| prim_type(code, what, pred);
     Ok(T {
@@ -356,7 +344,7 @@ fn consume_refs(code: &Bytecode, t: &T) -> Result<Consume> {
         game_state: gs.2,
         get_camp,
         get_tool,
-        chest_s: string_global(code, t.str_, "Chest")?,
+        chest_s: existing_str(code, t.str_, "Chest")?,
         light_s: light_s.context("useList: no \"Light\" test")?,
         tool_inv: tool_inv.context("useList: no Tool.inventory")?,
         boat_inv: boat_inv.context("useList: no boatInventory")?,
@@ -2014,7 +2002,7 @@ fn plan_activities(code: &Bytecode, t: &T, f: &InvFns) -> Result<Acts> {
     .collect::<Vec<_>>();
     let try_use = one_call(code, FISH, "startState", f.try_use, f.try_use)?;
     let use_ = one_call(code, PICK, "startState", f.use_, f.use_)?;
-    let lp = string_global(code, t.str_, "LockPick")?;
+    let lp = existing_str(code, t.str_, "LockPick")?;
     // Chest.tryUnlock's lockpick closure: "no lockpick -> sound, stop" tests
     let tu = method(code, obj_type(code, "ent.p.Chest")?, "tryUnlock")?;
     let mut picks = vec![];

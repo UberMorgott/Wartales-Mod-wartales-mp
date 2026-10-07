@@ -58,13 +58,6 @@ struct Plan {
 
 const BLOCK: usize = 12;
 
-fn named(code: &Bytecode, f: RefFun) -> Option<&str> {
-    code.functions
-        .iter()
-        .find(|g| g.findex == f)
-        .map(|g| s(code, g.name))
-}
-
 fn plan(code: &Bytecode) -> Result<Plan> {
     let tavern_t = obj_type(code, "st.player.Tavern")?;
     let resume_t = obj_type(code, "st.player.tavern.TavernResumeData")?;
@@ -127,7 +120,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
                 && a1 == a
                 && a2 == a
                 && *r == resume
-                && named(code, *fun) == Some("push")
+                && fname(code, *fun) == "push"
                 && m1 == m
                 && m2 == m
                 && m3 == m

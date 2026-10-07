@@ -73,7 +73,7 @@
 use super::asm::{push_fn, string_ref, Asm, Regs};
 
 use super::job_xp::{const_str, str_global};
-use super::mirror::{self, emit_log, emit_play_once, enum_constructs, int, want, want_field, Base};
+use super::mirror::{self, emit_log, emit_play_once, enum_constructs, int, want, Base};
 
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
@@ -181,12 +181,12 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     let (obj_t, str_t, f64_, void_, dyn_t) = (b.obj_t, b.str_t, b.f64_, b.void_, b.dyn_t);
 
     // ForgeAction: Window.game, activity
-    let w_game = want_field(code, fa_t, "game", b.game_t)?;
-    let w_act = want_field(code, fa_t, "activity", b.act_t)?;
-    let m_s3d = want_field(code, b.mode_t, "s3d", scene_t)?;
-    let m41 = want_field(code, mat_t, "_41", f64_)?;
-    let m42 = want_field(code, mat_t, "_42", f64_)?;
-    let m43 = want_field(code, mat_t, "_43", f64_)?;
+    let w_game = typed(code, fa_t, "game", b.game_t)?;
+    let w_act = typed(code, fa_t, "activity", b.act_t)?;
+    let m_s3d = typed(code, b.mode_t, "s3d", scene_t)?;
+    let m41 = typed(code, mat_t, "_41", f64_)?;
+    let m42 = typed(code, mat_t, "_42", f64_)?;
+    let m43 = typed(code, mat_t, "_43", f64_)?;
 
     // ping__impl's fx load: Main.CACHE.loadPrefab(loader.loadCache(path, Resource), null, s3d)
     let imp = &code.functions[b.impl_fi];
@@ -297,9 +297,9 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
 
     // ForgeAction: anim names, the three hooks.
     let ctor = method(code, fa_t, "__constructor__")?;
-    let hit_g = ctor_literal(code, ctor, want_field(code, fa_t, "animHit", str_t)?)?;
-    let yes_g = ctor_literal(code, ctor, want_field(code, fa_t, "animSuccess", str_t)?)?;
-    let meh_g = ctor_literal(code, ctor, want_field(code, fa_t, "animFail", str_t)?)?;
+    let hit_g = ctor_literal(code, ctor, typed(code, fa_t, "animHit", str_t)?)?;
+    let yes_g = ctor_literal(code, ctor, typed(code, fa_t, "animSuccess", str_t)?)?;
+    let meh_g = ctor_literal(code, ctor, typed(code, fa_t, "animFail", str_t)?)?;
     let fa_m = |name: &str| -> Result<&Function> { method(code, fa_t, name) };
     let init = fa_m("init")?;
     if fun_args(code, init) != [fa_t] {

@@ -129,14 +129,6 @@ pub(crate) fn want(
     Ok(())
 }
 
-pub(crate) fn want_field(code: &Bytecode, t: RefType, name: &str, ty: RefType) -> Result<RefField> {
-    let (f, ft) = field(code, t, name)?;
-    if ft != ty {
-        bail!("field {name} has type {}, want {}", ft.0, ty.0);
-    }
-    Ok(f)
-}
-
 /// The op before `before` that last writes register `r`.
 pub(crate) fn writer(f: &Function, r: Reg, before: usize) -> Option<&Opcode> {
     f.ops[..before].iter().rev().find(|o| dst_of(o) == Some(r))
@@ -186,33 +178,33 @@ pub(crate) fn base(code: &Bytecode) -> Result<Base> {
     let ev_t = obj_type(code, "hxd.WaitEvent")?;
     let arr_t = obj_type(code, "hl.types.ArrayObj")?;
 
-    let a_target = want_field(code, act_t, "target", ent_t)?;
-    let a_unit = want_field(code, act_t, "unit", unit_t)?;
-    let a_host = want_field(code, act_t, "__host", host_t)?;
-    let e_uid = want_field(code, ent_t, "__uid", i32_)?;
-    let u_uid = want_field(code, unit_t, "__uid", i32_)?;
-    let g_ctrl = want_field(code, game_t, "ctrl", ctrl_t)?;
+    let a_target = typed(code, act_t, "target", ent_t)?;
+    let a_unit = typed(code, act_t, "unit", unit_t)?;
+    let a_host = typed(code, act_t, "__host", host_t)?;
+    let e_uid = typed(code, ent_t, "__uid", i32_)?;
+    let u_uid = typed(code, unit_t, "__uid", i32_)?;
+    let g_ctrl = typed(code, game_t, "ctrl", ctrl_t)?;
     let g_me = field(code, game_t, "me")?;
     if !is_sub(code, g_me.1, player_t) {
         bail!("Game.me is not a BasePlayer");
     }
     let g_me = g_me.0;
-    let g_mode = want_field(code, game_t, "mode", mode_t)?;
-    let g_event = want_field(code, game_t, "globalEvent", ev_t)?;
+    let g_mode = typed(code, game_t, "mode", mode_t)?;
+    let g_event = typed(code, game_t, "globalEvent", ev_t)?;
     let (g_ui, ui_t) = field(code, game_t, "ui")?;
-    let c_game = want_field(code, ctrl_t, "game", game_t)?;
-    let c_host = want_field(code, ctrl_t, "__host", host_t)?;
+    let c_game = typed(code, ctrl_t, "game", game_t)?;
+    let c_host = typed(code, ctrl_t, "__host", host_t)?;
     let (h_ctx, ctx_t) = field(code, host_t, "ctx")?;
     let (x_refs, refs_t) = field(code, ctx_t, "refs")?;
     if s(code, obj(code, refs_t)?.name) != "haxe.ds.IntMap" {
         bail!("hxbit ctx.refs is not an IntMap");
     }
-    let pv_units = want_field(code, pv_t, "activityUnits", omap_t)?;
-    let e_obj = want_field(code, ent_t, "obj", obj_t)?;
-    let e_anim = want_field(code, ent_t, "currentAnim", str_t)?;
-    let o_parent = want_field(code, obj_t, "parent", obj_t)?;
-    let o_children = want_field(code, obj_t, "children", arr_t)?;
-    let a_len = want_field(code, arr_t, "length", i32_)?;
+    let pv_units = typed(code, pv_t, "activityUnits", omap_t)?;
+    let e_obj = typed(code, ent_t, "obj", obj_t)?;
+    let e_anim = typed(code, ent_t, "currentAnim", str_t)?;
+    let o_parent = typed(code, obj_t, "parent", obj_t)?;
+    let o_children = typed(code, obj_t, "children", arr_t)?;
+    let a_len = typed(code, arr_t, "length", i32_)?;
     let (a_arr, raw_arr_t) = field(code, arr_t, "array")?;
     if !matches!(code.types[raw_arr_t.0], Type::Array) {
         bail!("ArrayObj.array is not a raw array");
