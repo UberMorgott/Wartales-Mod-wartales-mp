@@ -32,9 +32,10 @@
 //       (every activity end, success or cancel, runs _cancel)
 //   receiver, ping__impl entry `if (workRecv(this, x, y, z, player)) return;`:
 //     false unless x is this sentinel; skipped for the sender itself; worker
-//     = mirrorWorker(game, y, camp); start: remember its current anim as the
-//     idle; hit: the work anim once, onEnd -> workIdle (the idle looped);
-//     end: the idle looped.
+//     = mirrorWorker(game, y, camp); start: remember its current anim as that
+//     worker's idle (`workIdleOf`, per worker, see mirror.rs); hit: the work
+//     anim once, onEnd -> workIdle (that idle looped); end: the idle looped,
+//     the worker's entry forgotten.
 // shim.log: `mp: work send <code> <kind> <camp> <uid>` on the player's
 // machine, `mp: work recv <code> <kind> <camp> <stage>` on the others (stage 3
 // start, 4 hit, 5 end; 1 no worker found).
@@ -44,7 +45,7 @@
 use super::asm::{push_fn, Asm, Regs};
 
 use super::job_xp::{const_str, str_global};
-use super::mirror::{self, emit_log, emit_play_once, int, writer, Base, Camp};
+use super::mirror::{self, emit_idle_now, emit_log, emit_play_once, int, writer, Base, Camp};
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
@@ -181,7 +182,7 @@ fn globals(code: &mut Bytecode, p: &Plan) -> G {
         sp,
         act: new(p.act_t),
         kind: new(p.i32_),
-        idle: new(p.str_t),
+        idle: new(p.omap_t),
     }
 }
 
@@ -429,7 +430,13 @@ fn add_end(code: &mut Bytecode, p: &Plan, g: &G, send: RefFun) -> Result<RefFun>
 }
 
 /// `workRecv(ctrl, x, y, z, player) -> Bool` (see the header).
-fn add_recv(code: &mut Bytecode, p: &Plan, g: &G, worker: RefFun, idle: RefFun) -> Result<RefFun> {
+fn add_recv(
+    code: &mut Bytecode,
+    p: &Plan,
+    g: &G,
+    worker: RefFun,
+    (idle, idle_of): (RefFun, RefFun),
+) -> Result<RefFun> {
     let mut r = Regs(vec![p.ctrl_t, p.f64_, p.f64_, p.f64_, p.player_t]);
     let (ctrl, x, y, z, player) = (Reg(0), Reg(1), Reg(2), Reg(3), Reg(4));
     let (res, fs, game, me, zi, k, kc, camp, kind, stage, exc, is_camp, uid, e) = (
@@ -448,7 +455,7 @@ fn add_recv(code: &mut Bytecode, p: &Plan, g: &G, worker: RefFun, idle: RefFun) 
         r.r(p.i32_),
         r.r(p.ent_t),
     );
-    let (cur, anim, v) = (r.r(p.str_t), r.r(p.str_t), r.r(p.void_));
+    let (cur, anim) = (r.r(p.str_t), r.r(p.str_t));
     let sent = float_const(code, SENTINEL);
     let mut a = Asm::new();
     a.op(Opcode::Bool {
@@ -567,40 +574,16 @@ fn add_recv(code: &mut Bytecode, p: &Plan, g: &G, worker: RefFun, idle: RefFun) 
         },
         "notstart",
     );
-    a.op(Opcode::Field {
+    int(&mut a, code, k, mirror::IDLE_START);
+    a.op(Opcode::Call2 {
         dst: cur,
-        obj: e,
-        field: p.e_anim,
-    });
-    a.op(Opcode::SetGlobal {
-        global: g.idle,
-        src: cur,
+        fun: idle_of,
+        arg0: e,
+        arg1: k,
     });
     int(&mut a, code, stage, 3);
     a.jmp(Opcode::JAlways { offset: 0 }, "untrap");
     a.label("notstart");
-    // a start missed (joined late): the current anim is still the idle one
-    a.op(Opcode::GetGlobal {
-        dst: cur,
-        global: g.idle,
-    });
-    a.jmp(
-        Opcode::JNotNull {
-            reg: cur,
-            offset: 0,
-        },
-        "hasidle",
-    );
-    a.op(Opcode::Field {
-        dst: cur,
-        obj: e,
-        field: p.e_anim,
-    });
-    a.op(Opcode::SetGlobal {
-        global: g.idle,
-        src: cur,
-    });
-    a.label("hasidle");
     int(&mut a, code, k, 1);
     a.jmp(
         Opcode::JNotEq {
@@ -610,11 +593,19 @@ fn add_recv(code: &mut Bytecode, p: &Plan, g: &G, worker: RefFun, idle: RefFun) 
         },
         "nothit",
     );
+    // hit: this worker's idle (its current anim if the start was missed)
+    int(&mut a, code, k, mirror::IDLE_READ);
+    a.op(Opcode::Call2 {
+        dst: cur,
+        fun: idle_of,
+        arg0: e,
+        arg1: k,
+    });
     a.op(Opcode::GetGlobal {
         dst: anim,
         global: p.work_g,
     });
-    emit_play_once(&mut a, &mut r, code, p, e, anim, idle);
+    emit_play_once(&mut a, &mut r, code, p, e, anim, cur, idle);
     int(&mut a, code, stage, 4);
     a.jmp(Opcode::JAlways { offset: 0 }, "untrap");
     a.label("nothit");
@@ -627,11 +618,15 @@ fn add_recv(code: &mut Bytecode, p: &Plan, g: &G, worker: RefFun, idle: RefFun) 
         },
         "untrap",
     );
-    a.op(Opcode::Call1 {
-        dst: v,
-        fun: idle,
+    // end: the idle, and the worker's entry goes
+    int(&mut a, code, k, mirror::IDLE_END);
+    a.op(Opcode::Call2 {
+        dst: cur,
+        fun: idle_of,
         arg0: e,
+        arg1: k,
     });
+    emit_idle_now(&mut a, &mut r, code, p, e, cur, idle);
     int(&mut a, code, stage, 5);
     a.label("untrap");
     a.op(Opcode::EndTrap { exc });
@@ -656,14 +651,15 @@ fn add_recv(code: &mut Bytecode, p: &Plan, g: &G, worker: RefFun, idle: RefFun) 
     )
 }
 
-/// New functions, in this order: mirrorWorker, workIdle, workSend, workEnd, workRecv.
+/// New functions, in this order: mirrorWorker, workIdle, workIdleOf, workSend, workEnd, workRecv.
 fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 5]> {
     let g = globals(code, p);
     let worker = mirror::add_worker(code, p, &p.c, p.dbg_file)?;
-    let idle = mirror::add_idle(code, p, g.idle, p.dbg_file)?;
+    let idle = mirror::add_idle(code, p, p.dbg_file)?;
+    let idle_of = mirror::add_idle_of(code, p, g.idle, p.dbg_file)?;
     let send = add_send(code, p, &g)?;
     let end = add_end(code, p, &g, send)?;
-    let recv = add_recv(code, p, &g, worker, idle)?;
+    let recv = add_recv(code, p, &g, worker, (idle, idle_of))?;
 
     mirror::hook_ping(code, p, recv);
     // senders at the entry of the four window steps: workSend(this.game, this.activity, code, kind)
@@ -777,7 +773,7 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 5);
+        assert_eq!(back.functions.len(), n + 6);
         let mut sites = p.sites.to_vec();
         sites.extend([p.cancel_fi, p.impl_fi]);
         for i in 0..n {
@@ -788,7 +784,7 @@ mod tests {
             );
         }
         let nf = |k: usize| back.functions[n + k].findex;
-        let (worker, idle, send, end, recv) = (nf(0), nf(1), nf(2), nf(3), nf(4));
+        let (worker, idle, idle_of, send, end, recv) = (nf(0), nf(1), nf(2), nf(3), nf(4), nf(5));
         for (k, &fi) in p.sites.iter().enumerate() {
             let (a, b) = (&orig.functions[fi], &back.functions[fi]);
             let mut want = a.clone();
@@ -844,11 +840,15 @@ mod tests {
             p.check,
             p.refs_get,
             p.omap_get,
+            p.omap_set,
+            p.omap_remove,
+            p.omap_new,
             p.println,
             p.std_string,
             p.str_add,
             worker,
             idle,
+            idle_of,
             send,
         ];
         for f in &back.functions[n..] {
@@ -987,6 +987,13 @@ mod tests {
                 } else if f == p.omap_get {
                     let V::O(k) = a[1] else { panic!() };
                     Some(c.key_get(&a[0], &format!("k{k}")))
+                } else if f == p.omap_set || f == p.omap_remove {
+                    let V::O(k) = a[1] else { panic!() };
+                    let v = if f == p.omap_set { a[2].clone() } else { V::Null };
+                    c.key_set(&a[0], format!("k{k}"), v);
+                    Some(if f == p.omap_set { V::Null } else { V::B(true) })
+                } else if f == p.omap_new {
+                    Some(V::Null)
                 } else if f == p.std_string {
                     match &a[0] {
                         V::I(n) => Some(V::S(n.to_string())),
@@ -1105,7 +1112,7 @@ mod tests {
             return;
         };
         let f = |k: usize| code.functions[n + k].findex;
-        let (send, end) = (f(2), f(3));
+        let (send, end) = (f(3), f(4));
         let mut s = sim(&code, n, &p);
         let w = world(&mut s, &p);
         let ping = |s: &mut Sim| -> Vec<Vec<V>> { s.c.take("ping") };
@@ -1161,7 +1168,7 @@ mod tests {
             return;
         };
         let f = |k: usize| code.functions[n + k].findex;
-        let (idle, recv) = (f(1), f(4));
+        let (idle, recv) = (f(1), f(5));
         let mut s = sim(&code, n, &p);
         let w = world(&mut s, &p);
         let ev = |s: &mut Sim, x: f64, y: f64, zz: V, who: &V| {
@@ -1196,13 +1203,16 @@ mod tests {
         assert_eq!(plays.len(), 1);
         assert_eq!(plays[0][..2], [w.parked.clone(), st("Attack")]);
         assert_eq!(s.c.key_get(&plays[0][2], "dloop"), V::B(false));
-        assert_eq!(
-            s.c.key_get(&plays[0][2], "donEnd"),
-            V::Clo(idle, Box::new(w.parked.clone()))
-        );
+        let V::Clo(f_end, bound) = s.c.key_get(&plays[0][2], "donEnd") else {
+            panic!("onEnd")
+        };
+        assert_eq!(f_end, idle);
+        assert_eq!(s.c.key_get(&bound, "de"), w.parked);
+        assert_eq!(s.c.key_get(&bound, "danim"), st("IdlePose"));
         assert_eq!(s.c.take("println"), vec![vec![st("mp: work recv 1 0 0 4")]]);
         // the anim's end and the event's end: the idle, looped
-        s.run(idle, vec![w.parked.clone()]);
+        s.c.set(&w.parked, p.e_anim, st("Attack"));
+        s.run(idle, vec![*bound]);
         ev(&mut s, SENTINEL, 77.0, z(2, 0, 1), &w.other);
         let plays = s.c.take("play");
         assert_eq!(plays.len(), 2);
@@ -1219,7 +1229,9 @@ mod tests {
         ev(&mut s, SENTINEL, 9.0, z(1, 1, 0), &w.other);
         let plays = s.c.take("play");
         assert_eq!(plays[0][..2], [w.camper.clone(), st("Attack")]);
-        s.run(idle, vec![w.camper.clone()]);
+        let bound = s.c.key_get(&plays[0][2], "donEnd");
+        let V::Clo(_, bound) = bound else { panic!() };
+        s.run(idle, vec![*bound]);
         assert_eq!(s.c.take("play")[0][1], st("CampIdle"));
         s.c.log.clear();
         // an unknown uid, or a place uid while in the camp: nothing, stage 1
@@ -1232,5 +1244,57 @@ mod tests {
             );
         }
         let _ = (&w.elt, &w.unit);
+    }
+
+    /// Two workers at once each get their own idle back (a single shared one
+    /// gave the first worker the second one's); after its end a worker's idle
+    /// is taken afresh, not left over from the previous activity.
+    #[test]
+    fn idle_is_per_worker() {
+        let Some((code, n, p)) = patched() else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let f = |k: usize| code.functions[n + k].findex;
+        let (idle, recv) = (f(1), f(5));
+        let mut s = sim(&code, n, &p);
+        let w = world(&mut s, &p);
+        let st = |t: &str| V::S(t.into());
+        // a second worker, parked at element uid 78
+        let c = &mut s.c;
+        let elt2 = c.obj(&[(p.e_uid, V::I(78))]);
+        c.put("refs", "78", elt2.clone());
+        let wobj = c.get(&w.parked, p.e_obj);
+        let parked2 = c.obj(&[(p.e_obj, wobj), (p.e_anim, st("IdleB"))]);
+        let ed = c.obj(&[]);
+        c.key_set(&ed, "dunitView".into(), parked2.clone());
+        let units = c.get(&w.mode, p.pv_units);
+        let V::O(ek) = elt2 else { unreachable!() };
+        c.key_set(&units, format!("k{ek}"), ed);
+        let ev = |s: &mut Sim, y: f64, code: i32| {
+            s.run(
+                recv,
+                vec![w.ctrl.clone(), V::F(SENTINEL), V::F(y), z(code, 0, 0), w.other.clone()],
+            );
+        };
+        let hit_idle = |s: &mut Sim, y: f64| -> V {
+            ev(s, y, 1);
+            let plays = s.c.take("play");
+            let V::Clo(_, o) = s.c.key_get(&plays[0][2], "donEnd") else {
+                panic!("onEnd")
+            };
+            s.run(idle, vec![*o]);
+            s.c.take("play")[0][1].clone()
+        };
+        ev(&mut s, 77.0, 0);
+        ev(&mut s, 78.0, 0);
+        assert_eq!(hit_idle(&mut s, 77.0), st("IdlePose"));
+        assert_eq!(hit_idle(&mut s, 78.0), st("IdleB"));
+        // 77 ends; its next activity, start missed, takes its anim then
+        ev(&mut s, 77.0, 2);
+        assert_eq!(s.c.take("play")[0][1], st("IdlePose"));
+        s.c.set(&w.parked, p.e_anim, st("Sit"));
+        assert_eq!(hit_idle(&mut s, 77.0), st("Sit"));
+        assert_eq!(hit_idle(&mut s, 78.0), st("IdleB"));
     }
 }

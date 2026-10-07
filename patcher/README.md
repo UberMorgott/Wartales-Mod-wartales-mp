@@ -583,8 +583,9 @@ activity, under a trap; start remembers the activity, and
 for the sender; the worker is `mirrorWorker(game, y, camp)` (mirror.rs: the
 PlaceView `activityUnits` entry or the CampMode `entryEntities` entity whose
 `entry.content` is `Unit(u)`, as `Activity.setUnit__impl` finds them); start
-remembers its anim as the idle, a hit plays the work anim once (onEnd: the
-idle looped), the end loops the idle. `mirror.rs` also holds what both mirrors
+remembers its anim as that worker's idle (one entry per worker, so two players
+working at once keep their own; the end forgets it), a hit plays the work anim
+once (onEnd: that idle looped), the end loops the idle. `mirror.rs` also holds what both mirrors
 validate (types, fields, ping RPC, Entity.play, WaitEvent, logging) and the
 shared one-shot / idle anim code. shim.log: `mp: work send <code> <kind>
 <camp> <uid>`, `mp: work recv <code> <kind> <camp> <stage>` (3 start, 4 hit, 5

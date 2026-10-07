@@ -47,14 +47,16 @@
 //     for the sender itself (`player == game.me`) or outside a PlaceView:
 //     element = __host.ctx.refs.get(y) (hxbit uid), entity =
 //     activityUnits.get(element).unitView; start: remember its current anim
-//     as the idle one; hit: play ForgeAction's `animHit` ("Forge") once, back
+//     as that worker's idle (`forgeIdleOf`, per worker, see mirror.rs); hit:
+//     play ForgeAction's `animHit` ("Forge") once, back
 //     to the idle loop on its end (`forgeIdle`), and 0.4 s later (the vanilla
 //     hit timing) `forgeFx`: the grade's sound through `game.ui.sfx` and the
 //     vanilla particle prefabs (base + good + perfect / base + good / base +
 //     bad) loaded into the scene at the hit shard (scene `allShards` child b-1),
 //     else the `anvil`, else the worker, removed after 1.5 s; end: `animSuccess`
 //     ("ForgeYes") when the result is Success, else `animFail` ("ForgeMeh"),
-//     once, then idle. Anim names come from the ForgeAction constructor.
+//     once, then that idle (the worker's entry is forgotten). Anim names come
+//     from the ForgeAction constructor.
 // shim.log: `mp: forge send <code> <a> <b> <uid>` on the forging machine and
 // `mp: forge recv <code> <a> <b> <stage>` on the others (stage 5 start, 6 end,
 // 7 hit played; lower: where it stopped). A send that does not happen prints
@@ -380,7 +382,7 @@ pub(crate) struct Strs {
     fx_good: RefGlobal,
     fx_bad: RefGlobal,
     fx_perfect: RefGlobal,
-    /// New String global: the worker's idle anim, taken at the start event.
+    /// New ObjectMap global: each worker's idle anim (mirror.rs `IdleOf`).
     pub(crate) idle: RefGlobal,
 }
 
@@ -400,7 +402,7 @@ fn strs(code: &mut Bytecode, p: &Plan) -> Strs {
         fx_perfect: g(code, FX_PERFECT),
         idle: RefGlobal(0),
     };
-    code.globals.push(p.str_t);
+    code.globals.push(p.omap_t);
     Strs {
         idle: RefGlobal(code.globals.len() - 1),
         ..s
@@ -978,7 +980,13 @@ fn add_fx(code: &mut Bytecode, p: &Plan, st: &Strs) -> Result<RefFun> {
 }
 
 /// `forgeRecv(ctrl, x, y, z, player) -> Bool` (see the header).
-fn add_recv(code: &mut Bytecode, p: &Plan, st: &Strs, idle: RefFun, fx: RefFun) -> Result<RefFun> {
+fn add_recv(
+    code: &mut Bytecode,
+    p: &Plan,
+    st: &Strs,
+    (idle, idle_of): (RefFun, RefFun),
+    fx: RefFun,
+) -> Result<RefFun> {
     let mut r = Regs(vec![p.ctrl_t, p.f64_, p.f64_, p.f64_, p.player_t]);
     let (ctrl, x, y, z, player) = (Reg(0), Reg(1), Reg(2), Reg(3), Reg(4));
     let (res, fs, exc, stage, kind, ta, tb, zi, k) = (
@@ -1018,6 +1026,7 @@ fn add_recv(code: &mut Bytecode, p: &Plan, st: &Strs, idle: RefFun, fx: RefFun) 
         r.r(p.wait_cb_t),
         r.r(p.void_),
     );
+    let k2 = r.r(p.i32_);
     let sent = float_const(code, SENTINEL);
     let delay = float_const(code, FX_DELAY);
     let (ku, ke, kg, ka, kb) = (
@@ -1185,40 +1194,36 @@ fn add_recv(code: &mut Bytecode, p: &Plan, st: &Strs, idle: RefFun, fx: RefFun) 
         },
         "notstart",
     );
-    a.op(Opcode::Field {
+    int(&mut a, code, k, mirror::IDLE_START);
+    a.op(Opcode::Call2 {
         dst: cur,
-        obj: e,
-        field: p.e_anim,
-    });
-    a.op(Opcode::SetGlobal {
-        global: st.idle,
-        src: cur,
+        fun: idle_of,
+        arg0: e,
+        arg1: k,
     });
     int(&mut a, code, stage, 5);
     a.jmp(Opcode::JAlways { offset: 0 }, "untrap");
     a.label("notstart");
-    // a start missed (joined late): the current anim is still the idle one
-    a.op(Opcode::GetGlobal {
-        dst: cur,
-        global: st.idle,
-    });
+    // this worker's idle (its current anim if the start was missed); the end
+    // also forgets it
+    int(&mut a, code, k, mirror::IDLE_READ);
+    int(&mut a, code, k2, 2);
     a.jmp(
-        Opcode::JNotNull {
-            reg: cur,
+        Opcode::JNotEq {
+            a: kind,
+            b: k2,
             offset: 0,
         },
-        "hasidle",
+        "read",
     );
-    a.op(Opcode::Field {
+    int(&mut a, code, k, mirror::IDLE_END);
+    a.label("read");
+    a.op(Opcode::Call2 {
         dst: cur,
-        obj: e,
-        field: p.e_anim,
+        fun: idle_of,
+        arg0: e,
+        arg1: k,
     });
-    a.op(Opcode::SetGlobal {
-        global: st.idle,
-        src: cur,
-    });
-    a.label("hasidle");
     int(&mut a, code, k, 1);
     a.jmp(
         Opcode::JNotEq {
@@ -1261,7 +1266,7 @@ fn add_recv(code: &mut Bytecode, p: &Plan, st: &Strs, idle: RefFun, fx: RefFun) 
         global: p.yes_g,
     });
     a.label("play");
-    emit_play_once(&mut a, &mut r, code, p, e, anim, idle);
+    emit_play_once(&mut a, &mut r, code, p, e, anim, cur, idle);
     int(&mut a, code, stage, 6);
     int(&mut a, code, k, 1);
     a.jmp(
@@ -1323,13 +1328,14 @@ fn add_recv(code: &mut Bytecode, p: &Plan, st: &Strs, idle: RefFun, fx: RefFun) 
     )
 }
 
-/// New functions, in this order: forgeSend, forgeIdle, forgeFx, forgeRecv.
+/// New functions, in this order: forgeSend, forgeIdle, forgeIdleOf, forgeFx, forgeRecv.
 fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 4]> {
     let st = strs(code, p);
     let send = add_send(code, p, &st)?;
-    let idle = mirror::add_idle(code, p, st.idle, p.dbg_file)?;
+    let idle = mirror::add_idle(code, p, p.dbg_file)?;
+    let idle_of = mirror::add_idle_of(code, p, st.idle, p.dbg_file)?;
     let fx = add_fx(code, p, &st)?;
-    let recv = add_recv(code, p, &st, idle, fx)?;
+    let recv = add_recv(code, p, &st, (idle, idle_of), fx)?;
     let (i0, i1, i2) = (int_const(code, 0), int_const(code, 1), int_const(code, 2));
 
     // ping__impl: if (forgeRecv(this, x, y, z, player)) return;
@@ -1447,7 +1453,7 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 4);
+        assert_eq!(back.functions.len(), n + 5);
         let sites = [p.init_fi, p.done_fi, p.end_fi, p.impl_fi];
         for i in 0..n {
             assert_eq!(
@@ -1456,11 +1462,12 @@ mod tests {
                 "function #{i}"
             );
         }
-        let (send, idle, fx, recv) = (
+        let (send, idle, idle_of, fx, recv) = (
             back.functions[n].findex,
             back.functions[n + 1].findex,
             back.functions[n + 2].findex,
             back.functions[n + 3].findex,
+            back.functions[n + 4].findex,
         );
         for (fi, k) in [
             (p.init_fi, 4),
@@ -1514,6 +1521,9 @@ mod tests {
             p.check,
             p.refs_get,
             p.omap_get,
+            p.omap_set,
+            p.omap_remove,
+            p.omap_new,
             p.wait,
             p.sfx,
             p.by_name,
@@ -1526,6 +1536,7 @@ mod tests {
             p.std_string,
             p.str_add,
             idle,
+            idle_of,
             fx,
         ];
         for f in &back.functions[n..] {
@@ -1697,6 +1708,17 @@ mod tests {
             } else if f == p.omap_get {
                 let V::O(k) = a[1] else { panic!() };
                 self.key_get(&a[0], &format!("k{k}"))
+            } else if f == p.omap_set || f == p.omap_remove {
+                let V::O(k) = a[1] else { panic!() };
+                let v = if f == p.omap_set { a[2].clone() } else { V::Null };
+                self.key_set(&a[0], format!("k{k}"), v);
+                if f == p.omap_set {
+                    V::Null
+                } else {
+                    V::B(true)
+                }
+            } else if f == p.omap_new {
+                V::Null
             } else if f == p.wait {
                 self.log.push(("wait", a[1..].to_vec()));
                 V::Null
@@ -2018,8 +2040,8 @@ mod tests {
         let p = plan(&read(&std::fs::read(HLBOOT).unwrap())).unwrap();
         let (idle, fx, recv) = (
             code.functions[n + 1].findex,
-            code.functions[n + 2].findex,
             code.functions[n + 3].findex,
+            code.functions[n + 4].findex,
         );
         let mut sim = Sim::new(&code, &p);
         sim.orig_n = n;
@@ -2051,10 +2073,12 @@ mod tests {
         assert_eq!(plays[0][..2], [w.worker.clone(), s("Forge")]);
         let opts = plays[0][2].clone();
         assert_eq!(sim.key_get(&opts, "dloop"), V::B(false));
-        assert_eq!(
-            sim.key_get(&opts, "donEnd"),
-            V::Clo(idle, Box::new(w.worker.clone()))
-        );
+        let V::Clo(f_end, bound) = sim.key_get(&opts, "donEnd") else {
+            panic!("onEnd")
+        };
+        assert_eq!(f_end, idle);
+        assert_eq!(sim.key_get(&bound, "de"), w.worker);
+        assert_eq!(sim.key_get(&bound, "danim"), s("Idle01"));
         let waits = sim.take("wait");
         assert_eq!(waits.len(), 1);
         assert_eq!(waits[0][0], V::F(FX_DELAY));
@@ -2091,7 +2115,7 @@ mod tests {
 
         // the hit anim's end: idle again, looped
         sim.log.clear();
-        sim.run(idle, vec![w.worker.clone()]);
+        sim.run(idle, vec![*bound]);
         let plays = sim.take("play");
         assert_eq!(plays[0][1], s("Idle01"));
         assert_eq!(sim.key_get(&plays[0][2], "dloop"), V::B(true));
@@ -2102,6 +2126,10 @@ mod tests {
             ev(&mut sim, SENTINEL, z(2, a, 0), &w.other);
             let plays = sim.take("play");
             assert_eq!(plays[0][1], s(anim), "result {a}");
+            let V::Clo(_, bound) = sim.key_get(&plays[0][2], "donEnd") else {
+                panic!("onEnd")
+            };
+            assert_eq!(sim.key_get(&bound, "danim"), s("Idle01"));
             assert!(sim.take("wait").is_empty());
             assert_eq!(
                 sim.take("println"),

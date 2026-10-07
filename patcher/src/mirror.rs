@@ -19,8 +19,15 @@
 //     (CampMode), uid is the unit's and the worker is the camp entry entity
 //     of that unit (`entryEntities[i].entry.content == Unit(u)`, the loop of
 //     setUnit__impl); null otherwise;
-//   - `<mirror>Idle(e)`: the remembered idle anim, looped, on a worker still
-//     in the scene (the onEnd of a one-shot anim).
+//   - `<mirror>IdleOf(e, how) -> String`: each worker's own idle anim, in a
+//     per-mirror ObjectMap (worker -> anim): a start (how 0) takes the
+//     worker's current anim; a hit (1) reads it, or takes the current anim
+//     when the start was missed (joined late); the end (2) reads and forgets
+//     it, so a later activity of that worker starts afresh. Two players
+//     working at once each keep their own;
+//   - `<mirror>Idle({e, anim})`: that anim, looped, on a worker still in the
+//     scene (the onEnd of a one-shot anim, bound to the worker and the idle
+//     it had when the anim started).
 
 use super::asm::{push_fn, string_ref, Asm, Regs};
 use super::coop_spectate::dst_of;
@@ -83,6 +90,9 @@ pub(crate) struct Base {
     pub(crate) pv_cls_t: RefType,
     pub(crate) refs_get: RefFun,
     pub(crate) omap_get: RefFun,
+    pub(crate) omap_set: RefFun,
+    pub(crate) omap_remove: RefFun,
+    pub(crate) omap_new: RefFun,
     pub(crate) play_pi: RefField,
     pub(crate) opts_t: RefType,
     pub(crate) pos_t: RefType,
@@ -260,6 +270,12 @@ pub(crate) fn base(code: &Bytecode) -> Result<Base> {
     want(code, refs_get, "IntMap.get", &[refs_t, i32_], dyn_t)?;
     let omap_get = proto(code, omap_t, "get")?;
     want(code, omap_get, "ObjectMap.get", &[omap_t, dyn_t], dyn_t)?;
+    let omap_set = proto(code, omap_t, "set")?;
+    want(code, omap_set, "ObjectMap.set", &[omap_t, dyn_t, dyn_t], void_)?;
+    let omap_remove = proto(code, omap_t, "remove")?;
+    want(code, omap_remove, "ObjectMap.remove", &[omap_t, dyn_t], bool_)?;
+    let omap_new = method(code, omap_t, "__constructor__")?.findex;
+    want(code, omap_new, "ObjectMap constructor", &[omap_t], void_)?;
 
     // Entity.play(anim, opts, pos), virtual
     let (play, play_pi) = vproto(code, ent_t, "play")?;
@@ -352,6 +368,9 @@ pub(crate) fn base(code: &Bytecode) -> Result<Base> {
         pv_cls_t,
         refs_get,
         omap_get,
+        omap_set,
+        omap_remove,
+        omap_new,
         play_pi: RefField(play_pi as usize),
         opts_t,
         pos_t,
@@ -526,7 +545,21 @@ pub(crate) fn int(a: &mut Asm, code: &mut Bytecode, dst: Reg, v: i32) {
     a.op(Opcode::Int { dst, ptr });
 }
 
-/// Plays `anim` once on entity `e` (registers given), `onEnd` = idle(e).
+/// `{e, anim}`, the object `idle` is bound to (registers given).
+fn emit_idle_obj(a: &mut Asm, code: &mut Bytecode, dob: Reg, e: Reg, idl: Reg) {
+    let (ke, ka) = (string_ref(code, "e"), string_ref(code, "anim"));
+    a.op(Opcode::New { dst: dob });
+    for (field, src) in [(ke, e), (ka, idl)] {
+        a.op(Opcode::DynSet {
+            obj: dob,
+            field,
+            src,
+        });
+    }
+}
+
+/// Plays `anim` once on entity `e` (registers given), `onEnd` = idle({e, idl}).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_play_once(
     a: &mut Asm,
     r: &mut Regs,
@@ -534,9 +567,11 @@ pub(crate) fn emit_play_once(
     b: &Base,
     e: Reg,
     anim: Reg,
+    idl: Reg,
     idle: RefFun,
 ) {
-    let (dob, f, nb, cb, opts, pos, v) = (
+    let (dob, io, f, nb, cb, opts, pos, v) = (
+        r.r(b.dynobj_t),
         r.r(b.dynobj_t),
         r.r(b.bool_),
         r.r(b.nbool_t),
@@ -557,10 +592,11 @@ pub(crate) fn emit_play_once(
         field: kl,
         src: nb,
     });
+    emit_idle_obj(a, code, io, e, idl);
     a.op(Opcode::InstanceClosure {
         dst: cb,
         fun: idle,
-        obj: e,
+        obj: io,
     });
     a.op(Opcode::DynSet {
         obj: dob,
@@ -579,15 +615,118 @@ pub(crate) fn emit_play_once(
     });
 }
 
-/// `idle(e)`: the anim in String global `idle`, looped, on a worker still in the scene.
-pub(crate) fn add_idle(
+/// `idle({e, idl})` now (registers given).
+pub(crate) fn emit_idle_now(
+    a: &mut Asm,
+    r: &mut Regs,
     code: &mut Bytecode,
     b: &Base,
-    idle: RefGlobal,
+    e: Reg,
+    idl: Reg,
+    idle: RefFun,
+) {
+    let (io, v) = (r.r(b.dynobj_t), r.r(b.void_));
+    emit_idle_obj(a, code, io, e, idl);
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: idle,
+        arg0: io,
+    });
+}
+
+/// What `<mirror>IdleOf(e, how)` does with the worker's entry.
+pub(crate) const IDLE_START: i32 = 0;
+pub(crate) const IDLE_READ: i32 = 1;
+pub(crate) const IDLE_END: i32 = 2;
+
+/// `idleOf(e, how) -> String` over the ObjectMap in global `map` (see the header).
+pub(crate) fn add_idle_of(
+    code: &mut Bytecode,
+    b: &Base,
+    map: RefGlobal,
     dbg: usize,
 ) -> Result<RefFun> {
-    let mut r = Regs(vec![b.ent_t]);
-    let e = Reg(0);
+    let mut r = Regs(vec![b.ent_t, b.i32_]);
+    let (e, how) = (Reg(0), Reg(1));
+    let (m, k, d, cur, v, ok) = (
+        r.r(b.omap_t),
+        r.r(b.i32_),
+        r.r(b.dyn_t),
+        r.r(b.str_t),
+        r.r(b.void_),
+        r.r(b.bool_),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::GetGlobal { dst: m, global: map });
+    a.jmp(Opcode::JNotNull { reg: m, offset: 0 }, "have");
+    a.op(Opcode::New { dst: m });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: b.omap_new,
+        arg0: m,
+    });
+    a.op(Opcode::SetGlobal { global: map, src: m });
+    a.label("have");
+    a.op(Opcode::Mov { dst: d, src: e });
+    int(&mut a, code, k, IDLE_START);
+    a.jmp(
+        Opcode::JEq {
+            a: how,
+            b: k,
+            offset: 0,
+        },
+        "take",
+    );
+    a.op(Opcode::Call2 {
+        dst: d,
+        fun: b.omap_get,
+        arg0: m,
+        arg1: d,
+    });
+    a.op(Opcode::SafeCast { dst: cur, src: d });
+    a.op(Opcode::Mov { dst: d, src: e });
+    a.jmp(Opcode::JNull { reg: cur, offset: 0 }, "take");
+    int(&mut a, code, k, IDLE_END);
+    a.jmp(
+        Opcode::JNotEq {
+            a: how,
+            b: k,
+            offset: 0,
+        },
+        "ret",
+    );
+    a.op(Opcode::Call2 {
+        dst: ok,
+        fun: b.omap_remove,
+        arg0: m,
+        arg1: d,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "ret");
+    // a start, or none remembered (the start was missed): the current anim
+    a.label("take");
+    a.op(Opcode::Field {
+        dst: cur,
+        obj: e,
+        field: b.e_anim,
+    });
+    int(&mut a, code, k, IDLE_END);
+    a.jmp(Opcode::JEq { a: how, b: k, offset: 0 }, "ret");
+    a.op(Opcode::Call3 {
+        dst: v,
+        fun: b.omap_set,
+        arg0: m,
+        arg1: d,
+        arg2: cur,
+    });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: cur });
+    push_fn(code, vec![b.ent_t, b.i32_], b.str_t, r.0, a.finish(), dbg)
+}
+
+/// `idle(o)`, `o = {e, anim}`: the anim, looped, on a worker still in the scene.
+pub(crate) fn add_idle(code: &mut Bytecode, b: &Base, dbg: usize) -> Result<RefFun> {
+    let mut r = Regs(vec![b.dynobj_t]);
+    let e = r.r(b.ent_t);
     let (exc, anim, o, par, dob, t, nb, opts, pos, v) = (
         r.r(b.dyn_t),
         r.r(b.str_t),
@@ -600,13 +739,18 @@ pub(crate) fn add_idle(
         r.r(b.pos_t),
         r.r(b.void_),
     );
+    let (ke, ka) = (string_ref(code, "e"), string_ref(code, "anim"));
     let kl = string_ref(code, "loop");
     let mut a = Asm::new();
     a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
-    a.op(Opcode::GetGlobal {
-        dst: anim,
-        global: idle,
-    });
+    for (dst, field) in [(e, ke), (anim, ka)] {
+        a.op(Opcode::DynGet {
+            dst,
+            obj: Reg(0),
+            field,
+        });
+    }
+    a.jmp(Opcode::JNull { reg: e, offset: 0 }, "untrap");
     a.jmp(
         Opcode::JNull {
             reg: anim,
@@ -657,7 +801,7 @@ pub(crate) fn add_idle(
     a.op(Opcode::EndTrap { exc });
     a.label("catch");
     a.op(Opcode::Ret { ret: v });
-    push_fn(code, vec![b.ent_t], b.void_, r.0, a.finish(), dbg)
+    push_fn(code, vec![b.dynobj_t], b.void_, r.0, a.finish(), dbg)
 }
 
 /// `mirrorWorker(game, uid, camp) -> ent.Entity` (see the header); null when
