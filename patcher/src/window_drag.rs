@@ -2066,22 +2066,65 @@ fn add_rs_install(
     )
 }
 
-/// `stop()`: `g.obj = null; if (g.scene != null) g.scene.stopCapture();`
-fn stop_drag(a: &mut Asm, c: &Ctx, g: &Globals, v: Reg, nobj: Reg, sc: Reg, end: &'static str) {
-    a.op(Opcode::Null { dst: nobj });
-    a.op(Opcode::SetGlobal {
-        global: g.obj,
-        src: nobj,
+/// Registers of `forget_drag`.
+struct DropRegs {
+    obj: Reg,
+    cont: Reg,
+    off: Reg,
+    sc: Reg,
+    nsc: Reg,
+}
+
+fn drop_regs(r: &mut Regs, c: &Ctx) -> DropRegs {
+    DropRegs {
+        obj: r.r(c.obj_t),
+        cont: r.r(c.rs.cont_t),
+        off: r.r(c.bool_t),
+        sc: r.r(c.scene_t),
+        nsc: r.r(c.scene_t),
+    }
+}
+
+/// The drag is over: every global that held it lets go (object, follower,
+/// scene, resize area) and `d.sc` is the scene it had (or null).
+fn forget_drag(a: &mut Asm, g: &Globals, d: &DropRegs) {
+    a.op(Opcode::Null { dst: d.obj });
+    a.op(Opcode::Null { dst: d.cont });
+    a.op(Opcode::Null { dst: d.nsc });
+    a.op(Opcode::Bool {
+        dst: d.off,
+        value: ValBool(false),
     });
     a.op(Opcode::GetGlobal {
-        dst: sc,
+        dst: d.sc,
         global: g.scene,
     });
-    a.jmp(Opcode::JNull { reg: sc, offset: 0 }, end);
+    for (global, src) in [
+        (g.obj, d.obj),
+        (g.follow, d.obj),
+        (g.scene, d.nsc),
+        (g.rs_cont, d.cont),
+        (g.rs_on, d.off),
+    ] {
+        a.op(Opcode::SetGlobal { global, src });
+    }
+}
+
+/// `stop()`: forget_drag, then `if (scene != null) scene.stopCapture();` (its
+/// onCancel finds no drag any more).
+fn stop_drag(a: &mut Asm, c: &Ctx, g: &Globals, v: Reg, d: &DropRegs, end: &'static str) {
+    forget_drag(a, g, d);
+    a.jmp(
+        Opcode::JNull {
+            reg: d.sc,
+            offset: 0,
+        },
+        end,
+    );
     a.op(Opcode::Call1 {
         dst: v,
         fun: c.stop_capture,
-        arg0: sc,
+        arg0: d.sc,
     });
 }
 
@@ -2275,6 +2318,7 @@ fn add_event(
     );
     let f0 = float_const(code, 0.0);
     let mut r = Regs(vec![c.ev_t]);
+    let dr = drop_regs(&mut r, c);
     let e = Reg(0);
     let (v, exc, obj, nobj, sc, kd, ki, k) = (
         r.r(c.void_t),
@@ -2378,7 +2422,7 @@ fn add_event(
 
     // A capture without a drag object (should not happen): just stop it.
     a.label("stop");
-    stop_drag(&mut a, c, g, v, nobj, sc, "out");
+    stop_drag(&mut a, c, g, v, &dr, "out");
     a.jmp(Opcode::JAlways { offset: 0 }, "out");
 
     a.label("release");
@@ -2407,7 +2451,7 @@ fn add_event(
         src: b,
     });
     a.label("rel");
-    stop_drag(&mut a, c, g, v, nobj, sc, "save");
+    stop_drag(&mut a, c, g, v, &dr, "save");
     a.label("save");
     a.op(Opcode::GetGlobal {
         dst: key,
@@ -2537,7 +2581,7 @@ fn add_event(
         fun: report,
         arg0: exc,
     });
-    stop_drag(&mut a, c, g, v, nobj, sc, "end");
+    stop_drag(&mut a, c, g, v, &dr, "end");
     a.label("end");
     a.op(Opcode::Ret { ret: v });
     push_fn(code, vec![c.ev_t], c.void_t, r.0, a.finish(), c.dbg_file)
@@ -2556,14 +2600,8 @@ fn add_cancel(
     save: RefFun,
 ) -> Result<RefFun> {
     let mut r = Regs(vec![]);
-    let (v, exc, obj, nobj, nsc, key) = (
-        r.r(c.void_t),
-        r.r(c.dyn_t),
-        r.r(c.obj_t),
-        r.r(c.obj_t),
-        r.r(c.scene_t),
-        r.r(c.str_t),
-    );
+    let (v, exc, obj, key) = (r.r(c.void_t), r.r(c.dyn_t), r.r(c.obj_t), r.r(c.str_t));
+    let dr = drop_regs(&mut r, c);
     let gd = Guard { exc, v };
     let mut a = Asm::new();
     guard_open(&mut a, &gd);
@@ -2578,16 +2616,7 @@ fn add_cancel(
         },
         "out",
     );
-    a.op(Opcode::Null { dst: nobj });
-    a.op(Opcode::SetGlobal {
-        global: g.obj,
-        src: nobj,
-    });
-    a.op(Opcode::Null { dst: nsc });
-    a.op(Opcode::SetGlobal {
-        global: g.scene,
-        src: nsc,
-    });
+    forget_drag(&mut a, g, &dr);
     a.op(Opcode::GetGlobal {
         dst: key,
         global: g.key,
@@ -4950,10 +4979,17 @@ mod tests {
         let packed = ((40 + 32768) << 16) | ((10 + 32768) & 0xFFFF);
         assert_eq!(saved[0][1], V::I(packed));
 
-        // The drag is over: a late move does not move it, just stops the capture.
+        // The drag is over and let go: no global keeps its scene (or a resize
+        // area); a late move does not move anything.
+        for (gi, v) in &s.c.globals {
+            let t = code.globals[*gi];
+            if t == c.scene_t || t == c.rs.cont_t {
+                assert_eq!(*v, V::Null, "global {gi} still holds the drag");
+            }
+        }
         event(&mut s, &c, &f, c.ev_move);
         assert_eq!(s.c.get(&obj, c.x), V::F(140.0));
-        assert_eq!(s.c.take("stopCapture").len(), 1);
+        assert!(s.c.take("stopCapture").is_empty());
 
         // A new push drags again.
         mouse(&mut s, 100.0, 100.0);
