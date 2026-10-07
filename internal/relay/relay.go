@@ -16,6 +16,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/UberMorgott/wartales-mp/internal/applog"
@@ -31,8 +32,9 @@ type client struct {
 	// Frame counters, summarised in the log instead of dumping payloads.
 	framesIn  int64
 	bytesIn   int64
-	framesOut int64
-	bytesOut  int64
+	// The out counters are bumped by the host's goroutine.
+	framesOut atomic.Int64
+	bytesOut  atomic.Int64
 }
 
 // frameLogEvery is how many frames pass between two relay traffic summaries.
@@ -175,7 +177,7 @@ func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 	}
 	defer func() {
 		s.Log.Printf("relay: %s cid %d gone after %d frames in (%d B), %d frames out (%d B)",
-			role, self.cid, self.framesIn, self.bytesIn, self.framesOut, self.bytesOut)
+			role, self.cid, self.framesIn, self.bytesIn, self.framesOut.Load(), self.bytesOut.Load())
 		s.drop(self)
 	}()
 
@@ -215,8 +217,8 @@ func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 				s.closeClient(cid)
 				continue
 			}
-			to.framesOut++
-			to.bytesOut += int64(len(body))
+			to.framesOut.Add(1)
+			to.bytesOut.Add(int64(len(body)))
 		} else {
 			s.toHost(packToHost(TypeData, self.cid, payload))
 		}

@@ -19,8 +19,9 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/UberMorgott/wartales-mp/internal/sendq"
 )
 
 // Opcodes we care about.
@@ -57,9 +58,12 @@ type Conn struct {
 	Headers map[string]string
 
 	br *bufio.Reader
-
-	mu sync.Mutex // serialises writes
+	q  *sendq.Queue // every write goes through it, so none waits on the peer
 }
+
+// sendBudget is how far a peer may fall behind before it is dropped: room for
+// a frame of the largest size queued behind another.
+const sendBudget = 2 * (MaxFrame + 10)
 
 // Accept performs the server side handshake on an already accepted TCP (or TLS)
 // connection. br must be the reader the caller has been peeking with, or nil.
@@ -109,7 +113,7 @@ func Accept(c net.Conn, br *bufio.Reader, auth AuthFunc) (*Conn, error) {
 	if err := c.SetDeadline(time.Time{}); err != nil {
 		return nil, err
 	}
-	return &Conn{Conn: c, Ident: ident, Headers: headers, br: br}, nil
+	return &Conn{Conn: c, Ident: ident, Headers: headers, br: br, q: sendq.New(c, sendBudget)}, nil
 }
 
 // checkPass reproduces WSConnection.handleRequest: the client sends
@@ -247,7 +251,10 @@ func (c *Conn) Read() (opcode byte, payload []byte, err error) {
 	}
 }
 
-// Write sends one unmasked frame (server frames are never masked).
+// Write queues one unmasked frame (server frames are never masked) and
+// returns without waiting for the peer; payload is kept, not copied. An error
+// means the connection is gone, or was dropped because the peer stopped
+// reading.
 func (c *Conn) Write(opcode byte, payload []byte) error {
 	var head [10]byte
 	head[0] = 0x80 | opcode
@@ -264,14 +271,11 @@ func (c *Conn) Write(opcode byte, payload []byte) error {
 		binary.BigEndian.PutUint64(head[2:], uint64(l))
 		n = 10
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := c.Conn.Write(head[:n]); err != nil {
-		return err
-	}
-	_, err := c.Conn.Write(payload)
-	return err
+	return c.q.Send(head[:n], payload)
 }
+
+// Close drops the frames not sent yet and closes the connection.
+func (c *Conn) Close() error { return c.q.Close() }
 
 // WriteText sends a text frame.
 func (c *Conn) WriteText(s string) error { return c.Write(OpText, []byte(s)) }

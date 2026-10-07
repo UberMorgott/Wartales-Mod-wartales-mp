@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/UberMorgott/wartales-mp/internal/modver"
+	"github.com/UberMorgott/wartales-mp/internal/sendq"
 	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
@@ -61,20 +62,22 @@ type Handler func(cmd string, args json.RawMessage, peer *Peer) (any, error)
 // closes the link with that text.
 type Accept func(u User) error
 
-type conn struct {
-	c  net.Conn
-	mu sync.Mutex
-}
+// conn is the sending half of a link. Sends are queued, never waited on: a
+// push to one stalled guest must not hold up the command that caused it, nor
+// the pushes to everyone else.
+type conn struct{ q *sendq.Queue }
+
+// sendBudget is how far a peer may fall behind before the link is dropped.
+const sendBudget = 2 * maxLine
+
+func newConn(c net.Conn) *conn { return &conn{q: sendq.New(c, sendBudget)} }
 
 func (w *conn) send(e Envelope) error {
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_, err = w.c.Write(append(b, '\n'))
-	return err
+	return w.q.Send(append(b, '\n'))
 }
 
 // ---------------------------------------------------------------- host side
@@ -123,9 +126,9 @@ func (p *Peer) Push(cmd string, args any) {
 // Serve runs one guest connection on the host side until it closes. accept
 // may be nil.
 func Serve(c net.Conn, accept Accept, h Handler, onClose func(*Peer)) {
-	defer func() { _ = c.Close() }() // the guest is gone; a close error is moot
 	br := bufio.NewReader(c)
-	out := &conn{c: c}
+	out := newConn(c)
+	defer out.q.Drain() // what is queued (a refusal, say) still goes out
 
 	// SDR streams ignore deadlines, so the wait is bounded by closing c.
 	expired := time.AfterFunc(HelloTimeout, func() { _ = c.Close() })
@@ -217,7 +220,7 @@ func (c *Client) closedErr() error {
 // The hello is sent with uid 1 so a refusal from the host comes back as a
 // reply to it and reaches the caller instead of a later command.
 func DialConn(c net.Conn, u User, onPush func(cmd string, args json.RawMessage), onClose func()) (*Client, error) {
-	cl := &Client{out: &conn{c: c}, pending: map[int]chan Envelope{}, uid: helloUID}
+	cl := &Client{out: newConn(c), pending: map[int]chan Envelope{}, uid: helloUID}
 
 	hello, _ := json.Marshal(u)
 	if err := cl.out.send(Envelope{UID: helloUID, Cmd: "link/hello", Args: hello}); err != nil {
@@ -319,7 +322,7 @@ func (c *Client) Call(cmd string, args json.RawMessage) (json.RawMessage, error)
 
 // Close tears the link down.
 func (c *Client) Close() error {
-	err := c.out.c.Close()
+	err := c.out.q.Close()
 	c.shutdown()
 	return err
 }
