@@ -124,22 +124,6 @@ func runCmd(args []string) (err error) {
 		"manual codes use direct; Steam invitations retain SDR)", *transport)
 	defer ms.Close()
 
-	// The direct route also needs an inbound firewall rule for this exe. The
-	// helper never asks for elevation (it runs hidden, behind the game), so
-	// the state is only reported; `wartales-mp firewall` adds the rule.
-	go func() {
-		st, err := firewall.Check(context.Background())
-		switch {
-		case err != nil:
-			logger.Printf("firewall: cannot check the inbound rule: %v", err)
-		case st.Present:
-			logger.Printf("firewall: %s", st.Detail)
-		default:
-			logger.Printf("WARNING: firewall: %s; the direct route (TCP %d inbound) cannot work until it exists: "+
-				"run `wartales-mp firewall` once from an elevated prompt. SDR needs no rule.", st.Detail, *port)
-		}
-	}()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go bridge.Run(ctx)

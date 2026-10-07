@@ -115,12 +115,12 @@ shown by the host. Old 13/16/25-symbol codes remain readable. Steam invitation
 payloads keep their existing format. Guests need the updated mod to read the
 new short manual codes; older mods can still use Steam invitations.
 
-**Windows Firewall.** The direct route also needs an inbound rule for the
-helper, and the helper never asks for elevation: it runs hidden, started from
-inside the game, and a UAC prompt behind a full-screen game would be dismissed
-and fail silently. So the mod only checks and reports (`WARNING: firewall: no
-inbound rule "wartales-mp"` in `wartales-mp.log`), and the direct route simply
-stays unverified until you add it — once, from an administrator prompt:
+**Windows Firewall.** No rule is needed. SDR is outbound-only, like the
+vanilla game's relay. The direct route is optional: a guest tries it for a
+few seconds, and if the host's firewall drops it, the guest falls back to
+SDR on its own. The helper never checks the firewall and never asks for
+elevation. Power users who want the direct route can add the inbound rule
+once, from an administrator prompt:
 
 ```powershell
 wartales-mp firewall          # adds the inbound rule for the helper, TCP 14250

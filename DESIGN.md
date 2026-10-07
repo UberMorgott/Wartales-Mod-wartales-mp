@@ -184,13 +184,14 @@ SDR-маршрут (мост поднят); только один из них �
 У хелпера нет входящего правила (на живой машине `Get-NetFirewallApplicationFilter` его не
 нашёл), значит direct не заработает даже при верном маппинге. Хелпер запускается скрытым
 изнутри игры и НЕ запрашивает повышение: UAC-окно без своего окна за полноэкранной игрой
-закроют, и мод молча сломается. Поэтому: при старте `firewall.Check` (`netsh advfirewall
-firewall show rule name=wartales-mp dir=in`) пишет в лог `WARNING: firewall: no inbound rule
-"wartales-mp"; the direct route … cannot work until it exists` с подсказкой запустить
-`wartales-mp firewall`; direct-маршрут остаётся «подсказкой без подтверждения», SDR правила
-не требует. Одно
-ручное действие, только если хочется direct: `wartales-mp firewall` из консоли администратора
-(`netsh … add rule … program=<exe> localport=14250`), `wartales-mp firewall check` — проверить.
+закроют, и мод молча сломается. При старте правило НЕ проверяется (никакого `netsh`): SDR —
+только исходящие соединения, как Shiro-релей ванилы, правило ему не нужно; direct опционален —
+гость пробует его с таймаутом `DefaultDirectTimeout` (3 с), отброшенный брандмауэром SYN
+истекает, отказ/чужой хост отсекаются сразу, и гость молча уходит на SDR (тесты
+`TestCascadeDirectTimesOutFallsBackToSDR`, `TestCascadeDirectRefusedFallsBackToSDR`,
+`TestCascadeWrongHostBehindTheEndpoint`). Для опытных пользователей, если хочется direct:
+`wartales-mp firewall` из консоли администратора (`netsh … add rule … program=<exe>
+localport=14250`), `wartales-mp firewall check` — проверить.
 
 SteamID64 восстанавливается из 32-битного account id: у любого игрового аккаунта старшие
 32 бита — `0x01100001` (universe Public, type Individual, instance Desktop). Мастер получает

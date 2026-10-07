@@ -2,10 +2,11 @@
 // direct transport needs. The helper is started hidden from inside the game,
 // so it never asks for elevation itself: a UAC prompt popping up behind a
 // full-screen game, with no window to explain it, would be dismissed and the
-// mod would fail silently. Instead the rule's presence is checked and logged
-// at every start, the direct route simply stays unverified without it (SDR
-// needs no rule at all), and `wartales-mp firewall`, run once from an
-// elevated prompt, adds it.
+// mod would fail silently. The helper never checks the rule at start: SDR is
+// outbound-only and needs no rule, and a direct attempt that the firewall
+// drops simply times out and falls back to SDR. These are power-user
+// commands: `wartales-mp firewall`, run once from an elevated prompt, adds
+// the rule; `wartales-mp firewall check` reports it.
 package firewall
 
 import (
