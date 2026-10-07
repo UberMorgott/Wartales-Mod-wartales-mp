@@ -40,13 +40,16 @@ func Check(ctx context.Context) (State, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "show", "rule",
-		"name="+RuleName, "dir=in").CombinedOutput()
+	out, err := quiet(exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "show", "rule",
+		"name="+RuleName, "dir=in")).CombinedOutput()
 	text := strings.TrimSpace(string(bytes.ToValidUTF8(out, []byte("?"))))
 	if err != nil {
-		// netsh exits 1 when no rule matches; anything it printed says so.
-		if strings.Contains(strings.ToLower(text), "no rules match") {
-			return State{Present: false, Detail: "no inbound rule " + strconv.Quote(RuleName)}, nil
+		// netsh exits 1 when no rule matches. Its text is localised ("No rules
+		// match ..." only on English Windows), so the exit code decides; the
+		// text goes into the log as is.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return State{Present: false, Detail: "no inbound rule " + strconv.Quote(RuleName) + " (netsh: " + firstLine(text) + ")"}, nil
 		}
 		return State{}, fmt.Errorf("netsh: %w (%s)", err, firstLine(text))
 	}
@@ -63,12 +66,12 @@ func Add(ctx context.Context, exe string, port int) error {
 	defer cancel()
 	// Replace an older rule for the same name first, so a moved exe or a new
 	// port never leaves two rules behind.
-	_ = exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "delete", "rule", "name="+RuleName).Run()
+	_ = quiet(exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "delete", "rule", "name="+RuleName)).Run()
 	//nolint:gosec // exe is os.Executable() of this very process and port a parsed int: nothing user-typed reaches netsh
-	out, err := exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "add", "rule",
+	out, err := quiet(exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "add", "rule",
 		"name="+RuleName, "dir=in", "action=allow", "protocol=TCP",
 		"localport="+strconv.Itoa(port), "program="+exe, "profile=any",
-		"description=wartales-mp direct transport (relay and proxy-link)").CombinedOutput()
+		"description=wartales-mp direct transport (relay and proxy-link)")).CombinedOutput()
 	text := strings.TrimSpace(string(bytes.ToValidUTF8(out, []byte("?"))))
 	if err != nil {
 		if strings.Contains(strings.ToLower(text), "requested operation requires elevation") ||

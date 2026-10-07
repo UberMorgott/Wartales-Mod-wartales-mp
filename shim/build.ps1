@@ -12,7 +12,7 @@
 #   3. objcopy wraps that exe            -> embed.o           (a linkable blob)
 #   3b. cargo builds patcher\ (Rust crate wartales-tips) -> libwartales_tips.a (structural
 #       bytecode patch: hover tooltips in the starting-troop preview)
-#   4. gcc links proxy.c + stubs + MinHook + embed.o + libwartales_tips.a + .def -> winmm.dll
+#   4. gcc links proxy.c (+ sdr/bridge/lobby/splash.c) + stubs + MinHook + embed.o + libwartales_tips.a + .def -> winmm.dll
 # The single file to drop into the game folder is <OutDir>\winmm.dll.
 #
 #   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-PatcherDir <path>] [-Release]
@@ -139,16 +139,22 @@ $mhsrc = @(
     (Join-Path $minhook 'src\hde\hde64.c')
 )
 $out = Join-Path $OutDir 'winmm.dll'
+# The start-up status window (proxy\splash.c) names the mod version from the
+# repo's VERSION file, via a generated header force-included into every unit.
+$version = (Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()
+if ($version -notmatch '^[0-9A-Za-z.+-]+$') { throw "bad VERSION '$version'" }
+$versionH = Join-Path $work 'wmp_version.h'
+Set-Content -LiteralPath $versionH -Value ('#define WMP_VERSION L"{0}"' -f $version) -Encoding ascii
 # Release strips the DLL at link time (-s -Wl,--strip-all); the default keeps
 # symbols for debugging. --strip-all is export-safe: the .def still defines the
 # 180 named exports, so stripping removes only debug/symbol data.
 $stripArgs = if ($Release) { @('-s', '-Wl,--strip-all') } else { @() }
 & $gcc -shared -O2 -o $out `
-    (Join-Path $PSScriptRoot 'proxy\proxy.c') (Join-Path $PSScriptRoot 'proxy\sdr.c') (Join-Path $PSScriptRoot 'proxy\bridge.c') (Join-Path $PSScriptRoot 'proxy\lobby.c') `
+    (Join-Path $PSScriptRoot 'proxy\proxy.c') (Join-Path $PSScriptRoot 'proxy\sdr.c') (Join-Path $PSScriptRoot 'proxy\bridge.c') (Join-Path $PSScriptRoot 'proxy\lobby.c') (Join-Path $PSScriptRoot 'proxy\splash.c') `
     $stubs $mhsrc $embed $def `
     $tipsLib @tipsLinkLibs `
-    "-I$(Join-Path $minhook 'include')" -DNDEBUG `
-    -Wall -Wextra -static-libgcc @stripArgs -lkernel32 -lws2_32
+    "-I$(Join-Path $minhook 'include')" -DNDEBUG -include $versionH `
+    -Wall -Wextra -static-libgcc @stripArgs -lkernel32 -lws2_32 -luser32 -lgdi32
 if ($LASTEXITCODE -ne 0) { throw 'gcc failed for winmm.dll' }
 
 # 5. Release: pack the final DLL. This is the artifact uploaded to GitHub.

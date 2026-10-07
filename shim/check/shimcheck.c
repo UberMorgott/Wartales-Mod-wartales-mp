@@ -1062,7 +1062,8 @@ int main(int argc, char **argv) {
 	got = read_raw(game, &m);
 	check(got != NULL && m == en && memcmp(got, exp, en) == 0, "chunked ReadFile image equals the expected patched image");
 	free(got);
-	check(log_contains(log, "bytecode: existing copy verified byte-for-byte, reused"), "shim.log records the copy being reused");
+	check(log_contains(log, "bytecode: already prepared in this process"),
+		"shim.log records the copy being reused without patching again in the same process");
 
 	// 6. Relative name with the game folder as cwd (how Steam launches it).
 	check(SetCurrentDirectoryW(game_dir), "chdir to the game folder");

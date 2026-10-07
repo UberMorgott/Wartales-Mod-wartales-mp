@@ -67,6 +67,7 @@
 #include "MinHook.h"
 #include "hlpatch.h"
 #include "shim.h"
+#include "splash.h"
 #include "tips.h"
 
 // ---------------------------------------------------------------------------
@@ -525,6 +526,11 @@ static void detour_conf_set_ca(void *conf, hl_ssl_cert *cert) {
 
 static CRITICAL_SECTION hl_lock; // serialises copy (re)generation
 static BOOL hl_lock_ready;
+static HINSTANCE shim_inst; // this DLL, for the status window's class
+// The last bytecode file materialise_copy handled in this process and its
+// outcome (-1 none yet, 0 refused, 1 copy ready). Under hl_lock.
+static wchar_t prepared_path[MAX_PATH * 2];
+static int prepared_state = -1;
 
 // bytecode_names are the files the hashlink loader reads as its main image.
 static const wchar_t *const bytecode_names[] = {L"hlboot.dat", L"sdlboot.dat"};
@@ -832,7 +838,19 @@ static BOOL redirect_bytecode(const wchar_t *name, DWORD access, DWORD disp,
 
 	EnterCriticalSection(&hl_lock);
 	log_wpath("bytecode: open", full);
-	ok = materialise_copy(full, copy);
+	if (prepared_state >= 0 && _wcsicmp(prepared_path, full) == 0) {
+		// The game opens hlboot.dat more than once at start; the copy was
+		// built (or refused) for this very file a moment ago and nothing else
+		// writes it, so the seconds-long patch is not run again.
+		ok = prepared_state == 1;
+		shim_log("bytecode: already %s in this process", ok ? "prepared" : "refused");
+	} else {
+		splash_begin(shim_inst); // patching takes seconds before the game has a window
+		ok = materialise_copy(full, copy);
+		splash_patched(ok);
+		wcscpy(prepared_path, full);
+		prepared_state = ok ? 1 : 0;
+	}
 	if (ok)
 		log_wpath("bytecode: redirected to", copy);
 	else
@@ -1144,9 +1162,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 	if (reason == DLL_PROCESS_ATTACH) {
 		HANDLE t;
 		DisableThreadLibraryCalls(inst);
+		shim_inst = inst;
 		log_open();
 		log_buffer_init();
 		shim_log("attach: winmm.dll proxy loaded");
+		console_detach();     // no empty console window next to the game
 		bind_forwards();      // before anything can call a forwarded export
 		hook_bytecode_open(); // before the game's entry point opens hlboot.dat
 		sdr_reset_status();   // a stale verdict from the last run must not be read

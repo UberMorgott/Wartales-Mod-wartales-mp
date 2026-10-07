@@ -25,7 +25,7 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
 )
 
-func runCmd(args []string) error {
+func runCmd(args []string) (err error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	port := fs.Int("port", 14250, "public TCP port for the relay and the proxy-link")
 	masterAddr := fs.String("master", "127.0.0.1:60442", "master listen address")
@@ -42,6 +42,11 @@ func runCmd(args []string) error {
 
 	logger, closeLog := applog.Open(os.Stdout)
 	defer func() { _ = closeLog() }() // shutting down; a failed close changes nothing
+	defer func() {
+		if err != nil {
+			logger.Printf("FATAL: %v", err)
+		}
+	}()
 	logger.Printf("wartales-mp starting: port %d, master %s", *port, *masterAddr)
 
 	// The winmm.dll proxy starts us from inside the game, so the certificates

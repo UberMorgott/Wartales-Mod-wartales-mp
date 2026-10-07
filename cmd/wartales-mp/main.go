@@ -19,6 +19,7 @@ import (
 )
 
 func main() {
+	useParentConsole()
 	args := os.Args[1:]
 	cmd := "run"
 	if len(args) > 0 && len(args[0]) > 0 && args[0][0] != '-' {
@@ -49,6 +50,9 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		if cmd == "run" {
+			fatalNotice(err) // started hidden by the game: stderr reaches nobody
+		}
 		os.Exit(1)
 	}
 }

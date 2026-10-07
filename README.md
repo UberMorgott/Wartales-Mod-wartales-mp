@@ -89,7 +89,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 2. Close Wartales.
 3. In Steam, right-click Wartales → **Manage** → **Browse local files**.
 4. Copy **winmm.dll** into that folder, next to **Wartales.exe**. Replace the old mod DLL when updating.
-5. Launch the game through Steam as usual.
+5. Launch the game through Steam as usual. For the first few seconds a small **Wartales Co-op Fix** window shows that the mod is preparing the game; it closes by itself when the game window appears. No console windows open. If the mod cannot apply its patches or its helper stops, a message box says so and names the log.
 
 Install the mod on every player's machine. **All players need the same version**: a guest whose mod files differ from the host's cannot join.
 
