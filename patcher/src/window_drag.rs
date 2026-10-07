@@ -102,16 +102,9 @@ const N_WIN_INSTALL: &str = "mpWinInstall";
 #[cfg(test)]
 pub(crate) const API_FNS: usize = 16;
 
-/// The shared drag functions (findexes).
+/// The shared drag functions other passes call (findexes).
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(dead_code)] // begin / restore: for later passes (more inventory panels)
 pub(crate) struct DragApi {
-    /// `(h2d.Object obj, h2d.Object follow, String key) -> void`
-    pub(crate) begin: RefFun,
-    /// `(h2d.Object obj, h2d.Object follow, String key) -> void`
-    pub(crate) restore: RefFun,
-    /// `(h2d.Flow obj) -> void`, bound to obj as an `onAfterReflow`.
-    pub(crate) clamp: RefFun,
     /// `(h2d.Flow panel, String key) -> void`
     pub(crate) panel: RefFun,
     /// `(ui.Window win) -> void`
@@ -548,20 +541,10 @@ fn find_named(code: &Bytecode, name: &str) -> Option<RefFun> {
 
 /// The shared drag functions, appended on first use (found by name afterwards).
 pub(crate) fn api(code: &mut Bytecode) -> Result<DragApi> {
-    if let (Some(begin), Some(restore), Some(clamp), Some(panel), Some(win_install)) = (
-        find_named(code, N_BEGIN),
-        find_named(code, N_RESTORE),
-        find_named(code, N_CLAMP),
-        find_named(code, N_PANEL),
-        find_named(code, N_WIN_INSTALL),
-    ) {
-        return Ok(DragApi {
-            begin,
-            restore,
-            clamp,
-            panel,
-            win_install,
-        });
+    if let (Some(panel), Some(win_install)) =
+        (find_named(code, N_PANEL), find_named(code, N_WIN_INSTALL))
+    {
+        return Ok(DragApi { panel, win_install });
     }
     let c = ctx(code)?;
     let snap = Snap::take(code);
@@ -614,13 +597,7 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
     ] {
         name_fn(code, f, n);
     }
-    Ok(DragApi {
-        begin,
-        restore,
-        clamp,
-        panel,
-        win_install,
-    })
+    Ok(DragApi { panel, win_install })
 }
 
 /// `report(exc)`: `if (logs < LOG_CAP) { logs++; Sys.println("mp: drag: " + Std.string(exc)); }`
@@ -3312,9 +3289,6 @@ mod tests {
             }
         }
         let api = DragApi {
-            begin: back.functions[n + 7].findex,
-            restore: back.functions[n + 2].findex,
-            clamp: back.functions[n + 8].findex,
             panel: back.functions[n + 11].findex,
             win_install: back.functions[n + 15].findex,
         };
@@ -3389,9 +3363,16 @@ mod tests {
                 .collect();
             (names, ret.is_void())
         };
-        assert_eq!(sig_of(a.begin).0, ["h2d.Object", "h2d.Object", "String"]);
-        assert_eq!(sig_of(a.restore).0, ["h2d.Object", "h2d.Object", "String"]);
-        assert_eq!(sig_of(a.clamp).0, ["h2d.Flow"]);
+        let named = |n: &str| find_named(&code, n).expect("named");
+        assert_eq!(
+            sig_of(named(N_BEGIN)).0,
+            ["h2d.Object", "h2d.Object", "String"]
+        );
+        assert_eq!(
+            sig_of(named(N_RESTORE)).0,
+            ["h2d.Object", "h2d.Object", "String"]
+        );
+        assert_eq!(sig_of(named(N_CLAMP)).0, ["h2d.Flow"]);
         assert_eq!(sig_of(a.panel).0, ["h2d.Flow", "String"]);
     }
 

@@ -1,56 +1,9 @@
 // Copyright (c) 2026 Morgott. Licensed under CC BY-NC 4.0.
 //
-// wartales-tips: patches Wartales' HashLink bytecode (hlboot.dat) so the item
-// icons shown on the new-game "start choice" preview carry the game's own
-// ItemTip tooltip on hover, and so enemy area attacks also hit the caster's
-// allies (see friendly_fire.rs), and so a co-op client's Career Plan extra
-// attribute point is granted from the host's own offer (see career_plan.rs),
-// and so a starting troop larger than the customize scene's five slots leaves
-// its extra animals off screen, owned by the host (see customize_slots.rs),
-// and so no co-op player waits for the others once the world is loaded (see
-// coop_gates.rs), and so hold-to-confirm rings fill three times faster (see
-// hold_speed.rs), and so a profession keeps its experience when the unit
-// switches jobs (see job_xp.rs) and the switch needs no confirm window (see
-// job_confirm.rs), and so every error the game reports is also
-// printed for the shim log with a trace of the co-op mode-switch barrier (see diag.rs),
-// and so a co-op caravan follows the player who last moved by their own input (the host when several
-// move), on by default, paused by its owner's own moves, F to opt out (see follow.rs), and so skill tooltips outside a battle show
-// the skill's Valor cost for units that are not (yet) the player's (see skill_cost.rs),
-// and so the co-op shared chest panel
-// gets sort / quick stack / take similar buttons (see chest_buttons.rs), and so
-// item costs paid "with the chest" (crafting, repairs, dialogs, injury remedies, recipe
-// ingredient rows, fishing hooks, lockpicks) also draw on, and list, the other co-op players' inventories (see party_inventory.rs), and so the post-battle
-// loot screen has its Take all button in co-op too (see loot_all.rs), and so the join gate shows
-// wartales-mp's "mod files differ from the host" text (see mod_version.rs), and so a co-op
-// leave from a place or the camp is never blocked by another player's business (see force_leave.rs), and so a
-// player inspecting an NPC no longer stops the others talking to another NPC (see npc_talk.rs), and
-// so a camp talk from the reserve list or a portrait waits until no player is busy (see camp_talk.rs), and
-// so a co-op mode switch never waits forever for a client that left or stopped answering (see
-// barrier.rs), and so an exception in a game network handler is logged instead of ending
-// the co-op session (see net_guard.rs), and so a
-// tooltip's column of keyword helpers wraps into more columns instead of running off screen and
-// lists a shared helper once (see tip_overflow.rs), and so transient item/skill tooltip decorations
-// cannot intercept their anchor's mouse events (see tooltip_input.rs), and so a censer's item tooltip without a unit no
-// longer throws every frame and stalls the inventory grid (see censer_tip.rs), and so a co-op ping lands where
-// the pinging player's cursor is and, in battle, makes the pinged cell (or the pinged unit's footprint and outline)
-// blink in the pinging player's nickname color for everyone instead of the vanilla ripple fx (see
-// ping_cell.rs), and so in battle the timeline's first diamond shows the acting player unit's portrait under its
-// player's nickname, with a co-op player status list (acting / done / waiting) above and left of it
-// (see timeline_hud.rs, timeline_list.rs), and so the customize screen logs its 2D
-// hit-test at the cursor (slot 4 diagnostic, see slot4_diag.rs), and so the end of every activity /
-// mini-game (ruins puzzles, lock picking, fishing, gambling) and every refused co-op RPC is printed
-// for the shim log (see activity_diag.rs), and so a co-op client closes its own modal window (the unit sheet)
-// by clicking outside it, as the host does (see window_close.rs), and so a co-op client's failed
-// activity (fishing, lock picking, any activity end) injures its unit through the host instead of
-// throwing "Not allowed" and freezing the activity (see activity_injury.rs), and so a co-op load
-// never waits forever for a player who left before reporting ready (see ready_start.rs), and so
-// an exception inside a domkit style pass no longer leaves every later UI action throwing
-// "Infinite loop in apply style", and a failing game-over window is logged and replaced by
-// the pause menu (see style_guard.rs), and so in co-op camp any player may move any party unit, assign it to a
-// camp tool and send it between camp and reserve (see camp_any_unit.rs), and so modal windows drag by their header
-// strip and the chest / inventory panels by their title, positions kept per window class / panel (see window_drag.rs), and so co-op player markers (screen-edge
-// locator, minimap arrow) show the player's nickname instead of P1..P4 (see marker_names.rs), and so holding ALT on the
-// world map outlines the interactive elements on screen, as inside places (see alt_world.rs).
+// wartales-tips: patches Wartales' HashLink bytecode (hlboot.dat) in memory: start-choice
+// tooltips (this file) plus one module per co-op fix / feature / diagnostic, applied in
+// order by `patch_image`. Each pass validates the shapes it edits; on a mismatch the
+// start-choice and friendly-fire passes fail the patch, every other pass is skipped (logged). What each pass does: patcher/README.md.
 
 mod activity_diag;
 mod activity_injury;
