@@ -395,6 +395,50 @@ static void check_lost(read_fn read, avail_fn avail, session_fn close, HMODULE a
 	close(uid);
 }
 
+// A co-op reload: the game closes its session with a peer (Steam's close
+// deferred ~1 s), and the peer comes straight back. The messages API keeps one
+// session per peer, so the old deferred close must not fire into the new one:
+// the peer's session request or a message from it cancels the close.
+static void check_reconnect(read_fn read, avail_fn avail, session_fn close, HMODULE api, const wchar_t *log, fire_fn fire) {
+	inject_fn inject = (inject_fn)(void *)GetProcAddress(api, "fake_inject");
+	stats_fn stats = (stats_fn)(void *)GetProcAddress(api, "fake_stats");
+	set_state_fn set_state = (set_state_fn)(void *)GetProcAddress(api, "fake_set_session_state");
+	const uint64_t BACK = 76561198000000006ULL, TALK = 76561198000000007ULL;
+	const unsigned char sid[4] = {9, 0, 0, 0};
+	unsigned char uid[8], buf[64];
+	uint32_t size, len;
+	vuid from;
+	fake_stats_t st;
+
+	// Peer re-dials: its session request cancels the pending close.
+	arm_peer(read, inject, set_state, log, BACK, sid, "reconnecting peer armed");
+	put_uid(uid, BACK);
+	check(close(uid) == 1 && wait_log(log, "sdr: session with 76561198000000006 closed (ok, CloseSessionWithUser deferred 1 s)", 2000),
+		"the game closes the session (reload), Steam's close deferred");
+	check(fire(BACK) == 1, "the peer asks for a new session at once");
+	check(wait_log(log, "sdr: deferred close of 76561198000000006 cancelled: the peer asks for a new session", 2000),
+		"its session request cancels the deferred close");
+	Sleep(2500);
+	check(!log_contains(log, "deferred CloseSessionWithUser(76561198000000006)"),
+		"no CloseSessionWithUser fires into the new session");
+
+	// Peer just sends again (session kept by Steam): a message cancels it too.
+	arm_peer(read, inject, set_state, log, TALK, sid, "talking peer armed");
+	put_uid(uid, TALK);
+	check(close(uid) == 1, "the game closes the second session");
+	inject(TALK, 0, "\x05\x01\x00\x09\x00\x00\x00hi", 9);
+	size = 0;
+	check(avail(&size, 0) == 1 && size == 9, "the peer's new message is there");
+	check(wait_log(log, "sdr: deferred close of 76561198000000007 cancelled: the peer sends again", 2000),
+		"a message from the peer cancels the deferred close");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == TALK && len == 9, "the message reaches the game");
+	Sleep(2500);
+	stats(&st);
+	check(st.last_close != BACK && st.last_close != TALK && !log_contains(log, "deferred CloseSessionWithUser(76561198000000007)"),
+		"no CloseSessionWithUser for the peer that talks again");
+}
+
 static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *log, const wchar_t *scratch) {
 	send_fn send = (send_fn)resolve(steam, "send_p2p_packet");
 	read_fn read = (read_fn)resolve(steam, "read_p2p_packet");
@@ -558,6 +602,7 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 	check(sdata(peer) == NULL, "get_p2p_session_data answers null");
 
 	check_lost(read, avail, close, api, log);
+	check_reconnect(read, avail, close, api, log, fire);
 
 	stats(&st);
 	check(st.allocated == st.released, "every message handed out by Steam was released");

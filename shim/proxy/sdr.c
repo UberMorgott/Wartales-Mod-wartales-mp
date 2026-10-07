@@ -330,6 +330,19 @@ static int find_watch(uint64_t id) {
 	return -1;
 }
 
+// cancel_close drops a pending deferred CloseSessionWithUser of slot w. The
+// messages API keeps one session per peer: a close armed for the old session
+// that fires after the peer came back (a co-op reload: the guest closes, then
+// re-dials at once) kills the new session and its traffic. So the peer's new
+// session request, any message from it and a new session seen by the diag
+// thread all cancel it, like the game sending to it again does. Lock held.
+static void cancel_close(int w, const char *why) {
+	if (w < 0 || !sdr_watch[w].close_pending)
+		return;
+	sdr_watch[w].close_pending = FALSE;
+	shim_log("sdr: deferred close of %llu cancelled: %s", (unsigned long long)sdr_watch[w].id, why);
+}
+
 // mark_lost flags an armed session as gone; the diag thread injects. Lock held.
 static void mark_lost(int w, int st, int end_reason, const char *why) {
 	if (w < 0 || !sdr_watch[w].armed || sdr_watch[w].lost || sdr_watch[w].injected)
@@ -393,6 +406,8 @@ static void diag_tick(void) {
 			sdr_watch[i].end_reason = info.end_reason;
 			sdr_watch[i].state_since = now;
 			sdr_watch[i].stuck_logged = FALSE;
+			if (st >= 1 && st <= 3 && (prev == 0 || prev == 4 || prev == 5 || prev == -3))
+				cancel_close((int)i, "a new session with the peer");
 			if (st == 3 && sdr_watch[i].lost && !sdr_watch[i].injected) {
 				sdr_watch[i].lost = FALSE;
 				shim_log("sdr: session with %llu connected again, no close injected", (unsigned long long)sdr_watch[i].id);
@@ -479,6 +494,7 @@ static void session_request(const sdr_identity *peer, const char *via) {
 	if (peer->type == SDR_IDENTITY_STEAMID) {
 		EnterCriticalSection(&sdr_lock);
 		watch_peer(peer->u.steam_id);
+		cancel_close(find_watch(peer->u.steam_id), "the peer asks for a new session");
 		LeaveCriticalSection(&sdr_lock);
 	}
 }
@@ -738,6 +754,7 @@ static void pump(int channel) {
 				sdr_dropped++;
 				continue;
 			}
+			cancel_close(find_watch(batch[i]->peer.u.steam_id), "the peer sends again");
 			queue_push(channel, batch[i]);
 			sdr_received++;
 		}
@@ -862,11 +879,7 @@ static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int l
 
 	EnterCriticalSection(&sdr_lock);
 	{
-		int w = find_watch(to.u.steam_id);
-		if (w >= 0 && sdr_watch[w].close_pending) {
-			sdr_watch[w].close_pending = FALSE; // the game talks to the peer again
-			shim_log("sdr: deferred close of %llu cancelled: the game sends to it again", (unsigned long long)to.u.steam_id);
-		}
+		cancel_close(find_watch(to.u.steam_id), "the game sends to it again");
 	}
 	res = api.send(sdr_msgs, &to, data, (uint32_t)length, flags, channel);
 	if (watch_peer(to.u.steam_id))
