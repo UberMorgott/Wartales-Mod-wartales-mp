@@ -442,6 +442,34 @@ static void check_reconnect(read_fn read, avail_fn avail, session_fn close, HMOD
 		"no CloseSessionWithUser for the peer that talks again");
 }
 
+// Watch slots are reused: after many peers came and went (lobby probes over
+// the bridge, guests that left), a new game session still gets its close.
+static void check_watch_reuse(read_fn read, session_fn close, HMODULE api, const wchar_t *log) {
+	inject_fn inject = (inject_fn)(void *)GetProcAddress(api, "fake_inject");
+	set_state_fn set_state = (set_state_fn)(void *)GetProcAddress(api, "fake_set_session_state");
+	const uint64_t LATE = 76561198000000100ULL;
+	const unsigned char sid[4] = {0x21, 0, 0, 0}, want[7] = {8, 0, 0, 0x21, 0, 0, 0};
+	unsigned char buf[64], uid[8];
+	uint32_t len;
+	unsigned k, all = 1;
+	vuid from;
+
+	for (k = 0; k < 20; k++) {
+		inject(76561198000000200ULL + k, 2, "p", 1);
+		from = read(buf, sizeof(buf), &len, 2);
+		all = all && from != NULL && get_uid(from) == 76561198000000200ULL + k;
+	}
+	check(all, "20 more peers heard from (past the 16 watch slots)");
+	check(wait_log(log, "sdr: watch slot of idle peer ", 2000), "shim.log records an idle peer's slot reused");
+	arm_peer(read, inject, set_state, log, LATE, sid, "a game session after them is watched and armed");
+	set_state(LATE, 4, 1000);
+	check(wait_log(log, "sdr: peer lost, injected close for 76561198000000100", 8000), "its loss still injects a close");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == LATE && len == 7 && memcmp(buf, want, 7) == 0, "the injected close reaches the game");
+	put_uid(uid, LATE);
+	close(uid);
+}
+
 static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *log, const wchar_t *scratch) {
 	send_fn send = (send_fn)resolve(steam, "send_p2p_packet");
 	read_fn read = (read_fn)resolve(steam, "read_p2p_packet");
@@ -631,6 +659,7 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 
 	check_lost(read, avail, close, api, log);
 	check_reconnect(read, avail, close, api, log, fire);
+	check_watch_reuse(read, close, api, log);
 
 	stats(&st);
 	check(st.allocated == st.released, "every message handed out by Steam was released");

@@ -285,6 +285,7 @@ static struct {
 	DWORD last_recv;     // GetTickCount of that packet
 	BOOL close_pending;  // CloseSessionWithUser due at close_at
 	DWORD close_at;
+	DWORD last_seen;     // last send / read / session request naming the peer
 } sdr_watch[SDR_WATCH_MAX];
 static unsigned sdr_watch_n;
 static int sdr_relay_last = -1000;
@@ -305,19 +306,34 @@ static const char *state_name(int s) {
 	}
 }
 
-// watch_peer starts following id; returns TRUE when it is new. Lock held.
+// watch_peer starts following id; returns TRUE when it is new. When every
+// slot is taken, the slot idle longest is reused: one whose peer the game does
+// not hold (not armed), with no deferred close or pending injection. Lock held.
 static BOOL watch_peer(uint64_t id) {
-	unsigned i;
+	unsigned i, w = SDR_WATCH_MAX;
+	DWORD now = GetTickCount();
 	for (i = 0; i < sdr_watch_n; i++)
-		if (sdr_watch[i].id == id)
+		if (sdr_watch[i].id == id) {
+			sdr_watch[i].last_seen = now;
 			return FALSE;
-	if (sdr_watch_n == SDR_WATCH_MAX)
-		return FALSE;
-	memset(&sdr_watch[sdr_watch_n], 0, sizeof(sdr_watch[0]));
-	sdr_watch[sdr_watch_n].id = id;
-	sdr_watch[sdr_watch_n].state = -1000; // unknown yet
-	sdr_watch[sdr_watch_n].state_since = GetTickCount();
-	sdr_watch_n++;
+		}
+	if (sdr_watch_n < SDR_WATCH_MAX) {
+		w = sdr_watch_n++;
+	} else {
+		for (i = 0; i < SDR_WATCH_MAX; i++) {
+			if (sdr_watch[i].armed || sdr_watch[i].close_pending || (sdr_watch[i].lost && !sdr_watch[i].injected))
+				continue;
+			if (w == SDR_WATCH_MAX || now - sdr_watch[i].last_seen > now - sdr_watch[w].last_seen)
+				w = i;
+		}
+		if (w == SDR_WATCH_MAX)
+			return FALSE; // every slot is a session in use
+		shim_log("sdr: watch slot of idle peer %llu reused for %llu", (unsigned long long)sdr_watch[w].id, (unsigned long long)id);
+	}
+	memset(&sdr_watch[w], 0, sizeof(sdr_watch[0]));
+	sdr_watch[w].id = id;
+	sdr_watch[w].state = -1000; // unknown yet
+	sdr_watch[w].state_since = sdr_watch[w].last_seen = now;
 	return TRUE;
 }
 
