@@ -989,7 +989,11 @@ mod tests {
                     Some(c.key_get(&a[0], &format!("k{k}")))
                 } else if f == p.omap_set || f == p.omap_remove {
                     let V::O(k) = a[1] else { panic!() };
-                    let v = if f == p.omap_set { a[2].clone() } else { V::Null };
+                    let v = if f == p.omap_set {
+                        a[2].clone()
+                    } else {
+                        V::Null
+                    };
                     c.key_set(&a[0], format!("k{k}"), v);
                     Some(if f == p.omap_set { V::Null } else { V::B(true) })
                 } else if f == p.omap_new {
@@ -1274,7 +1278,13 @@ mod tests {
         let ev = |s: &mut Sim, y: f64, code: i32| {
             s.run(
                 recv,
-                vec![w.ctrl.clone(), V::F(SENTINEL), V::F(y), z(code, 0, 0), w.other.clone()],
+                vec![
+                    w.ctrl.clone(),
+                    V::F(SENTINEL),
+                    V::F(y),
+                    z(code, 0, 0),
+                    w.other.clone(),
+                ],
             );
         };
         let hit_idle = |s: &mut Sim, y: f64| -> V {

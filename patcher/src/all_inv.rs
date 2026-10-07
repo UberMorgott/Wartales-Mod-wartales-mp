@@ -2305,7 +2305,11 @@ fn emit_amount_box(
     let (fs, ft, fit) = amount_keys(code);
     a.op(Opcode::New { dst: k.o });
     for (field, src) in [(fs, slot), (ft, to), (fit, item)] {
-        a.op(Opcode::DynSet { obj: k.o, field, src });
+        a.op(Opcode::DynSet {
+            obj: k.o,
+            field,
+            src,
+        });
     }
     a.op(Opcode::Null { dst: k.cur });
     a.op(Opcode::Int {
@@ -2464,7 +2468,13 @@ fn add_give(
         arg0: key,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "whole");
-    let ab = AmountRegs { o, cur, max: m, cl, v };
+    let ab = AmountRegs {
+        o,
+        cur,
+        max: m,
+        cl,
+        v,
+    };
     emit_amount_box(code, &mut a, p, give_amount, &ab, (Reg(0), t, it));
     a.jmp(Opcode::JAlways { offset: 0 }, "out");
     a.label("whole");
@@ -5974,11 +5984,8 @@ mod tests {
         patch_all_inv(&mut code);
         let u = &pl.u;
         let fun = |n: &str| find_named(&code, n).expect(n);
-        let (pick, click, give_amount) = (
-            fun(N_FGN_PICK),
-            fun(N_FGN_CLICK),
-            fun("mpAllInvGiveAmount"),
-        );
+        let (pick, click, give_amount) =
+            (fun(N_FGN_PICK), fun(N_FGN_CLICK), fun("mpAllInvGiveAmount"));
         let gi_g = (orig.globals.len()..code.globals.len())
             .find(|&i| code.globals[i] == u.gi_t)
             .expect("gi global");

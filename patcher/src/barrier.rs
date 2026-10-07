@@ -1288,7 +1288,10 @@ fn add_tick(
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "replay");
     // Oldest first: each parked client goes JOIN_CAP s after its own Join.
-    a.op(Opcode::Float { dst: cap, ptr: fcap });
+    a.op(Opcode::Float {
+        dst: cap,
+        ptr: fcap,
+    });
     a.loop_head("drops");
     a.op(Opcode::Field {
         dst: len,
@@ -2199,9 +2202,7 @@ mod tests {
                     Opcode::Mov { dst, src }
                     | Opcode::UnsafeCast { dst, src }
                     | Opcode::SafeCast { dst, src }
-                    | Opcode::ToDyn { dst, src } => {
-                        r[dst.0 as usize] = r[src.0 as usize].clone()
-                    }
+                    | Opcode::ToDyn { dst, src } => r[dst.0 as usize] = r[src.0 as usize].clone(),
                     Opcode::Null { dst } | Opcode::Type { dst, .. } => r[dst.0 as usize] = V::Null,
                     Opcode::Bool { dst, value } => r[dst.0 as usize] = V::B(value.0),
                     Opcode::Int { dst, ptr } => r[dst.0 as usize] = V::I(code.ints[ptr.0]),

@@ -484,7 +484,7 @@ fn repeat_guard(
             b: dt,
             offset: 0,
         }, // 11 -> 18 (a recent record: keep the maps)
-        Opcode::New { dst: times },     // 12
+        Opcode::New { dst: times }, // 12
         Opcode::Call1 {
             dst: void,
             fun: p.map_new,
@@ -494,7 +494,7 @@ fn repeat_guard(
             global: g_times,
             src: times,
         }, // 14
-        Opcode::New { dst: players },   // 15
+        Opcode::New { dst: players }, // 15
         Opcode::Call1 {
             dst: void,
             fun: p.map_new,
@@ -1056,8 +1056,13 @@ mod tests {
         let mut code = read(&image);
         patch_coop_gates(&mut code);
         let ng = orig.globals.len();
-        let (sys_time, player, map_new, map_get, map_set) =
-            (bp.sys_time, bp.action_player, bp.map_new, bp.map_get, bp.map_set);
+        let (sys_time, player, map_new, map_get, map_set) = (
+            bp.sys_time,
+            bp.action_player,
+            bp.map_new,
+            bp.map_get,
+            bp.map_set,
+        );
         let mkey = |k: &V| match k {
             V::O(i) => format!("m{i}"),
             o => panic!("map key {o:?}"),
@@ -1123,7 +1128,10 @@ mod tests {
         assert_ne!(fresh, times);
         assert_eq!(s.c.key_get(&fresh, &mkey(&bd1)), V::Null);
         assert_eq!(s.c.key_get(&fresh, &mkey(&bd2)), V::F(1012.5));
-        assert!(!click(&mut s, 13.0, &p1, &bd2), "the new record still guards");
+        assert!(
+            !click(&mut s, 13.0, &p1, &bd2),
+            "the new record still guards"
+        );
     }
 
     fn ops(o: &[Opcode]) -> String {
@@ -1239,10 +1247,15 @@ mod tests {
                 vec![base + to],
                 "guard op {from}"
             );
-        }        assert!(matches!(c.ops[base + n], Opcode::NullCheck { .. }));
+        }
+        assert!(matches!(c.ops[base + n], Opcode::NullCheck { .. }));
         assert!(matches!(c.ops[base + n + 1], Opcode::CallClosure { .. }));
         assert!(matches!(c.ops[base + n + 2], Opcode::Ret { .. }));
-        for (v, want) in [(REPEAT_OTHER_S, 21), (REPEAT_SAME_S, 36), (REPEAT_OTHER_S, 38)] {
+        for (v, want) in [
+            (REPEAT_OTHER_S, 21),
+            (REPEAT_SAME_S, 36),
+            (REPEAT_OTHER_S, 38),
+        ] {
             assert!(matches!(g[want], Opcode::Float { ptr, .. } if back.floats[ptr.0] == v));
         }
         // G1 push: the vote-on-push test always jumps over the block, the hold

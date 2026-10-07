@@ -271,9 +271,21 @@ pub(crate) fn base(code: &Bytecode) -> Result<Base> {
     let omap_get = proto(code, omap_t, "get")?;
     want(code, omap_get, "ObjectMap.get", &[omap_t, dyn_t], dyn_t)?;
     let omap_set = proto(code, omap_t, "set")?;
-    want(code, omap_set, "ObjectMap.set", &[omap_t, dyn_t, dyn_t], void_)?;
+    want(
+        code,
+        omap_set,
+        "ObjectMap.set",
+        &[omap_t, dyn_t, dyn_t],
+        void_,
+    )?;
     let omap_remove = proto(code, omap_t, "remove")?;
-    want(code, omap_remove, "ObjectMap.remove", &[omap_t, dyn_t], bool_)?;
+    want(
+        code,
+        omap_remove,
+        "ObjectMap.remove",
+        &[omap_t, dyn_t],
+        bool_,
+    )?;
     let omap_new = method(code, omap_t, "__constructor__")?.findex;
     want(code, omap_new, "ObjectMap constructor", &[omap_t], void_)?;
 
@@ -657,7 +669,10 @@ pub(crate) fn add_idle_of(
         r.r(b.bool_),
     );
     let mut a = Asm::new();
-    a.op(Opcode::GetGlobal { dst: m, global: map });
+    a.op(Opcode::GetGlobal {
+        dst: m,
+        global: map,
+    });
     a.jmp(Opcode::JNotNull { reg: m, offset: 0 }, "have");
     a.op(Opcode::New { dst: m });
     a.op(Opcode::Call1 {
@@ -665,7 +680,10 @@ pub(crate) fn add_idle_of(
         fun: b.omap_new,
         arg0: m,
     });
-    a.op(Opcode::SetGlobal { global: map, src: m });
+    a.op(Opcode::SetGlobal {
+        global: map,
+        src: m,
+    });
     a.label("have");
     a.op(Opcode::Mov { dst: d, src: e });
     int(&mut a, code, k, IDLE_START);
@@ -685,7 +703,13 @@ pub(crate) fn add_idle_of(
     });
     a.op(Opcode::SafeCast { dst: cur, src: d });
     a.op(Opcode::Mov { dst: d, src: e });
-    a.jmp(Opcode::JNull { reg: cur, offset: 0 }, "take");
+    a.jmp(
+        Opcode::JNull {
+            reg: cur,
+            offset: 0,
+        },
+        "take",
+    );
     int(&mut a, code, k, IDLE_END);
     a.jmp(
         Opcode::JNotEq {
@@ -710,7 +734,14 @@ pub(crate) fn add_idle_of(
         field: b.e_anim,
     });
     int(&mut a, code, k, IDLE_END);
-    a.jmp(Opcode::JEq { a: how, b: k, offset: 0 }, "ret");
+    a.jmp(
+        Opcode::JEq {
+            a: how,
+            b: k,
+            offset: 0,
+        },
+        "ret",
+    );
     a.op(Opcode::Call3 {
         dst: v,
         fun: b.omap_set,

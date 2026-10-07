@@ -1270,7 +1270,10 @@ mod tests {
     fn unsupported_bytecode_version_is_refused() {
         for v in [3u8, 6] {
             let err = patch_image(&[b'H', b'L', b'B', v, 0, 0, 0, 0]).unwrap_err();
-            assert!(format!("{err:#}").contains("nsupported"), "version {v}: {err:#}");
+            assert!(
+                format!("{err:#}").contains("nsupported"),
+                "version {v}: {err:#}"
+            );
         }
     }
 
