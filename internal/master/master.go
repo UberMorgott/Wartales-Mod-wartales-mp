@@ -236,7 +236,9 @@ type session struct {
 	// user/login and lobby/join back to back when it re-joins a lobby, and a
 	// join forwarded before the leave ends with the host dropping a member
 	// its game believes is in.
-	queue chan link.Envelope
+	queue    chan link.Envelope
+	gone     chan struct{} // closed when the game's socket ends
+	answered chan struct{} // closed when answerAll has returned
 }
 
 // queueDepth bounds the commands waiting on a blocked one; the game waits for
@@ -288,9 +290,9 @@ func (s *Server) serve(c net.Conn) {
 		s.opt.Log.Printf("master: handshake from %s failed: %v", peer, err)
 		return
 	}
-	sess := &session{srv: s, ws: ws, queue: make(chan link.Envelope, queueDepth)}
+	sess := &session{srv: s, ws: ws, queue: make(chan link.Envelope, queueDepth),
+		gone: make(chan struct{}), answered: make(chan struct{})}
 	go s.answerAll(sess)
-	defer close(sess.queue)
 	// The game opens two sockets at startup (master.shirogames.com and
 	// master2.shirogames.com, getMPManConfig@14965) and drops the second at
 	// once, so a socket does not become the game's connection by merely
@@ -305,6 +307,12 @@ func (s *Server) serve(c net.Conn) {
 		peer, ws.Ident, applog.Trunc(applog.Headers(ws.Headers)))
 
 	defer func() {
+		// The commands still queued are dropped and the one being answered
+		// is waited for, so none of them can put the session back into a
+		// lobby (or back as the game's connection) after it is cleaned up.
+		close(sess.gone)
+		close(sess.queue)
+		<-sess.answered
 		s.opt.Log.Printf("master: game session from %s ended (uid %q)", peer, sess.UserID())
 		s.lobbies.peerGone(sess)
 		s.mu.Lock()
@@ -337,9 +345,15 @@ func (s *Server) serve(c net.Conn) {
 }
 
 // answerAll answers the session's commands one after the other until the
-// read loop closes the queue.
+// read loop closes the queue; once the game is gone the rest are dropped.
 func (s *Server) answerAll(sess *session) {
+	defer close(sess.answered)
 	for e := range sess.queue {
+		select {
+		case <-sess.gone:
+			continue
+		default:
+		}
 		s.answer(sess, e)
 	}
 }
