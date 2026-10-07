@@ -11,7 +11,7 @@
 
 use crate::fun_index;
 use hlbc::opcodes::Opcode;
-use hlbc::types::{RefField, RefFun, RefGlobal};
+use hlbc::types::{RefField, RefFun, RefGlobal, Type};
 use hlbc::Bytecode;
 use std::collections::HashMap;
 
@@ -200,6 +200,16 @@ impl<'a> Sim<'a> {
                 Opcode::Float { dst, ptr } => r[rr(dst)] = V::F(code.floats[ptr.0]),
                 Opcode::Null { dst } => r[rr(dst)] = V::Null,
                 Opcode::NullCheck { reg } => assert_ne!(r[rr(reg)], V::Null, "null check"),
+                // A null Dyn cast to a number is 0, as hl_dyn_castd / castf / casti give it.
+                Opcode::SafeCast { dst, src }
+                    if r[rr(src)] == V::Null
+                        && matches!(code.types[fun.regs[rr(dst)].0], Type::F64 | Type::I32) =>
+                {
+                    r[rr(dst)] = match code.types[fun.regs[rr(dst)].0] {
+                        Type::F64 => V::F(0.0),
+                        _ => V::I(0),
+                    }
+                }
                 Opcode::Mov { dst, src }
                 | Opcode::SafeCast { dst, src }
                 | Opcode::UnsafeCast { dst, src }

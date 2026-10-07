@@ -21,13 +21,18 @@
 //      bd -> player), so clicking another button in between does not reset it,
 //      and a later click still acts: a button the game re-uses while its window
 //      stays open (rest after a cancelled confirm, tutorial pages) keeps working.
+//      A third global holds the newest record's time: once it is 5 s old no
+//      record can drop a click, so the next click starts both maps afresh and
+//      no button data (with the window and game behind it) is kept longer.
 //      While the host's mode-switch barrier runs (Controller.lockSyncMode, or
 //      clients in waitLocks) every wait-all click is dropped, however late:
 //      syncLeaveMode/syncEnterMode queue a second request behind the first and
 //      run it afterwards. Known limit: a click after 2 s / 5 s while the first
 //      action waits on an open confirm acts again (a second confirm); there is
-//      no generic "action pending" state, and vanilla's own hold-to-force path
-//      let every later click act, unguarded.
+//      no generic "action pending" state (ButtonData is an hxbit proxy of
+//      forced / netId / players, `cb` a per-window closure with no completion
+//      event), and vanilla's own hold-to-force path let every later click act,
+//      unguarded.
 //      onPush (Button.hx:153-163), when the pushing player has not voted yet,
 //      calls `interactive.onClick(e)` with the push event: the click handler
 //      (host: Button.hx:82-90) takes it as a left click, i.e. a vote cast on
@@ -388,9 +393,9 @@ fn plan_button(code: &Bytecode) -> Result<ButtonPlan> {
 ///   p = button.game.getActionPlayer();
 ///   c = game.ctrl; if (c != null && (c.lockSyncMode || c.waitLocks.length > 0)) return;
 ///   now = sys_time();
-///   if (times == null) { times = new ObjectMap(); players = new ObjectMap(); }
+///   if (times == null || now - last >= OTHER) { times = new ObjectMap(); players = new ObjectMap(); }
 ///   if (now - (times.get(bd) ?? 0) < (players.get(bd) == p ? SAME : OTHER)) return;
-///   times.set(bd, now); players.set(bd, p);
+///   times.set(bd, now); players.set(bd, p); last = now;
 ///
 /// Vanilla swallowed repeat clicks in the vote (the button acted once, when the
 /// last vote arrived); with the first click acting, a double click or a second
@@ -401,11 +406,11 @@ fn plan_button(code: &Bytecode) -> Result<ButtonPlan> {
 fn repeat_guard(
     code: &mut Bytecode,
     p: &ButtonPlan,
-    globals: [hlbc::types::RefGlobal; 2],
+    globals: [hlbc::types::RefGlobal; 3],
 ) -> Vec<Opcode> {
     let same = float_const(code, REPEAT_SAME_S);
     let other = float_const(code, REPEAT_OTHER_S);
-    let [g_times, g_players] = globals;
+    let [g_times, g_players, g_last] = globals;
     let f = &mut code.functions[p.click_fi];
     let mut reg = |t: RefType| {
         f.regs.push(t);
@@ -454,99 +459,124 @@ fn repeat_guard(
             dst: times,
             global: g_times,
         }, // 6
-        Opcode::JNotNull {
+        Opcode::JNull {
             reg: times,
             offset: 0,
-        }, // 7 -> 14
-        Opcode::New { dst: times },     // 8
-        Opcode::Call1 {
-            dst: void,
-            fun: p.map_new,
-            arg0: times,
-        }, // 9
-        Opcode::SetGlobal {
-            global: g_times,
-            src: times,
-        }, // 10
-        Opcode::New { dst: players },   // 11
-        Opcode::Call1 {
-            dst: void,
-            fun: p.map_new,
-            arg0: players,
-        }, // 12
-        Opcode::SetGlobal {
-            global: g_players,
-            src: players,
-        }, // 13
+        }, // 7 -> 12
+        // Every record is at most as recent as the last one: once that is
+        // REPEAT_OTHER_S old, none can drop a click, so the maps start over and
+        // keep no button data (or the game it belongs to) any longer.
         Opcode::GetGlobal {
-            dst: players,
-            global: g_players,
-        }, // 14
-        // An object goes to a Dyn argument as is (what the compiler emits).
-        Opcode::Mov {
-            dst: key,
-            src: p.bd,
-        }, // 15
-        Opcode::Call2 {
-            dst: val,
-            fun: p.map_get,
-            arg0: times,
-            arg1: key,
-        }, // 16
-        Opcode::SafeCast { dst: dt, src: val }, // 17: null (never acted) -> 0
+            dst: dt,
+            global: g_last,
+        }, // 8
         Opcode::Sub {
             dst: dt,
             a: now,
             b: dt,
+        }, // 9
+        Opcode::Float {
+            dst: lim,
+            ptr: other,
+        }, // 10
+        Opcode::JSGt {
+            a: lim,
+            b: dt,
+            offset: 0,
+        }, // 11 -> 18 (a recent record: keep the maps)
+        Opcode::New { dst: times },     // 12
+        Opcode::Call1 {
+            dst: void,
+            fun: p.map_new,
+            arg0: times,
+        }, // 13
+        Opcode::SetGlobal {
+            global: g_times,
+            src: times,
+        }, // 14
+        Opcode::New { dst: players },   // 15
+        Opcode::Call1 {
+            dst: void,
+            fun: p.map_new,
+            arg0: players,
+        }, // 16
+        Opcode::SetGlobal {
+            global: g_players,
+            src: players,
+        }, // 17
+        Opcode::GetGlobal {
+            dst: players,
+            global: g_players,
         }, // 18
+        // An object goes to a Dyn argument as is (what the compiler emits).
+        Opcode::Mov {
+            dst: key,
+            src: p.bd,
+        }, // 19
+        Opcode::Call2 {
+            dst: val,
+            fun: p.map_get,
+            arg0: times,
+            arg1: key,
+        }, // 20
+        Opcode::SafeCast { dst: dt, src: val }, // 21: null (never acted) -> 0
+        Opcode::Sub {
+            dst: dt,
+            a: now,
+            b: dt,
+        }, // 22
         Opcode::Call2 {
             dst: val,
             fun: p.map_get,
             arg0: players,
             arg1: key,
-        }, // 19
+        }, // 23
         Opcode::SafeCast {
             dst: last_player,
             src: val,
-        }, // 20
+        }, // 24
         Opcode::Float {
             dst: lim,
             ptr: same,
-        }, // 21
+        }, // 25
         Opcode::JEq {
             a: player,
             b: last_player,
             offset: 0,
-        }, // 22 -> 24
+        }, // 26 -> 28
         Opcode::Float {
             dst: lim,
             ptr: other,
-        }, // 23
+        }, // 27
         Opcode::JSGte {
             a: dt,
             b: lim,
             offset: 0,
-        }, // 24 -> FIRE
-        Opcode::Ret { ret: void },              // 25 repeat: dropped
-        Opcode::ToDyn { dst: val, src: now },   // 26 FIRE
+        }, // 28 -> FIRE
+        Opcode::Ret { ret: void },              // 29 repeat: dropped
+        Opcode::ToDyn { dst: val, src: now },   // 30 FIRE
         Opcode::Call3 {
             dst: void,
             fun: p.map_set,
             arg0: times,
             arg1: key,
             arg2: val,
-        }, // 27
+        }, // 31
         Opcode::Mov {
             dst: val,
             src: player,
-        }, // 28
+        }, // 32
         Opcode::Call3 {
             dst: void,
             fun: p.map_set,
             arg0: players,
             arg1: key,
             arg2: val,
-        }, // 29
+        }, // 33
+        Opcode::SetGlobal {
+            global: g_last,
+            src: now,
+        }, // 34
     ];
     // Ops 5..16: while the host's mode-switch barrier runs, every click is
     // dropped (a second leave/enter request would be queued behind the first and
@@ -614,7 +644,7 @@ fn repeat_guard(
     let k = barrier.len();
     ops.splice(5..5, barrier);
     let shift = |i: usize| if i >= 5 { i + k } else { i };
-    let mut jumps: Vec<(usize, usize)> = [(7, 14), (22, 24), (24, 26)]
+    let mut jumps: Vec<(usize, usize)> = [(7, 12), (11, 18), (26, 28), (28, 30)]
         .iter()
         .map(|&(a, b)| (shift(a), shift(b)))
         .collect();
@@ -624,7 +654,7 @@ fn repeat_guard(
 }
 
 fn apply_button(code: &mut Bytecode, p: &ButtonPlan) {
-    let globals = [p.map_t, p.map_t].map(|t| {
+    let globals = [p.map_t, p.map_t, p.f64_t].map(|t| {
         code.globals.push(t);
         hlbc::types::RefGlobal(code.globals.len() - 1)
     });
@@ -1007,6 +1037,94 @@ pub(crate) fn patch_coop_gates(code: &mut Bytecode) {
 mod tests {
     use super::*;
     use crate::asm::testutil::{game, read};
+    use crate::testsim::{Core, Sim, V};
+
+    /// The G1 guard's length and its `return` (dropped) ops.
+    const GUARD_OPS: usize = 46;
+    const GUARD_DROPS: [usize; 3] = [9, 15, 40];
+
+    /// The G1 guard run on the patched installed game: a repeat on the same
+    /// button data is dropped within REPEAT_SAME_S (same player) / REPEAT_OTHER_S
+    /// (another player) of the click that acted, later ones act; a mode switch
+    /// drops every click; once the last record is REPEAT_OTHER_S old the maps
+    /// start over, holding no earlier button data.
+    #[test]
+    fn repeat_guard_behaviour() {
+        let Some(image) = game() else { return };
+        let orig = read(&image);
+        let bp = plan_button(&orig).expect("button");
+        let mut code = read(&image);
+        patch_coop_gates(&mut code);
+        let ng = orig.globals.len();
+        let (sys_time, player, map_new, map_get, map_set) =
+            (bp.sys_time, bp.action_player, bp.map_new, bp.map_get, bp.map_set);
+        let mkey = |k: &V| match k {
+            V::O(i) => format!("m{i}"),
+            o => panic!("map key {o:?}"),
+        };
+        let mut s = Sim::new(
+            &code,
+            orig.functions.len(),
+            move |c: &mut Core, f: RefFun, a: &[V]| {
+                if f == sys_time {
+                    Some(c.map("t", "now"))
+                } else if f == player {
+                    Some(c.map("me", "p"))
+                } else if f == map_new {
+                    Some(V::Null)
+                } else if f == map_get {
+                    Some(c.key_get(&a[0], &mkey(&a[1])))
+                } else if f == map_set {
+                    c.key_set(&a[0], mkey(&a[1]), a[2].clone());
+                    Some(V::Null)
+                } else {
+                    None
+                }
+            },
+            |_: &mut Core, _: usize, _: &[V]| panic!("no virtual call"),
+        );
+        let Opcode::EnumField { field: env_f, .. } = bp.load_button else {
+            unreachable!()
+        };
+        let ctrl = s.c.obj(&[(bp.lock_f, V::B(false))]);
+        let game = s.c.obj(&[(bp.ctrl_f, ctrl.clone())]);
+        let button = s.c.obj(&[(bp.game_f, game)]);
+        let env = s.c.obj(&[]);
+        s.c.key_set(&env, format!("e{}", env_f.0), button);
+        let (p1, p2) = (s.c.obj(&[]), s.c.obj(&[]));
+        let (bd1, bd2) = (s.c.obj(&[]), s.c.obj(&[]));
+        let f = code.functions[bp.click_fi].findex;
+        let base = bp.click_at + 1;
+        let mut stops: Vec<usize> = GUARD_DROPS.iter().map(|i| base + i).collect();
+        stops.push(base + GUARD_OPS);
+        let n_regs = code.functions[bp.click_fi].regs.len();
+        let click = |s: &mut Sim, t: f64, who: &V, bd: &V| -> bool {
+            s.c.put("t", "now", V::F(1000.0 + t));
+            s.c.put("me", "p", who.clone());
+            let mut r = vec![V::Null; n_regs];
+            r[0] = env.clone();
+            r[bp.bd.0 as usize] = bd.clone();
+            s.span(f, &mut r, base, &stops) == base + GUARD_OPS
+        };
+        assert!(click(&mut s, 0.0, &p1, &bd1));
+        assert!(!click(&mut s, 1.0, &p1, &bd1), "same player within 2 s");
+        assert!(click(&mut s, 1.5, &p2, &bd2), "another button acts");
+        assert!(click(&mut s, 2.5, &p1, &bd1), "same player after 2 s");
+        assert!(!click(&mut s, 7.0, &p2, &bd1), "another player within 5 s");
+        assert!(click(&mut s, 7.5, &p2, &bd1), "another player after 5 s");
+        let times = s.global(RefGlobal(ng));
+        // a mode switch drops every click, however late
+        s.c.set(&ctrl, bp.lock_f, V::B(true));
+        assert!(!click(&mut s, 30.0, &p1, &bd2));
+        s.c.set(&ctrl, bp.lock_f, V::B(false));
+        // quiet for 5 s: fresh maps, the old button data is gone
+        assert!(click(&mut s, 12.5, &p1, &bd2));
+        let fresh = s.global(RefGlobal(ng));
+        assert_ne!(fresh, times);
+        assert_eq!(s.c.key_get(&fresh, &mkey(&bd1)), V::Null);
+        assert_eq!(s.c.key_get(&fresh, &mkey(&bd2)), V::F(1012.5));
+        assert!(!click(&mut s, 13.0, &p1, &bd2), "the new record still guards");
+    }
 
     fn ops(o: &[Opcode]) -> String {
         format!("{o:?}")
@@ -1062,10 +1180,10 @@ mod tests {
         assert_eq!(back.functions.len(), orig.functions.len());
         assert_eq!(back.types, orig.types);
         assert_eq!(back.strings, orig.strings);
-        // Two new globals (the repeat guard's maps), appended.
+        // Three new globals (the repeat guard's maps and its last record's time), appended.
         let ng = orig.globals.len();
         assert_eq!(&back.globals[..ng], &orig.globals[..]);
-        assert_eq!(&back.globals[ng..], &[bp.map_t, bp.map_t]);
+        assert_eq!(&back.globals[ng..], &[bp.map_t, bp.map_t, bp.f64_t]);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same =
                 ops(&a.ops) == ops(&b.ops) && a.regs == b.regs && a.debug_info == b.debug_info;
@@ -1077,11 +1195,11 @@ mod tests {
             );
         }
 
-        // G1 click: the forced test falls into the 41-op guard (mode-switch
+        // G1 click: the forced test falls into the 46-op guard (mode-switch
         // barrier, then the per-button timing), which returns (dropped) or falls
         // through to the original `cb(); return`.
         let (oc, c) = (&orig.functions[bp.click_fi], &back.functions[bp.click_fi]);
-        let (at, n) = (bp.click_at, 41);
+        let (at, n) = (bp.click_at, GUARD_OPS);
         assert!(matches!(c.ops[at], Opcode::JFalse { offset: 0, .. }));
         shifted_except(oc, c, at + 1, n, at);
         assert_eq!(&c.regs[..oc.regs.len()], &oc.regs[..]);
@@ -1089,17 +1207,20 @@ mod tests {
         assert!(matches!(g[5], Opcode::Field { field, .. } if field == bp.ctrl_f));
         assert!(matches!(g[7], Opcode::Field { field, .. } if field == bp.lock_f));
         assert!(matches!(g[10], Opcode::Field { field, .. } if field == bp.locks_f));
-        for i in [9, 15, 36] {
+        for i in GUARD_DROPS {
             assert!(matches!(g[i], Opcode::Ret { .. }), "guard op {i}");
         }
         assert!(matches!(g[16], Opcode::Call0 { fun, .. } if fun == bp.sys_time));
         assert!(matches!(g[17], Opcode::GetGlobal { global, .. } if global.0 == ng));
-        assert!(matches!(g[24], Opcode::SetGlobal { global, .. } if global.0 == ng + 1));
-        assert!(matches!(g[26], Opcode::Mov { src, .. } if src == bp.bd));
-        for i in [27, 30] {
+        assert!(matches!(g[19], Opcode::GetGlobal { global, .. } if global.0 == ng + 2));
+        assert!(matches!(g[25], Opcode::SetGlobal { global, .. } if global.0 == ng));
+        assert!(matches!(g[28], Opcode::SetGlobal { global, .. } if global.0 == ng + 1));
+        assert!(matches!(g[45], Opcode::SetGlobal { global, .. } if global.0 == ng + 2));
+        assert!(matches!(g[30], Opcode::Mov { src, .. } if src == bp.bd));
+        for i in [31, 34] {
             assert!(matches!(g[i], Opcode::Call2 { fun, .. } if fun == bp.map_get));
         }
-        for i in [38, 40] {
+        for i in [42, 44] {
             assert!(matches!(g[i], Opcode::Call3 { fun, .. } if fun == bp.map_set));
         }
         let base = at + 1;
@@ -1108,20 +1229,20 @@ mod tests {
             (8, 10),
             (11, 16),
             (14, 16),
-            (18, 25),
-            (33, 35),
-            (35, 37),
+            (18, 23),
+            (22, 29),
+            (37, 39),
+            (39, 41),
         ] {
             assert_eq!(
                 jump_targets(c, base + from),
                 vec![base + to],
                 "guard op {from}"
             );
-        }
-        assert!(matches!(c.ops[base + n], Opcode::NullCheck { .. }));
+        }        assert!(matches!(c.ops[base + n], Opcode::NullCheck { .. }));
         assert!(matches!(c.ops[base + n + 1], Opcode::CallClosure { .. }));
         assert!(matches!(c.ops[base + n + 2], Opcode::Ret { .. }));
-        for (v, want) in [(REPEAT_SAME_S, 32), (REPEAT_OTHER_S, 34)] {
+        for (v, want) in [(REPEAT_OTHER_S, 21), (REPEAT_SAME_S, 36), (REPEAT_OTHER_S, 38)] {
             assert!(matches!(g[want], Opcode::Float { ptr, .. } if back.floats[ptr.0] == v));
         }
         // G1 push: the vote-on-push test always jumps over the block, the hold
