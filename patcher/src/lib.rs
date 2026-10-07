@@ -45,7 +45,6 @@ mod party_inventory;
 mod ping_cell;
 mod ready_start;
 mod skill_cost;
-mod slot4_diag;
 mod style_guard;
 mod take_all;
 mod tavern_resume;
@@ -91,7 +90,6 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     ready_start::patch_ready_start(&mut code);
     diag::patch_diag(&mut code);
     activity_diag::patch_activity_diag(&mut code);
-    slot4_diag::patch_slot4_diag(&mut code);
     follow::patch_follow(&mut code);
     marker_names::patch_marker_names(&mut code);
     skill_cost::patch_skill_cost(&mut code);

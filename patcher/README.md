@@ -214,16 +214,6 @@ switch still running 90 s later disconnects the parked client instead):
 a client full-synced mid-switch would miss the switch's earlier RPCs. Lines in
 `shim.log`: `mp: barrier: ...`. Skipped (logged) on mismatch.
 
-**Slot 4 diagnostic** (`src/slot4_diag.rs`): prints only. The new-game customize
-screen's 4th human slot cannot be hovered (vanilla too), so
-`CustomizeScreen.update` calls a probe after `super.update`: when the 2D
-hit-test at the cursor (`h2d.Scene.getInteractive`), the event system's over
-list or its push list changed (at most every 0.25 s) it prints `mp: slot4 hit:
-m=<window x,y> v=<scene x,y> of <W>x<H> 2d=<hit> abs= wh= prop= cancel= < <parent>[hidden]
-... | over=<n> ; <entry> ... push=<n> <entry>`. A 3D interactive in the over
-list prints as `Interactive(<name>)`, a 2D one as `<name>(h2d.Interactive)`.
-Trapped and null-guarded; skipped (logged) on mismatch.
-
 **Co-op auto-follow** (`src/follow.rs`): in co-op an open window does not pause
 the world map, so `World.update` gets a new `followUpdate` right before
 `updateSprint()`. Follow is ON by default for every co-op player; **F** is a
