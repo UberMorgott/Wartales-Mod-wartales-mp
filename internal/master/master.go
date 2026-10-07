@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -199,12 +198,12 @@ func (s *Server) serveLink(c net.Conn, kind string, accept link.Accept) {
 		return nil
 	}
 	link.Serve(c, vetted, func(cmd string, args json.RawMessage, peer *link.Peer) (any, error) {
-		s.opt.Log.Printf("link: <- %s from %s (%s) %s", cmd, peer.Name(), peer.UserID(), applog.Trunc(args))
+		s.opt.Log.Printf("link: <- %s from %s (%s) %s", cmd, peer.Name(), peer.UserID(), applog.Payload(cmd, args))
 		result, err := s.Handle(cmd, args, peer)
 		if err != nil {
 			s.opt.Log.Printf("link: -> %s err %s", cmd, applog.Trunc(err.Error()))
 		} else {
-			s.opt.Log.Printf("link: -> %s ok %s", cmd, applog.Trunc(result))
+			s.opt.Log.Printf("link: -> %s ok %s", cmd, applog.Payload(cmd, result))
 		}
 		return result, err
 	}, func(peer *link.Peer) {
@@ -257,7 +256,7 @@ func (p *session) Push(cmd string, args any) {
 		p.srv.opt.Log.Printf("master: cannot marshal the push %s: %v", cmd, err)
 		return
 	}
-	p.srv.opt.Log.Printf("master: -> push #%d %s %s", uid, cmd, applog.Trunc(raw))
+	p.srv.opt.Log.Printf("master: -> push #%d %s %s", uid, cmd, applog.Payload(cmd, raw))
 	if err := p.ws.WriteText(string(b)); err != nil {
 		p.srv.opt.Log.Printf("master: push %s failed: %v", cmd, err)
 	}
@@ -338,7 +337,7 @@ func (s *Server) answerAll(sess *session) {
 }
 
 func (s *Server) answer(sess *session, e link.Envelope) {
-	s.opt.Log.Printf("master: <- #%d %s %s", e.UID, e.Cmd, applog.Trunc(e.Args))
+	s.opt.Log.Printf("master: <- #%d %s %s", e.UID, e.Cmd, applog.Payload(e.Cmd, e.Args))
 	result, err := s.Handle(e.Cmd, e.Args, sess)
 	var reply link.Envelope
 	if err != nil {
@@ -350,7 +349,7 @@ func (s *Server) answer(sess *session, e link.Envelope) {
 		if mErr != nil || result == nil {
 			raw = nil
 		}
-		s.opt.Log.Printf("master: -> #%d %s ok %s", e.UID, e.Cmd, applog.Trunc(raw))
+		s.opt.Log.Printf("master: -> #%d %s ok %s", e.UID, e.Cmd, applog.Payload(e.Cmd, raw))
 		reply = link.Envelope{UID: -e.UID, Args: raw}
 	}
 	b, err := json.Marshal(reply)
@@ -363,28 +362,8 @@ func (s *Server) answer(sess *session, e link.Envelope) {
 	}
 }
 
-// headerLine renders the handshake headers in a stable order for the log.
-func headerLine(h map[string]string) string {
-	keys := make([]string, 0, len(h))
-	for k := range h {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		if b.Len() > 0 {
-			b.WriteString(" ")
-		}
-		b.WriteString(k)
-		b.WriteString("=")
-		if k == "x-pass" {
-			b.WriteString("<redacted>") // a password hash never belongs in a log
-			continue
-		}
-		b.WriteString(h[k])
-	}
-	return b.String()
-}
+// headerLine renders the handshake headers for the log, credentials redacted.
+func headerLine(h map[string]string) string { return applog.HeaderLine(h) }
 
 // Handle runs one command. Local lobby commands are forwarded to the host's
 // master when we are a guest; everything the host answers is served from the

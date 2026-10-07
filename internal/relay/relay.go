@@ -14,7 +14,6 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
-	"sort"
 	"strings"
 	"sync"
 
@@ -223,28 +222,8 @@ func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 	}
 }
 
-// headerLine renders the handshake headers in a stable order for the log.
-func headerLine(h map[string]string) string {
-	keys := make([]string, 0, len(h))
-	for k := range h {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		if b.Len() > 0 {
-			b.WriteString(" ")
-		}
-		b.WriteString(k)
-		b.WriteString("=")
-		if k == "x-pass" {
-			b.WriteString("<redacted>") // a password hash never belongs in a log
-			continue
-		}
-		b.WriteString(h[k])
-	}
-	return b.String()
-}
+// headerLine renders the handshake headers for the log, credentials redacted.
+func headerLine(h map[string]string) string { return applog.HeaderLine(h) }
 
 func (s *Server) genCid() uint16 {
 	var b [2]byte
