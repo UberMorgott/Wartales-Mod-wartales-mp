@@ -11,15 +11,16 @@
 // - acting:  `state.startedPlaying.data.owner == bp`. Battle.doExecuteSkill
 //            (any move or action) calls setCurrentUnitPlaying(currentUnit), which
 //            sets startedPlaying: that locks the Player slot onto the unit.
-// - waiting: p still has a turn slot in the current round, `state.timelines[0]`:
-//            Player(p) or PlayerUnit(u) with u.data.owner == bp. That line holds
-//            the current and coming slots: the turn end's finish callback shifts
-//            the used head out, a new round shifts in a fresh line
-//            (Battle.hx:2353), the same line the diamonds show.
-// - done:    no slot left. (Not UnitFlag.PlayedThisRound: that bit is per unit,
-//            set only on a unit's last turn and reset by the host's round-end
-//            loop, so a player with units left already read as done, and any unit
-//            whose bit was not cleared kept its player done into the next round.)
+// - waiting: the player side still has a turn slot in the current round,
+//            `state.timelines[0]` (any Player(_) slot, or PlayerUnit(u) with
+//            u.data.owner == bp), AND bp owns a living unit with neither
+//            UnitFlag.PlayedThisRound (bit 0) nor AutoPlayed (bit 1). Player
+//            slots are first-come: any player may take the head Player slot
+//            whatever owner it was built with, so the owner inside the slot is
+//            ignored. timelines[0] holds the current and coming slots: the turn
+//            end's finish callback shifts the used head out, a new round shifts
+//            in a fresh line (Battle.hx:2353), the same line the diamonds show.
+// - done:    otherwise.
 // Players without a living unit in `state.units` are left out.
 //
 // No game font has ✓ • … glyphs, so done / waiting are icons: the label's
@@ -34,10 +35,9 @@
 //   if (!game.isMulti || ev is not the Timeline's first diamond) { mpList?.visible = false; return; }
 //   if (mpList == null) create it (HtmlText, font "default", loadImage = FmtText.loadImgText,
 //                                  drop shadow, absolute);
-//   sig = round * 31 + timelines[0].length; per slot sig = sig * 31 + (kind + 1
-//         [+ 31 * (players index + 1) for Player(p)]): a slot converted in place
-//         (updateAutoPlayed Player <-> AI) changes it too;
-//   for (u in state.units) sig = sig * 31 + (1 | alive << 1);
+//   sig = round * 31 + timelines[0].length; per slot sig = sig * 31 + kind + 1:
+//         a slot converted in place (updateAutoPlayed Player <-> AI) changes it too;
+//   for (u in state.units) sig = sig * 31 + (1 | alive << 1 | (flags & 3) << 2);
 //   if (created || sig != mpListSig || startedPlaying != mpListUnit) rebuild the text;
 //   if (rebuilt || outerWidth != mpListW || absX != mpListAx) place it:
 //       x = -(textWidth + 6), clamped so the list starts >= 4 px from the scene's left edge;
@@ -45,7 +45,7 @@
 //   mpList.visible = true;
 //
 // So per frame: one pass over state.units with integer maths; the text is
-// rebuilt only on a round / startedPlaying / turn slot / living-unit change.
+// rebuilt only on a round / startedPlaying / turn slot / unit alive-played change.
 
 use super::*;
 use hlbc::types::RefEnumConstruct;
@@ -118,6 +118,9 @@ pub(super) struct ListPlan {
     pl_player: RefField,
     /// TimelineElement.PlayerUnit(u): a turn slot bound to one player unit.
     pu_idx: i32,
+    u_flags: RefField,
+    flags_t: RefType,
+    fl_value: RefField,
     is_alive: RefFun,
     o_abs_x: RefField,
     o_mat_a: RefField,
@@ -170,6 +173,24 @@ pub(super) fn plan(code: &Bytecode, p: &Plan) -> Result<ListPlan> {
         _ => None,
     }
     .context("TimelineElement has no PlayerUnit(battle.Unit)")? as i32;
+    let (u_flags, flags_t) = field(code, p.unit_t, "flags")?;
+    if s(code, obj(code, flags_t)?.name) != "hxbit.EnumFlagsData" {
+        bail!("Unit.flags is not an hxbit.EnumFlagsData");
+    }
+    let fl_value = typed(flags_t, "value", p.i32_)?;
+    // flags bit 0 = UnitFlag.PlayedThisRound, bit 1 = AutoPlayed (`1 << index`).
+    let flag_t = code
+        .types
+        .iter()
+        .position(|t| matches!(t, Type::Enum { name, .. } if s(code, *name) == "battle.UnitFlag"))
+        .context("enum battle.UnitFlag not found")?;
+    if !matches!(&code.types[flag_t], Type::Enum { constructs, .. }
+        if constructs.len() >= 2
+            && s(code, constructs[0].name) == "PlayedThisRound"
+            && s(code, constructs[1].name) == "AutoPlayed")
+    {
+        bail!("UnitFlag constructs 0 / 1 are not PlayedThisRound / AutoPlayed");
+    }
     let is_alive = m(p.unit_t, "isAlive", &[p.unit_t], p.bool_)?;
     let o_abs_x = typed(p.obj_t, "absX", p.f64_)?;
     let o_mat_a = typed(p.obj_t, "matA", p.f64_)?;
@@ -260,6 +281,9 @@ pub(super) fn plan(code: &Bytecode, p: &Plan) -> Result<ListPlan> {
         arr_dyn_t,
         pl_player,
         pu_idx,
+        u_flags,
+        flags_t,
+        fl_value,
         is_alive,
         o_abs_x,
         o_mat_a,
@@ -293,6 +317,8 @@ pub(super) fn add_list(
     let c0 = int_const(code, 0);
     let c1 = int_const(code, 1);
     let c2 = int_const(code, 2);
+    let c3 = int_const(code, 3);
+    let c4 = int_const(code, 4);
     let c31 = int_const(code, 31);
     let c_m1 = int_const(code, -1);
     let c_pu = int_const(code, lp.pu_idx);
@@ -350,12 +376,11 @@ pub(super) fn add_list(
         r.r(p.unit_t),
     );
     // the current round's turn slots, timelines[0]
-    let (tls, cur, e, ei, sp, slots) = (
+    let (tls, cur, e, ei, slots) = (
         r.r(p.arr_t),
         r.r(p.arr_t),
         r.r(p.elt_t),
         r.r(p.i32_),
-        r.r(p.player_t),
         r.r(p.i32_),
     );
     let (started, old_sig, old_unit, sbp, sdata, owner, text, lines) = (
@@ -391,6 +416,7 @@ pub(super) fn add_list(
         r.r(lp.ni32_t),
     );
     let (inner, line, tmp) = (r.r(p.str_t), r.r(p.str_t), r.r(p.str_t));
+    let (flags, pending) = (r.r(lp.flags_t), r.r(p.bool_));
     let loader = r.r(lp.load_img_t);
     let (wi, w_old, ax, ax_old, mat, x, xmin, tw, th, lh, fz) = (
         r.r(p.i32_),
@@ -675,8 +701,7 @@ pub(super) fn add_list(
         b: nu,
     });
     a.op(Opcode::Add { dst: h, a: h, b: t });
-    // per slot: sig * 31 + (kind + 1), a Player(p) slot also + 31 * (p's
-    // position in state.players + 1): a slot converted in place (vanilla
+    // per slot: sig * 31 + kind + 1: a slot converted in place (vanilla
     // updateAutoPlayed: Player <-> AI(unit)) changes it without a length change.
     a.jmp(
         Opcode::JNull {
@@ -719,84 +744,6 @@ pub(super) fn add_list(
         dst: t,
         a: ei,
         b: one,
-    });
-    a.jmp(
-        Opcode::JNotEq {
-            a: ei,
-            b: zero,
-            offset: 0,
-        },
-        "tmix",
-    );
-    a.op(Opcode::EnumField {
-        dst: sp,
-        value: e,
-        construct: RefEnumConstruct(0),
-        field: RefField(0),
-    });
-    a.op(Opcode::Field {
-        dst: players,
-        obj: st,
-        field: lp.s_players,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: players,
-            offset: 0,
-        },
-        "tmix",
-    );
-    a.op(Opcode::Field {
-        dst: ad,
-        obj: players,
-        field: lp.proxy_array,
-    });
-    a.op(Opcode::SafeCast { dst: pa, src: ad });
-    a.jmp(Opcode::JNull { reg: pa, offset: 0 }, "tmix");
-    a.op(Opcode::Int { dst: j, ptr: c0 });
-    a.loop_head("tp");
-    a.op(Opcode::Field {
-        dst: np,
-        obj: pa,
-        field: p.a_len,
-    });
-    a.jmp(
-        Opcode::JSGte {
-            a: j,
-            b: np,
-            offset: 0,
-        },
-        "tmix",
-    );
-    a.op(Opcode::Field {
-        dst: raw,
-        obj: pa,
-        field: p.a_raw,
-    });
-    a.op(Opcode::GetArray {
-        dst: d,
-        array: raw,
-        index: j,
-    });
-    a.op(Opcode::Incr { dst: j });
-    a.op(Opcode::UnsafeCast { dst: pl, src: d });
-    a.jmp(
-        Opcode::JNotEq {
-            a: pl,
-            b: sp,
-            offset: 0,
-        },
-        "tp",
-    );
-    a.op(Opcode::Mul {
-        dst: np,
-        a: j,
-        b: nu,
-    });
-    a.op(Opcode::Add {
-        dst: t,
-        a: t,
-        b: np,
     });
     a.label("tmix");
     a.op(Opcode::Mul {
@@ -843,6 +790,41 @@ pub(super) fn add_list(
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "smix");
     a.op(Opcode::Int { dst: t, ptr: c2 });
+    a.op(Opcode::Add {
+        dst: idx,
+        a: idx,
+        b: t,
+    });
+    // a living unit's played / auto-played bits: + (flags & 3) << 2
+    a.op(Opcode::Field {
+        dst: flags,
+        obj: u,
+        field: lp.u_flags,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: flags,
+            offset: 0,
+        },
+        "smix",
+    );
+    a.op(Opcode::Field {
+        dst: t,
+        obj: flags,
+        field: lp.fl_value,
+    });
+    a.op(Opcode::Int { dst: ci, ptr: c3 });
+    a.op(Opcode::And {
+        dst: t,
+        a: t,
+        b: ci,
+    });
+    a.op(Opcode::Int { dst: ci, ptr: c4 });
+    a.op(Opcode::Mul {
+        dst: t,
+        a: t,
+        b: ci,
+    });
     a.op(Opcode::Add {
         dst: idx,
         a: idx,
@@ -1023,7 +1005,7 @@ pub(super) fn add_list(
         value: ValBool(false),
     });
     a.op(Opcode::Bool {
-        dst: done,
+        dst: pending,
         value: ValBool(false),
     });
     a.op(Opcode::Int { dst: k, ptr: c0 });
@@ -1089,6 +1071,43 @@ pub(super) fn add_list(
         dst: alive,
         value: ValBool(true),
     });
+    // pending: a living unit neither PlayedThisRound nor AutoPlayed
+    a.op(Opcode::Field {
+        dst: flags,
+        obj: u,
+        field: lp.u_flags,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: flags,
+            offset: 0,
+        },
+        "upend",
+    );
+    a.op(Opcode::Field {
+        dst: t,
+        obj: flags,
+        field: lp.fl_value,
+    });
+    a.op(Opcode::Int { dst: ci, ptr: c3 });
+    a.op(Opcode::And {
+        dst: t,
+        a: t,
+        b: ci,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: t,
+            b: zero,
+            offset: 0,
+        },
+        "unext",
+    );
+    a.label("upend");
+    a.op(Opcode::Bool {
+        dst: pending,
+        value: ValBool(true),
+    });
     a.label("unext");
     a.jmp(Opcode::JAlways { offset: 0 }, "uu");
     a.label("udone");
@@ -1100,9 +1119,22 @@ pub(super) fn add_list(
         "pnext",
     );
 
-    // done = no turn slot of this player left in the round: timelines[0]
-    // holds the current and coming slots (a used one is shifted out, a new
-    // round brings a fresh line), Player(pl) or PlayerUnit(u) with u.data.owner == bp.
+    // done unless a unit is pending and the side has a turn slot left this round:
+    // timelines[0] holds the current and coming slots (a used one is shifted
+    // out, a new round brings a fresh line). Any Player(_) slot counts (they are
+    // first-come, the owner inside is not who plays it); PlayerUnit(u) only when
+    // u.data.owner == bp.
+    a.op(Opcode::Bool {
+        dst: done,
+        value: ValBool(true),
+    });
+    a.jmp(
+        Opcode::JFalse {
+            cond: pending,
+            offset: 0,
+        },
+        "named0",
+    );
     a.op(Opcode::Int {
         dst: slots,
         ptr: c0,
@@ -1151,22 +1183,8 @@ pub(super) fn add_list(
         },
         "sl_unit",
     );
-    a.op(Opcode::EnumField {
-        dst: sp,
-        value: e,
-        construct: RefEnumConstruct(0),
-        field: RefField(0),
-    });
-    a.jmp(
-        Opcode::JNotEq {
-            a: sp,
-            b: pl,
-            offset: 0,
-        },
-        "sl",
-    );
     a.op(Opcode::Incr { dst: slots });
-    a.jmp(Opcode::JAlways { offset: 0 }, "sl");
+    a.jmp(Opcode::JAlways { offset: 0 }, "slots");
     a.label("sl_unit");
     a.op(Opcode::Int { dst: t, ptr: c_pu });
     a.jmp(
@@ -1210,7 +1228,6 @@ pub(super) fn add_list(
         "sl",
     );
     a.op(Opcode::Incr { dst: slots });
-    a.jmp(Opcode::JAlways { offset: 0 }, "sl");
     a.label("slots");
     a.op(Opcode::Bool {
         dst: done,
@@ -1686,10 +1703,11 @@ mod tests {
     }
 
     /// timelineHudList in the interpreter over a co-op round rollover: two
-    /// players A and B, each with one living unit. A row is waiting while its
-    /// player still has a turn slot in timelines[0] (Player(p), or PlayerUnit(u)
-    /// of one of its units), done once none is left, acting while one of its
-    /// units plays; a new round's line puts everyone back to waiting.
+    /// players A and B, each with one living unit. A row is waiting while the
+    /// side still has a turn slot in timelines[0] (any Player(_), first-come, or
+    /// PlayerUnit(u) of one of its units) and the player has a living unit not
+    /// played / auto-played this round; done otherwise; acting while one of its
+    /// units plays; a new round puts everyone back to waiting.
     #[test]
     fn round_rollover_resets_marks() {
         use crate::testsim::{Sim, V};
@@ -1772,11 +1790,12 @@ mod tests {
         let plb = c.obj(&[(lp.pl_player, bpb.clone()), (p.p_side, side.clone())]);
         let mk_unit = |c: &mut crate::testsim::Core, bp: &V| {
             let data = c.obj(&[(p.su_owner, bp.clone())]);
-            let u = c.obj(&[(p.u_data, data)]);
+            let flags = c.obj(&[(lp.fl_value, V::I(0))]);
+            let u = c.obj(&[(p.u_data, data), (lp.u_flags, flags.clone())]);
             c.key_set(&u, "alive".into(), V::B(true));
-            u
+            (u, flags)
         };
-        let (ua, ub) = (mk_unit(c, &bpa), mk_unit(c, &bpb));
+        let ((ua, fa), (ub, fb)) = (mk_unit(c, &bpa), mk_unit(c, &bpb));
         let units = c.arr(p.a_len, p.a_raw, vec![ua.clone(), ub.clone()]);
         let players_arr = c.arr(p.a_len, p.a_raw, vec![pla.clone(), plb.clone()]);
         let players = c.obj(&[(lp.proxy_array, players_arr)]);
@@ -1822,6 +1841,9 @@ mod tests {
         let pub_ = |c: &mut crate::testsim::Core| c.enm(lp.pu_idx, vec![ub.clone()]);
         let ai = |c: &mut crate::testsim::Core| c.enm(1, vec![V::Null]);
 
+        // flags bit 0 PlayedThisRound, bit 1 AutoPlayed
+        let flag = |sim: &mut Sim, f: &V, v: i32| sim.c.set(f, lp.fl_value, V::I(v));
+
         // round 1 start: A, AI, B (fixed unit slot) to come -> both waiting
         let line = vec![pa(&mut sim.c), ai(&mut sim.c), pub_(&mut sim.c)];
         assert_eq!(
@@ -1836,34 +1858,63 @@ mod tests {
             frame(&mut sim, 1, line, ua.clone()).as_deref(),
             Some(format!("{ACTING}A{br}{wait}B").as_str())
         );
-        // A's slot used (shifted out): A done, B waiting
+        // A's unit played, its slot shifted out: A done, B waiting
+        flag(&mut sim, &fa, 1);
         let line = vec![ai(&mut sim.c), pub_(&mut sim.c)];
         assert_eq!(
             frame(&mut sim, 1, line, V::Null).as_deref(),
             Some(format!("{done}A{br}{wait}B").as_str())
         );
-        // B's slot used too: both done
+        // B's unit played too: both done
+        flag(&mut sim, &fb, 1);
         assert_eq!(
             frame(&mut sim, 1, vec![], V::Null).as_deref(),
             Some(format!("{done}A{br}{done}B").as_str())
         );
-        // round 2: a fresh line -> both waiting again
+        // round 2: flags reset, a fresh line -> both waiting again
+        flag(&mut sim, &fa, 0);
+        flag(&mut sim, &fb, 0);
         let line = vec![pb(&mut sim.c), pa(&mut sim.c)];
         assert_eq!(
             frame(&mut sim, 2, line, V::Null).as_deref(),
             Some(format!("{wait}A{br}{wait}B").as_str())
         );
-        // A's slot turned into an AI(unit) slot in place (updateAutoPlayed):
-        // same length, round and acting unit, still rebuilt: A done
-        let line = vec![pb(&mut sim.c), ai(&mut sim.c)];
+        // first-come (RCA): A plays the head slot labelled B; the slot labelled
+        // A is left for B: A done, B waiting (the slot owner is ignored)
+        flag(&mut sim, &fa, 1);
+        let line = vec![pa(&mut sim.c)];
         assert_eq!(
             frame(&mut sim, 2, line, V::Null).as_deref(),
             Some(format!("{done}A{br}{wait}B").as_str())
         );
-        // and back, then the two Player slots swapped: same kinds, other owners
-        let line = vec![pb(&mut sim.c), pa(&mut sim.c)];
-        assert!(frame(&mut sim, 2, line, V::Null).is_some());
-        let line = vec![pa(&mut sim.c), pb(&mut sim.c)];
-        assert!(frame(&mut sim, 2, line, V::Null).is_some());
+        // B takes the slot labelled A: both done
+        flag(&mut sim, &fb, 1);
+        assert_eq!(
+            frame(&mut sim, 2, vec![], V::Null).as_deref(),
+            Some(format!("{done}A{br}{done}B").as_str())
+        );
+        // round 3: B's unit auto-played (its slot is an AI(unit) slot): B done
+        flag(&mut sim, &fa, 0);
+        flag(&mut sim, &fb, 2);
+        let line = vec![pa(&mut sim.c), ai(&mut sim.c)];
+        assert_eq!(
+            frame(&mut sim, 3, line, V::Null).as_deref(),
+            Some(format!("{wait}A{br}{done}B").as_str())
+        );
+        // B back to manual: same line, the flag change alone rebuilds -> waiting
+        flag(&mut sim, &fb, 0);
+        let line = vec![pa(&mut sim.c), ai(&mut sim.c)];
+        assert_eq!(
+            frame(&mut sim, 3, line, V::Null).as_deref(),
+            Some(format!("{wait}A{br}{wait}B").as_str())
+        );
+        // the Player slot converted in place (updateAutoPlayed Player -> AI):
+        // same length, round and acting unit, still rebuilt; no Player slot
+        // left -> both done although their units have not played
+        let line = vec![ai(&mut sim.c), ai(&mut sim.c)];
+        assert_eq!(
+            frame(&mut sim, 3, line, V::Null).as_deref(),
+            Some(format!("{done}A{br}{done}B").as_str())
+        );
     }
 }
