@@ -5,9 +5,10 @@
 # hl_copy_bytes, steam.hdll with the legacy P2P natives that must never run,
 # steam_api64.dll as an in-process loopback ISteamNetworkingMessages), loads
 # <OutDir>\winmm.dll into the check process the way the Windows loader would,
-# and runs it twice: "sdr" (the loopback steam_api64.dll is present: packet
-# semantics are asserted end to end) and "nosdr" (no steam_api64.dll: the
-# shim must fail closed and say why). The game folder is only read;
+# and runs it three times: "sdr" (the loopback steam_api64.dll is present:
+# packet semantics are asserted end to end), "nosdr" (no steam_api64.dll: the
+# shim must fail closed and say why) and "partial" (one steam.hdll native
+# cannot be hooked: SDR must not be declared ready). The game folder is only read;
 # LOCALAPPDATA is redirected to <OutDir>\check-localappdata for the duration.
 #
 # The expected bytecode image is computed inside shimcheck: the needle patches
@@ -56,9 +57,17 @@ if ($LASTEXITCODE -ne 0) { throw 'gcc failed for fake steam.hdll' }
 & $gcc -shared -O2 -o (Join-Path $fakes 'steam_api64.dll') (Join-Path $src 'fake_steam_api64.c') -Wall -Wextra -static-libgcc
 if ($LASTEXITCODE -ne 0) { throw 'gcc failed for fake steam_api64.dll' }
 
+# "partial": the same stand-ins, but one native of steam.hdll cannot be hooked.
+$partial = Join-Path $OutDir 'check-steam-partial'
+New-Item -ItemType Directory -Force $partial | Out-Null
+Copy-Item -LiteralPath (Join-Path $fakes 'libhl.dll'), (Join-Path $fakes 'steam_api64.dll') -Destination $partial -Force
+& $gcc -shared -O0 -DFAKE_PARTIAL -o (Join-Path $partial 'steam.hdll') (Join-Path $src 'fake_steam_hdll.c') -Wall -Wextra -static-libgcc
+if ($LASTEXITCODE -ne 0) { throw 'gcc failed for partial fake steam.hdll' }
+
 $scratch = Join-Path $OutDir 'check-localappdata'
-foreach ($mode in 'sdr', 'nosdr') {
+foreach ($mode in 'sdr', 'nosdr', 'partial') {
     Write-Host "==== shimcheck $mode ===="
-    & $exe $dll $Hlboot $scratch $fakes $mode
+    $dir = if ($mode -eq 'partial') { $partial } else { $fakes }
+    & $exe $dll $Hlboot $scratch $dir $mode
     if ($LASTEXITCODE -ne 0) { throw "shimcheck $mode failed (exit $LASTEXITCODE)" }
 }

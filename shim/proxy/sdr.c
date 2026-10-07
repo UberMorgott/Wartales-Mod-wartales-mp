@@ -1099,6 +1099,18 @@ unsigned sdr_hook_steam(HMODULE steam, HMODULE libhl) {
 	}
 	shim_log("sdr: %u of %u legacy P2P natives diverted; the legacy ISteamNetworking path is never used",
 		hooked, (unsigned)(sizeof(natives) / sizeof(natives[0])));
+	if (hooked != sizeof(natives) / sizeof(natives[0])) {
+		// A native left on the legacy path would split the game's traffic
+		// between two transports: none of it is offered then. The diverted
+		// ones fail closed, and the helper is told SDR is unavailable.
+		char reason[96];
+		_snprintf(reason, sizeof(reason) - 1, "only %u of %u legacy P2P natives diverted", hooked,
+			(unsigned)(sizeof(natives) / sizeof(natives[0])));
+		reason[sizeof(reason) - 1] = 0;
+		EnterCriticalSection(&sdr_lock);
+		fail(TRUE, reason);
+		LeaveCriticalSection(&sdr_lock);
+	}
 	return hooked;
 }
 

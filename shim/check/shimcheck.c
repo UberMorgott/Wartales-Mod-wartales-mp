@@ -28,7 +28,7 @@
 // fail closed: send false, nothing available, read null, reason in the log
 // and in sdr.status, and still no legacy call.
 //
-//   shimcheck.exe <winmm.dll> <hlboot.dat> <scratch LOCALAPPDATA> <fake dir> sdr|nosdr
+//   shimcheck.exe <winmm.dll> <hlboot.dat> <scratch LOCALAPPDATA> <fake dir> sdr|nosdr|partial
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -470,7 +470,7 @@ static void check_watch_reuse(read_fn read, session_fn close, HMODULE api, const
 	close(uid);
 }
 
-static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *log, const wchar_t *scratch) {
+static void check_sdr(int with_api, int partial, HMODULE steam, HMODULE api, const wchar_t *log, const wchar_t *scratch) {
 	send_fn send = (send_fn)resolve(steam, "send_p2p_packet");
 	read_fn read = (read_fn)resolve(steam, "read_p2p_packet");
 	avail_fn avail = (avail_fn)resolve(steam, "is_p2p_packet_available");
@@ -494,10 +494,26 @@ static void check_sdr(int with_api, HMODULE steam, HMODULE api, const wchar_t *l
 	put_uid(other, OTHER);
 	put_uid(third, THIRD);
 
-	check(send != NULL && read != NULL && avail != NULL && accept != NULL && close != NULL && sdata != NULL && legacy != NULL,
+	check(send != NULL && read != NULL && avail != NULL && accept != NULL && close != NULL && (sdata != NULL || partial) && legacy != NULL,
 		"legacy natives resolve through hlp_<name>");
-	if (send == NULL || read == NULL || avail == NULL || accept == NULL || close == NULL || sdata == NULL || legacy == NULL)
+	if (send == NULL || read == NULL || avail == NULL || accept == NULL || close == NULL || (sdata == NULL && !partial) || legacy == NULL)
 		return;
+	if (partial) {
+		// get_p2p_session_data could not be hooked: SDR must not come up with
+		// part of the game's natives still on the legacy path.
+		check(wait_log(log, "sdr: 5 of 6 legacy P2P natives diverted", 10000), "partial: shim.log records 5 of 6 natives diverted");
+		check(wait_log(log, "sdr: UNAVAILABLE, transport disabled: only 5 of 6 legacy P2P natives diverted", 5000),
+			"partial: the transport is refused, with the reason");
+		check(file_starts_with(status, "unavailable only 5 of 6"), "partial: sdr.status tells the helper SDR is unavailable");
+		Sleep(1500); // the warm-up must not bring it up either
+		check(!log_contains(log, "sdr: READY"), "partial: SDR never declared ready");
+		check(send(peer, (unsigned char *)"abcde", 5, 2, 0) == 0, "partial: send_p2p_packet fails closed");
+		size = 77;
+		check(avail(&size, 0) == 0 && read(buf, sizeof(buf), &len, 0) == NULL, "partial: nothing to read");
+		check(stats != NULL && (stats(&st), st.sends == 0), "partial: nothing reached SendMessageToUser");
+		check(legacy() == 0, "partial: the diverted natives never ran their legacy bodies");
+		return;
+	}
 	check(wait_log(log, "sdr: 6 of 6 legacy P2P natives diverted", 10000), "shim.log records all 6 natives diverted");
 	check(((unsigned char *)send)[0] == 0xE9, "steam_send_p2p_packet carries an inline jmp (hook installed)");
 
@@ -1012,13 +1028,14 @@ int main(int argc, char **argv) {
 	HANDLE h;
 	wchar_t *slash;
 	wchar_t fake_dir_w[MAX_PATH * 2];
-	int with_api;
+	int with_api, partial;
 
-	if (argc != 6 || (strcmp(argv[5], "sdr") != 0 && strcmp(argv[5], "nosdr") != 0)) {
-		fprintf(stderr, "usage: shimcheck <winmm.dll> <hlboot.dat> <scratch LOCALAPPDATA> <fake dir> sdr|nosdr\n");
+	if (argc != 6 || (strcmp(argv[5], "sdr") != 0 && strcmp(argv[5], "nosdr") != 0 && strcmp(argv[5], "partial") != 0)) {
+		fprintf(stderr, "usage: shimcheck <winmm.dll> <hlboot.dat> <scratch LOCALAPPDATA> <fake dir> sdr|nosdr|partial\n");
 		return 2;
 	}
-	with_api = strcmp(argv[5], "sdr") == 0;
+	partial = strcmp(argv[5], "partial") == 0;
+	with_api = partial || strcmp(argv[5], "sdr") == 0;
 	MultiByteToWideChar(CP_ACP, 0, argv[4], -1, game_dir, MAX_PATH * 2);
 	GetFullPathNameW(game_dir, MAX_PATH * 2, fake_dir_w, NULL);
 	// Absolute paths throughout: the check changes cwd to the game folder.
@@ -1221,11 +1238,11 @@ int main(int argc, char **argv) {
 
 	// 11. The SDR transport, through the hooked natives.
 	if (fake_steam != NULL)
-		check_sdr(with_api, fake_steam, fake_api, log, scratch);
+		check_sdr(with_api, partial, fake_steam, fake_api, log, scratch);
 
 	// 12. The helper's bridge onto SDR (channel 100).
 	if (fake_steam != NULL)
-		check_bridge(with_api, fake_api, log, scratch, (avail_fn)resolve(fake_steam, "is_p2p_packet_available"));
+		check_bridge(with_api && !partial, fake_api, log, scratch, (avail_fn)resolve(fake_steam, "is_p2p_packet_available"));
 
 	print_log(log);
 	printf("%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);

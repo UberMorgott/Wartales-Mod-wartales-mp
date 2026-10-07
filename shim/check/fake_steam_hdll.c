@@ -63,6 +63,16 @@ RESOLVER(read_p2p_packet, "biXib")
 RESOLVER(is_p2p_packet_available, "Xib")
 RESOLVER(accept_p2p_session, "bb")
 RESOLVER(close_p2p_session, "bb")
+#ifdef FAKE_PARTIAL
+// The "partial" build: one native the shim cannot hook (its resolver yields
+// nothing), so the transport must refuse to come up at all.
+EXPORT void *hlp_get_p2p_session_data(const char **sign) {
+	if (sign != NULL)
+		*sign = "b?";
+	return NULL;
+}
+#else
 RESOLVER(get_p2p_session_data, "b?")
+#endif
 
 EXPORT long fake_legacy_calls(void) { return legacy_calls; }
