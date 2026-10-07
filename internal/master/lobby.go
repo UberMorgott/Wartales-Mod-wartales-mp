@@ -62,6 +62,10 @@ type store struct {
 	lobbies     map[string]*lobby
 	codes       map[string]string // short code -> lobby id
 	inviteLobby string            // latest locally created lobby; never a remote guest's lobby
+	// gameTransport is the transport of the latest game (not reconnect) lobby
+	// created locally; the in-game reconnect lobby reuses it (see lobbyCreate).
+	gameTransport    Transport
+	hasGameTransport bool
 
 	packets     int64 // lobby transport packets seen (lobby/chat fan-out)
 	packetBytes int64
@@ -319,6 +323,18 @@ func (s *Server) logHostTransport(raw json.RawMessage) {
 	s.opt.Log.Printf("master: joined lobby %s; the host's master chose %s (owner id %s)", info.ID, t, info.Owner)
 }
 
+// haxeTrue reports whether a lobby data value is the boolean true. Lobby data
+// values are JSON strings holding haxe-serialized values ("t" = true); a bare
+// JSON true is accepted too.
+func haxeTrue(v json.RawMessage) bool {
+	var s string
+	if json.Unmarshal(v, &s) == nil {
+		return s == "t"
+	}
+	var b bool
+	return json.Unmarshal(v, &b) == nil && b
+}
+
 // decideTransport runs the choice for a new lobby, with whatever the helper
 // knows right now.
 func (s *Server) decideTransport() (Transport, string, error) {
@@ -337,8 +353,27 @@ func (s *Server) decideTransport() (Transport, string, error) {
 // lobbyCreate replies with the new lobby id only; the client builds the
 // LobbyInfo itself. The transport is decided here, once per lobby, and fixes
 // how every member id of this lobby is rendered from now on.
+//
+// The in-game reconnect lobby (Game.createLobby, data isReconnect) is the
+// drop-in door of a game that is already running on some transport: its
+// member ids must be rendered the same way as the game's players were
+// (Game.hx getServerID compares them with state.players[].user), so it reuses
+// the transport of the host's game lobby instead of deciding afresh.
 func (s *Server) lobbyCreate(a lobbyArgs, p Peer) (any, error) {
-	transport, reason, err := s.decideTransport()
+	reconnect := a.Props != nil && haxeTrue(a.Props.Data["isReconnect"])
+	s.lobbies.mu.Lock()
+	pinned, hasPinned := s.lobbies.gameTransport, s.lobbies.hasGameTransport
+	s.lobbies.mu.Unlock()
+	var (
+		transport Transport
+		reason    string
+		err       error
+	)
+	if reconnect && hasPinned && !p.Remote() {
+		transport, reason = pinned, "reconnect lobby keeps the running game's transport"
+	} else {
+		transport, reason, err = s.decideTransport()
+	}
 	if err != nil {
 		s.opt.Log.Printf("master: lobby creation by %s (%s) REFUSED: %v", p.Name(), p.UserID(), err)
 		return nil, wireErrf("Cannot host: %v", err)
@@ -360,6 +395,9 @@ func (s *Server) lobbyCreate(a lobbyArgs, p Peer) (any, error) {
 	if !p.Remote() {
 		s.lobbies.inviteLobby = l.id
 		s.lobbies.syncInviteLocked()
+		if !reconnect {
+			s.lobbies.gameTransport, s.lobbies.hasGameTransport = transport, true
+		}
 	}
 	s.lobbies.mu.Unlock()
 	s.opt.Log.Printf("master: lobby %s created by %s (%s), owner %s, props %s",
