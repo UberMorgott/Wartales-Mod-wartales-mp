@@ -66,6 +66,27 @@
 //        panel last hovered (ItemSlot.getTipContent op 0: `mpAllInvHover`) or
 //        right-clicked, else the first open panel; only a connected player.
 //      - Equip from another inventory = take, then equip as usual.
+//   D. Drag & drop (local only; no new network path):
+//      - Slot.netPick (op 0) `if (mpAllInvFgnPick(this, onPick)) return;`:
+//        while panels are open a pick without a hand remembers its ItemSlot
+//        (`src`); on a foreign slot it starts a stand-in hand instead
+//        (GameUI.startPick of the whole stack in a private SlotGroup, no-op
+//        cancel): nothing is removed anywhere. The private group keeps it out
+//        of getPickItem / consumePick and of every vanilla slot's allowGroup.
+//      - Slot click closure (op 0) `if (mpAllInvFgnClick(slot, ev)) return;`
+//        (also the drag release: onRelease calls it), with a hand only:
+//        stand-in: stopPick, then a left click / release on a slot of the own
+//        inventory runs the source slot's onRightClick = the vanilla take
+//        (whole stack, shift: amount box); anything else just drops it.
+//        Hand from the own inventory (`src`) on a foreign slot (left): stopPick
+//        (vanilla cancel puts it back in `src`), then if `src` again holds that
+//        item (sameItem, count) mpAllInvGiveN gives it to that panel's player
+//        (shift: amount box) = the ctrl + right click give.
+//        `src` is forgotten on every pick / click with a hand, so it is always
+//        the current hand's.
+//      - mpAllInvTick: a dragged stand-in released off any slot (no slot got
+//        the release; left mouse up) is dropped.
+//      - Slot.drop (op 0): refused while the stand-in is held (safety net).
 // All players need this build: an unpatched owner refuses the forwarded calls
 // (a give would then lose the item on the giver's side).
 //
@@ -157,6 +178,8 @@ const N_TOGGLE: &str = "mpAllInvToggle";
 const N_FOREIGN: &str = "mpAllInvForeign";
 const N_GIVE: &str = "mpAllInvGive";
 const N_HOVER: &str = "mpAllInvHover";
+const N_FGN_PICK: &str = "mpAllInvFgnPick";
+const N_FGN_CLICK: &str = "mpAllInvFgnClick";
 
 // ---------- N: st.Inventory.networkAllow ----------
 
@@ -562,6 +585,28 @@ pub(crate) struct UiPlan {
     drop_fi: usize,
     right_click_fi: usize,
     tip_fi: usize,
+    // drag & drop
+    sb_t: RefType,
+    group_t: RefType,
+    igroup_t: RefType,
+    ev_t: RefType,
+    cancel_t: RefType,
+    onpick_t: RefType,
+    slot_gui: RefField,
+    ui_pick: RefField,
+    pick_item: RefField,
+    pick_group: RefField,
+    pick_dor: RefField,
+    ev_button: RefField,
+    slot_cls: RefGlobal,
+    group_ctor: RefFun,
+    start_pick: RefFun,
+    stop_pick: RefFun,
+    same_item: RefFun,
+    net_pick_fi: usize,
+    slot_drop_fi: usize,
+    click_fi: usize,
+    click_env: (RefEnumConstruct, RefField),
 }
 
 fn class_global(code: &Bytecode, t: RefType) -> Result<RefGlobal> {
@@ -933,6 +978,93 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
             bail!("ItemSlot.{n}: unexpected return type");
         }
     }
+    // Drag & drop (D): Slot.netPick / Slot.drop / the slot click closure, the hand.
+    let sb_t = obj_type(code, "ui.comp.Slot")?;
+    let slot_gui = typed(code, sb_t, "gui", ui_t)?;
+    let (ui_pick, pick_t) = field(code, ui_t, "currentPick")?;
+    let (pick_item, pit) = field_of_virtual(code, pick_t, "item")?;
+    let (pick_group, group_t) = field_of_virtual(code, pick_t, "group")?;
+    let (pick_dor, dor_t) = field_of_virtual(code, pick_t, "dropOnRelease")?;
+    if dor_t != bool_t {
+        bail!("currentPick.dropOnRelease is not a Bool");
+    }
+    if pit != item_v_t {
+        bail!("currentPick.item is not the slot item type");
+    }
+    let igroup_t = obj_type(code, "st.InventoryItemGroup")?;
+    if s(code, obj(code, group_t)?.name) != "ui.comp.SlotGroup" || !is_sub(code, igroup_t, group_t)
+    {
+        bail!("currentPick.group / InventoryItemGroup");
+    }
+    let group_ctor = method(code, group_t, "__constructor__")?.findex;
+    want(
+        code,
+        group_ctor,
+        "SlotGroup constructor",
+        &[group_t],
+        void_t,
+    )?;
+    let start_pick = method(code, ui_t, "startPick")?.findex;
+    let sp = sig(code, start_pick)?;
+    if sp.args.len() != 4 || sp.args[..3] != [ui_t, item_v_t, group_t] || sp.ret != void_t {
+        bail!("GameUI.startPick signature");
+    }
+    let cancel_t = sp.args[3];
+    let stop_pick = method(code, ui_t, "stopPick")?.findex;
+    want(code, stop_pick, "GameUI.stopPick", &[ui_t], void_t)?;
+    let same_item = method(code, sb_t, "sameItem")?.findex;
+    want(
+        code,
+        same_item,
+        "Slot.sameItem",
+        &[sb_t, item_v_t, item_v_t],
+        bool_t,
+    )?;
+    let ev_t = obj_type(code, "hxd.Event")?;
+    let ev_button = typed(code, ev_t, "button", i32_t)?;
+    let slot_cls = class_global(code, slot_t)?;
+    let net_pick = method(code, sb_t, "netPick")?;
+    plain_start(net_pick, "Slot.netPick")?;
+    let np = sig(code, net_pick.findex)?;
+    if np.args.len() != 3 || np.args[..2] != [sb_t, bool_t] || np.ret != void_t {
+        bail!("Slot.netPick signature");
+    }
+    let onpick_t = np.args[2];
+    let slot_drop = method(code, sb_t, "drop")?;
+    plain_start(slot_drop, "Slot.drop")?;
+    if sig(code, slot_drop.findex)?.ret != bool_t {
+        bail!("Slot.drop: unexpected return type");
+    }
+    // The slot click handler: the Slot.init closure (env, hxd.Event) that calls netDrop.
+    let net_drop = method(code, sb_t, "netDrop")?.findex;
+    let init = method(code, sb_t, "init")?;
+    let mut clicks = vec![];
+    for op in &init.ops {
+        if let Opcode::InstanceClosure { fun, .. } = op {
+            let f = &code.functions[fun_index(code, *fun)?];
+            if calls(f, net_drop)
+                && sig(code, *fun)?.args.get(1) == Some(&ev_t)
+                && !clicks.contains(&fun_index(code, *fun)?)
+            {
+                clicks.push(fun_index(code, *fun)?);
+            }
+        }
+    }
+    let [click_fi] = clicks[..] else {
+        bail!("slot click closure: {} candidates (want 1)", clicks.len());
+    };
+    let click = &code.functions[click_fi];
+    plain_start(click, "slot click closure")?;
+    let click_env = match click.ops.first() {
+        Some(Opcode::EnumField {
+            dst,
+            value: Reg(0),
+            construct,
+            field,
+        }) if click.regs[dst.0 as usize] == sb_t => (*construct, *field),
+        _ => bail!("slot click closure does not start with its slot"),
+    };
+
     let dbg_file = bar_ctor
         .debug_info
         .as_ref()
@@ -1052,6 +1184,27 @@ pub(crate) fn ui_plan(code: &Bytecode) -> Result<UiPlan> {
         drop_fi: fis[3],
         right_click_fi: fis[4],
         tip_fi: fis[5],
+        sb_t,
+        group_t,
+        igroup_t,
+        ev_t,
+        cancel_t,
+        onpick_t,
+        slot_gui,
+        ui_pick,
+        pick_item,
+        pick_group,
+        pick_dor,
+        ev_button,
+        slot_cls,
+        group_ctor,
+        start_pick,
+        stop_pick,
+        same_item,
+        net_pick_fi: fun_index(code, net_pick.findex)?,
+        slot_drop_fi: fun_index(code, slot_drop.findex)?,
+        click_fi,
+        click_env,
     })
 }
 
@@ -1138,6 +1291,10 @@ struct Globals {
     icon: RefGlobal,
     logs: RefGlobal,
     err: RefGlobal,
+    /// the ItemSlot of the last pick (D)
+    src: RefGlobal,
+    /// the stand-in hand's private SlotGroup (D)
+    mpg: RefGlobal,
 }
 
 /// Registers of a `createNew(comp, parent, [arg], {attrs})` sequence.
@@ -2251,6 +2408,564 @@ fn add_hover(
     push_fn(code, vec![p.slot_t], p.void_t, r.0, a.finish(), p.dbg_file)
 }
 
+// ---------- D: drag & drop ----------
+
+/// `Game.inst.me.inventory` into `mi` (jumps to `none`
+/// when there is no Game.inst / me).
+fn my_inv(a: &mut Asm, p: &UiPlan, gc: Reg, game: Reg, me: Reg, mi: Reg, none: &'static str) {
+    game_inst(a, p, gc, game, none);
+    a.op(Opcode::Field {
+        dst: me,
+        obj: game,
+        field: p.game_me,
+    });
+    a.jmp(Opcode::JNull { reg: me, offset: 0 }, none);
+    a.op(Opcode::Field {
+        dst: mi,
+        obj: me,
+        field: p.bp_inv,
+    });
+}
+
+/// The stand-in hand's cancel: nothing was taken, nothing goes back.
+fn add_fgn_cancel(code: &mut Bytecode, p: &UiPlan) -> Result<RefFun> {
+    let t = p.cancel_t.as_fun(code).context("cancel type")?.clone();
+    let mut regs = t.args.clone();
+    regs.push(p.void_t);
+    let v = Reg((regs.len() - 1) as u32);
+    push_fn(
+        code,
+        t.args,
+        t.ret,
+        regs,
+        vec![Opcode::Ret { ret: v }],
+        p.dbg_file,
+    )
+}
+
+/// `fgnPick(slot, onPick)` (Slot.netPick op 0, true = handled). While panels
+/// are open every ItemSlot pick remembers its slot (`src`); a slot of a
+/// foreign panel instead starts a stand-in hand: the whole stack in the
+/// private group `mpg`, a no-op cancel, nothing removed anywhere.
+fn add_fgn_pick(
+    code: &mut Bytecode,
+    p: &UiPlan,
+    g: &Globals,
+    report: RefFun,
+    foreign: RefFun,
+    cancel: RefFun,
+) -> Result<RefFun> {
+    let (kf, _) = field_of_virtual(code, p.item_v_t, "k")?;
+    let (ks, cs) = (string_ref(code, "k"), string_ref(code, "count"));
+    let pick_t = field(code, p.ui_t, "currentPick")?.1;
+    let mut r = Regs(vec![p.sb_t, p.onpick_t]);
+    let (exc, res, v, bx, cls, b, is, fi, gui, cur, it, k, n, d, pv, grp, ig, cc) = (
+        r.r(p.dyn_t),
+        r.r(p.bool_t),
+        r.r(p.void_t),
+        r.r(p.obj_t),
+        r.r(code.globals[p.slot_cls.0]),
+        r.r(p.bool_t),
+        r.r(p.slot_t),
+        r.r(p.inv_t),
+        r.r(p.ui_t),
+        r.r(pick_t),
+        r.r(p.item_v_t),
+        r.r(p.dyn_t),
+        r.r(p.i32_t),
+        r.r(p.dynobj_t),
+        r.r(p.item_v_t),
+        r.r(p.group_t),
+        r.r(p.igroup_t),
+        r.r(p.cancel_t),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(false),
+    });
+    // src is only this pick's (none while panels are closed)
+    a.op(Opcode::Null { dst: is });
+    a.op(Opcode::SetGlobal {
+        global: g.src,
+        src: is,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: bx,
+        global: g.box_,
+    });
+    a.jmp(Opcode::JNull { reg: bx, offset: 0 }, "fast");
+    open_trap(&mut a, exc);
+    a.op(Opcode::GetGlobal {
+        dst: cls,
+        global: p.slot_cls,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.is_of_type,
+        arg0: Reg(0),
+        arg1: cls,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "out");
+    a.op(Opcode::Field {
+        dst: gui,
+        obj: Reg(0),
+        field: p.slot_gui,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: gui,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Field {
+        dst: cur,
+        obj: gui,
+        field: p.ui_pick,
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: cur,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::UnsafeCast {
+        dst: is,
+        src: Reg(0),
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.src,
+        src: is,
+    });
+    a.op(Opcode::Call1 {
+        dst: fi,
+        fun: foreign,
+        arg0: is,
+    });
+    a.jmp(Opcode::JNull { reg: fi, offset: 0 }, "out");
+    a.op(Opcode::Call1 {
+        dst: it,
+        fun: p.get_item,
+        arg0: Reg(0),
+    });
+    a.jmp(Opcode::JNull { reg: it, offset: 0 }, "out");
+    a.op(Opcode::Field {
+        dst: k,
+        obj: it,
+        field: kf,
+    });
+    a.op(Opcode::Call1 {
+        dst: n,
+        fun: p.get_count,
+        arg0: it,
+    });
+    a.op(Opcode::New { dst: d });
+    a.op(Opcode::DynSet {
+        obj: d,
+        field: ks,
+        src: k,
+    });
+    a.op(Opcode::DynSet {
+        obj: d,
+        field: cs,
+        src: n,
+    });
+    a.op(Opcode::ToVirtual { dst: pv, src: d });
+    a.op(Opcode::GetGlobal {
+        dst: grp,
+        global: g.mpg,
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: grp,
+            offset: 0,
+        },
+        "group",
+    );
+    a.op(Opcode::New { dst: ig });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.group_ctor,
+        arg0: ig,
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.mpg,
+        src: ig,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: grp,
+        global: g.mpg,
+    });
+    a.label("group");
+    a.op(Opcode::StaticClosure {
+        dst: cc,
+        fun: cancel,
+    });
+    a.op(Opcode::Call4 {
+        dst: v,
+        fun: p.start_pick,
+        arg0: gui,
+        arg1: pv,
+        arg2: grp,
+        arg3: cc,
+    });
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(true),
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: Reg(1),
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::CallClosure {
+        dst: v,
+        fun: Reg(1),
+        args: vec![],
+    });
+    close_trap(&mut a, exc, res, v, report, None);
+    a.label("fast");
+    a.op(Opcode::Ret { ret: res });
+    push_fn(
+        code,
+        vec![p.sb_t, p.onpick_t],
+        p.bool_t,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
+}
+
+/// `fgnClick(slot, ev)` (slot click closure op 0, true = handled), only with a
+/// hand; the hand is put back (stopPick) first. Panels closed: a stand-in just
+/// goes (foreign(src) is null), any other hand is vanilla's.
+/// - Stand-in hand (group `mpg`): a left click / release on a slot of the own
+///   inventory is the vanilla take of the source slot (`onRightClick`: the
+///   whole stack, shift: amount box; one owner-routed MoveTo); anything else
+///   just drops the stand-in.
+/// - Hand from the own inventory (`src`), left click / release on a foreign
+///   slot: the hand goes back to `src` (its cancel), then the give of
+///   mpAllInvGiveN to that panel's player (shift: amount box).
+#[allow(clippy::too_many_arguments)]
+fn add_fgn_click(
+    code: &mut Bytecode,
+    p: &UiPlan,
+    g: &Globals,
+    report: RefFun,
+    foreign: RefFun,
+    slot_inv: RefFun,
+    give_n: RefFun,
+) -> Result<RefFun> {
+    let right_click = code.functions[p.right_click_fi].findex;
+    let pick_t = field(code, p.ui_t, "currentPick")?.1;
+    let mut r = Regs(vec![p.sb_t, p.ev_t]);
+    let (exc, res, v, gui, cur, grp, mg, btn, z, src, cls, b, ts, fi, inv) = (
+        r.r(p.dyn_t),
+        r.r(p.bool_t),
+        r.r(p.void_t),
+        r.r(p.ui_t),
+        r.r(pick_t),
+        r.r(p.group_t),
+        r.r(p.group_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.slot_t),
+        r.r(code.globals[p.slot_cls.0]),
+        r.r(p.bool_t),
+        r.r(p.slot_t),
+        r.r(p.inv_t),
+        r.r(p.inv_t),
+    );
+    let (gc, game, me, mi, it, n, si, c, key, sv, m, cl) = (
+        r.r(code.globals[p.game_cls.0]),
+        r.r(p.game_t),
+        r.r(p.me_t),
+        r.r(p.inv_t),
+        r.r(p.item_v_t),
+        r.r(p.i32_t),
+        r.r(p.item_v_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.str_t),
+        r.r(p.i32_t),
+        r.r(p.int_cb_t),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Field {
+        dst: gui,
+        obj: Reg(0),
+        field: p.slot_gui,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: gui,
+            offset: 0,
+        },
+        "fast",
+    );
+    a.op(Opcode::Field {
+        dst: cur,
+        obj: gui,
+        field: p.ui_pick,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: cur,
+            offset: 0,
+        },
+        "fast",
+    );
+    open_trap(&mut a, exc);
+    a.op(Opcode::Field {
+        dst: grp,
+        obj: cur,
+        field: p.pick_group,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: mg,
+        global: g.mpg,
+    });
+    a.op(Opcode::Field {
+        dst: btn,
+        obj: Reg(1),
+        field: p.ev_button,
+    });
+    a.op(Opcode::Int {
+        dst: z,
+        ptr: int_const(code, 0),
+    });
+    a.op(Opcode::GetGlobal {
+        dst: src,
+        global: g.src,
+    });
+    // src belongs to this hand only: forgotten on any click with it (a vanilla
+    // drop / swap changes the hand)
+    a.op(Opcode::Null { dst: ts });
+    a.op(Opcode::SetGlobal {
+        global: g.src,
+        src: ts,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: cls,
+        global: p.slot_cls,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.is_of_type,
+        arg0: Reg(0),
+        arg1: cls,
+    });
+    a.op(Opcode::UnsafeCast {
+        dst: ts,
+        src: Reg(0),
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: grp,
+            b: mg,
+            offset: 0,
+        },
+        "own",
+    );
+    // stand-in: always handled, the stand-in goes
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.stop_pick,
+        arg0: gui,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: btn,
+            b: z,
+            offset: 0,
+        },
+        "out",
+    );
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "out");
+    a.jmp(
+        Opcode::JNull {
+            reg: src,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call1 {
+        dst: fi,
+        fun: foreign,
+        arg0: src,
+    });
+    a.jmp(Opcode::JNull { reg: fi, offset: 0 }, "out");
+    a.op(Opcode::Call1 {
+        dst: inv,
+        fun: slot_inv,
+        arg0: ts,
+    });
+    my_inv(&mut a, p, gc, game, me, mi, "out");
+    a.jmp(
+        Opcode::JNotEq {
+            a: inv,
+            b: mi,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: right_click,
+        arg0: src,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "out");
+    // a hand from the own inventory onto a foreign slot
+    a.label("own");
+    a.jmp(
+        Opcode::JNotEq {
+            a: btn,
+            b: z,
+            offset: 0,
+        },
+        "out",
+    );
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "out");
+    a.op(Opcode::Call1 {
+        dst: fi,
+        fun: foreign,
+        arg0: ts,
+    });
+    a.jmp(Opcode::JNull { reg: fi, offset: 0 }, "out");
+    a.jmp(
+        Opcode::JNull {
+            reg: src,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call1 {
+        dst: inv,
+        fun: slot_inv,
+        arg0: src,
+    });
+    my_inv(&mut a, p, gc, game, me, mi, "out");
+    a.jmp(
+        Opcode::JNotEq {
+            a: inv,
+            b: mi,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Field {
+        dst: it,
+        obj: cur,
+        field: p.pick_item,
+    });
+    a.jmp(Opcode::JNull { reg: it, offset: 0 }, "out");
+    a.op(Opcode::Call1 {
+        dst: n,
+        fun: p.get_count,
+        arg0: it,
+    });
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(true),
+    });
+    // the hand goes back where it came from (vanilla cancel), then the give
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.stop_pick,
+        arg0: gui,
+    });
+    a.op(Opcode::Call1 {
+        dst: si,
+        fun: p.get_item,
+        arg0: src,
+    });
+    a.jmp(Opcode::JNull { reg: si, offset: 0 }, "out");
+    a.op(Opcode::Call3 {
+        dst: b,
+        fun: p.same_item,
+        arg0: src,
+        arg1: it,
+        arg2: si,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "out");
+    a.op(Opcode::Call1 {
+        dst: c,
+        fun: p.get_count,
+        arg0: si,
+    });
+    a.jmp(
+        Opcode::JSGt {
+            a: n,
+            b: c,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.target,
+        src: fi,
+    });
+    a.op(Opcode::Int {
+        dst: key,
+        ptr: int_const(code, p.shift_key),
+    });
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_down,
+        arg0: key,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "whole");
+    a.op(Opcode::Null { dst: sv });
+    a.op(Opcode::Int {
+        dst: m,
+        ptr: int_const(code, -1),
+    });
+    a.op(Opcode::InstanceClosure {
+        dst: cl,
+        fun: give_n,
+        obj: src,
+    });
+    a.op(Opcode::Call4 {
+        dst: v,
+        fun: p.select_amount,
+        arg0: src,
+        arg1: sv,
+        arg2: m,
+        arg3: cl,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "out");
+    a.label("whole");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: give_n,
+        arg0: src,
+        arg1: n,
+    });
+    close_trap(&mut a, exc, res, v, report, None);
+    a.label("fast");
+    a.op(Opcode::Ret { ret: res });
+    push_fn(
+        code,
+        vec![p.sb_t, p.ev_t],
+        p.bool_t,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
+}
+
 /// `addPanel(box, p, j)`: one vanilla-styled `#inventory` panel for player p.
 fn add_add_panel(
     code: &mut Bytecode,
@@ -3289,8 +4004,62 @@ fn add_tick(
         r.r(p.i32_t),
     );
     let l = child_loop(p, &mut r);
+    let pick_t = field(code, p.ui_t, "currentPick")?.1;
+    let (cur, grp, mg) = (r.r(pick_t), r.r(p.group_t), r.r(p.group_t));
     let mut a = Asm::new();
     open_trap(&mut a, exc);
+    // a stand-in dragged and released off any slot (no slot click): drop it
+    a.op(Opcode::Field {
+        dst: cur,
+        obj: Reg(0),
+        field: p.ui_pick,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: cur,
+            offset: 0,
+        },
+        "held",
+    );
+    a.op(Opcode::Field {
+        dst: grp,
+        obj: cur,
+        field: p.pick_group,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: mg,
+        global: g.mpg,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: grp,
+            b: mg,
+            offset: 0,
+        },
+        "held",
+    );
+    a.op(Opcode::Field {
+        dst: b,
+        obj: cur,
+        field: p.pick_dor,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "held");
+    a.op(Opcode::Int {
+        dst: z,
+        ptr: int_const(code, 0), // hxd.Key.MOUSE_LEFT
+    });
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_down,
+        arg0: z,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "held");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.stop_pick,
+        arg0: Reg(0),
+    });
+    a.label("held");
     a.op(Opcode::Field {
         dst: game,
         obj: Reg(0),
@@ -3565,6 +4334,9 @@ pub(crate) struct UiFns {
     pub(crate) toggle: RefFun,
     pub(crate) button: RefFun,
     pub(crate) tick: RefFun,
+    pub(crate) fgn_pick: RefFun,
+    pub(crate) fgn_click: RefFun,
+    pub(crate) mpg: RefGlobal,
 }
 
 fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
@@ -3577,6 +4349,8 @@ fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
         icon: add_global(code, p.icon_t),
         logs: add_global(code, p.i32_t),
         err: str_global(code, p.str_t, S_ERR),
+        src: add_global(code, p.slot_t),
+        mpg: add_global(code, p.group_t),
     };
     let report = add_report(code, p, &g)?;
     let noop = add_noop(code, p)?;
@@ -3594,6 +4368,9 @@ fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
     let toggle = add_toggle(code, p, &g, report, close, add_panel)?;
     let button = add_button(code, p, &g, report, toggle)?;
     let tick = add_tick(code, p, &g, report, close, panel_inv, alive)?;
+    let fgn_cancel = add_fgn_cancel(code, p)?;
+    let fgn_pick = add_fgn_pick(code, p, &g, report, foreign, fgn_cancel)?;
+    let fgn_click = add_fgn_click(code, p, &g, report, foreign, slot_inv, give_n)?;
     for (f, n) in [
         (report, "mpAllInvReport"),
         (slot_inv, "mpAllInvSlotInv"),
@@ -3610,6 +4387,9 @@ fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
         (toggle, N_TOGGLE),
         (button, N_BUTTON),
         (tick, N_TICK),
+        (fgn_cancel, "mpAllInvFgnCancel"),
+        (fgn_pick, N_FGN_PICK),
+        (fgn_click, N_FGN_CLICK),
     ] {
         name_fn(code, f, n);
     }
@@ -3620,6 +4400,9 @@ fn build(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
         toggle,
         button,
         tick,
+        fgn_pick,
+        fgn_click,
+        mpg: g.mpg,
     })
 }
 
@@ -3690,9 +4473,107 @@ fn ui_apply(code: &mut Bytecode, p: &UiPlan) -> Result<UiFns> {
             }],
         );
     }
+    // Slot.netPick: if (fgnPick(this, onPick)) return;
+    {
+        let f = &mut code.functions[p.net_pick_fi];
+        let b = new_reg(f, p.bool_t);
+        let v = new_reg(f, p.void_t);
+        insert_ops(
+            f,
+            0,
+            vec![
+                Opcode::Call2 {
+                    dst: b,
+                    fun: fns.fgn_pick,
+                    arg0: Reg(0),
+                    arg1: Reg(2),
+                },
+                Opcode::JFalse { cond: b, offset: 1 },
+                Opcode::Ret { ret: v },
+            ],
+        );
+    }
+    // slot click closure: if (fgnClick(env.slot, ev)) return;
+    {
+        let f = &mut code.functions[p.click_fi];
+        let sl = new_reg(f, p.sb_t);
+        let b = new_reg(f, p.bool_t);
+        let v = new_reg(f, p.void_t);
+        insert_ops(
+            f,
+            0,
+            vec![
+                Opcode::EnumField {
+                    dst: sl,
+                    value: Reg(0),
+                    construct: p.click_env.0,
+                    field: p.click_env.1,
+                },
+                Opcode::Call2 {
+                    dst: b,
+                    fun: fns.fgn_click,
+                    arg0: sl,
+                    arg1: Reg(1),
+                },
+                Opcode::JFalse { cond: b, offset: 1 },
+                Opcode::Ret { ret: v },
+            ],
+        );
+    }
+    // Slot.drop: no drop from the stand-in hand (safety net).
+    {
+        let pick_t = field(code, p.ui_t, "currentPick")?.1;
+        let f = &mut code.functions[p.slot_drop_fi];
+        let gui = new_reg(f, p.ui_t);
+        let cur = new_reg(f, pick_t);
+        let (grp, mg) = (new_reg(f, p.group_t), new_reg(f, p.group_t));
+        let rv = new_reg(f, p.bool_t);
+        insert_ops(
+            f,
+            0,
+            vec![
+                Opcode::GetThis {
+                    dst: gui,
+                    field: p.slot_gui,
+                },
+                Opcode::JNull {
+                    reg: gui,
+                    offset: 7,
+                },
+                Opcode::Field {
+                    dst: cur,
+                    obj: gui,
+                    field: p.ui_pick,
+                },
+                Opcode::JNull {
+                    reg: cur,
+                    offset: 5,
+                },
+                Opcode::Field {
+                    dst: grp,
+                    obj: cur,
+                    field: p.pick_group,
+                },
+                Opcode::GetGlobal {
+                    dst: mg,
+                    global: fns.mpg,
+                },
+                Opcode::JNotEq {
+                    a: grp,
+                    b: mg,
+                    offset: 2,
+                },
+                Opcode::Bool {
+                    dst: rv,
+                    value: ValBool(false),
+                },
+                Opcode::Ret { ret: rv },
+            ],
+        );
+    }
     eprintln!(
-        "patched all inventories: bar button fn@{} (toggle fn@{}), tick fn@{} in GameUI.update, slot gates fn@{}, give fn@{}, hover fn@{}",
-        fns.button.0, fns.toggle.0, fns.tick.0, fns.foreign.0, fns.give.0, fns.hover.0
+        "patched all inventories: bar button fn@{} (toggle fn@{}), tick fn@{} in GameUI.update, slot gates fn@{}, give fn@{}, hover fn@{}, drag pick fn@{} / click fn@{}",
+        fns.button.0, fns.toggle.0, fns.tick.0, fns.foreign.0, fns.give.0, fns.hover.0, fns.fgn_pick.0, fns.fgn_click.0
     );
     Ok(fns)
 }
@@ -3759,6 +4640,9 @@ pub(crate) fn patch_all_inv(code: &mut Bytecode) {
         up.drop_fi,
         up.right_click_fi,
         up.tip_fi,
+        up.net_pick_fi,
+        up.click_fi,
+        up.slot_drop_fi,
     ]
     .iter()
     .map(|&i| (i, code.functions[i].clone()))
@@ -3800,9 +4684,9 @@ mod tests {
         }
     }
 
-    /// Sites found; only the ten site functions change; window_drag's API_FNS and
-    /// this pass's 16 functions are appended, type-check and trap where vanilla
-    /// calls them; a second pass changes nothing.
+    /// Sites found; only the thirteen site functions change; window_drag's API_FNS
+    /// and this pass's 19 functions are appended, type-check and trap where
+    /// vanilla calls them; a second pass changes nothing.
     #[test]
     fn patches_installed_game() {
         let Some(image) = game() else { return };
@@ -3822,7 +4706,7 @@ mod tests {
         let back = read(&patched);
 
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + window_drag::API_FNS + 16);
+        assert_eq!(back.functions.len(), n + window_drag::API_FNS + 19);
         assert_eq!(back.types[..orig.types.len()], orig.types[..]);
         let u = &p.u;
         let sites = [
@@ -3836,6 +4720,9 @@ mod tests {
             u.drop_fi,
             u.right_click_fi,
             u.tip_fi,
+            u.net_pick_fi,
+            u.click_fi,
+            u.slot_drop_fi,
         ];
         for i in 0..n {
             assert_eq!(
@@ -3870,6 +4757,9 @@ mod tests {
             (u.right_click_fi, 3),
             (u.tip_fi, 1),
             (u.ui_update_fi, 1),
+            (u.net_pick_fi, 3),
+            (u.click_fi, 4),
+            (u.slot_drop_fi, 9),
         ] {
             let (a, b) = (&orig.functions[fi], &back.functions[fi]);
             shifted(a, b, 0, k);
@@ -3894,6 +4784,17 @@ mod tests {
         assert!(matches!(rc.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(10)));
         let tip = &back.functions[u.tip_fi];
         assert!(matches!(tip.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(11)));
+        // drag & drop: pick (17) in Slot.netPick, click (18) in the click closure
+        let np = &back.functions[u.net_pick_fi];
+        assert!(
+            matches!(np.ops[0], Opcode::Call2 { fun, arg0: Reg(0), arg1: Reg(2), .. } if fun == mine(17))
+        );
+        let ck = &back.functions[u.click_fi];
+        assert!(matches!(ck.ops[1], Opcode::Call2 { fun, arg1: Reg(1), .. } if fun == mine(18)));
+        assert!(
+            matches!(ck.ops[0], Opcode::EnumField { value: Reg(0), construct, field, .. }
+            if (construct, field) == u.click_env)
+        );
         for fi in [u.allow_pick_fi, u.allow_drop_fi, u.do_pick_fi, u.drop_fi] {
             let g = &back.functions[fi];
             assert!(matches!(g.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == mine(3)));
@@ -3905,7 +4806,7 @@ mod tests {
             check_types(&back, f, 0..f.ops.len());
             traps += traps_ok(f);
         }
-        assert_eq!(traps, 13 + 8); // window_drag's 13 + ours
+        assert_eq!(traps, 13 + 10); // window_drag's 13 + ours
 
         // Idempotent: every part refuses, the image stays as is.
         let mut again = read(&patched);
@@ -4013,6 +4914,8 @@ mod tests {
         heap: Vec<HashMap<usize, V>>,
         ctrl: bool,
         shift: bool,
+        /// hxd.Key.isDown(MOUSE_LEFT)
+        mouse: bool,
         multi: bool,
         /// window_drag's mpDragPanel, stubbed.
         drag: Option<RefFun>,
@@ -4082,8 +4985,13 @@ mod tests {
             } else if f == p.ctrl_down {
                 V::B(self.ctrl)
             } else if f == p.is_down {
-                assert_eq!(a[0], V::I(p.shift_key));
-                V::B(self.shift)
+                match a[0] {
+                    V::I(0) => V::B(self.mouse),
+                    _ => {
+                        assert_eq!(a[0], V::I(p.shift_key));
+                        V::B(self.shift)
+                    }
+                }
             } else if f == p.get_item {
                 self.get(&a[0], ITEM)
             } else if f == p.get_count {
@@ -4153,6 +5061,29 @@ mod tests {
                 V::Null
             } else if f == p.select_amount {
                 self.log.push(("select", a.to_vec()));
+                V::Null
+            } else if f == p.start_pick {
+                // GameUI.currentPick = {item, group}
+                let pick = self.obj(&[
+                    (p.pick_item.0, a[1].clone()),
+                    (p.pick_group.0, a[2].clone()),
+                ]);
+                self.set(&a[0], p.ui_pick.0, pick);
+                self.log.push(("startPick", a.to_vec()));
+                V::Null
+            } else if f == p.stop_pick {
+                self.set(&a[0], p.ui_pick.0, V::Null);
+                self.log.push(("stopPick", vec![]));
+                V::Null
+            } else if f == p.same_item {
+                let k = p.item_k.0;
+                V::B(self.get(&a[1], k) == self.get(&a[2], k))
+            } else if f == p.group_ctor {
+                self.log.push(("group", a.to_vec()));
+                V::Null
+            } else if f == self.code.functions[p.right_click_fi].findex {
+                // vanilla take of a FoundItems slot (one owner-routed MoveTo)
+                self.log.push(("take", a.to_vec()));
                 V::Null
             } else if f == p.remove {
                 // detach from the parent's children
@@ -4276,6 +5207,10 @@ mod tests {
                         assert_eq!(*field, self.p.api_net_op);
                         let a: Vec<V> = args.iter().map(|x| r[rr(x)].clone()).collect();
                         self.log.push(("netop", a[1..].to_vec()));
+                        r[rr(dst)] = V::Null;
+                    }
+                    Opcode::CallClosure { dst, fun, .. } => {
+                        self.log.push(("closure", vec![r[rr(fun)].clone()]));
                         r[rr(dst)] = V::Null;
                     }
                     Opcode::JAlways { offset } => next = jump(*offset),
@@ -4413,6 +5348,7 @@ mod tests {
                 heap: vec![],
                 ctrl: false,
                 shift: false,
+                mouse: false,
                 multi: true,
                 drag: None,
                 log: vec![],
@@ -4522,6 +5458,7 @@ mod tests {
             heap: vec![],
             ctrl: false,
             shift: false,
+            mouse: false,
             multi: true,
             drag: None,
             log: vec![],
@@ -4706,6 +5643,7 @@ mod tests {
             heap: vec![],
             ctrl: false,
             shift: false,
+            mouse: false,
             multi: false,
             drag: Some(fun("mpDragPanel")),
             log: vec![],
@@ -4872,5 +5810,406 @@ mod tests {
         sim.run(toggle, vec![bar.clone()]);
         assert_eq!(sim.global(gbox), V::Null);
         assert!(sim.children(&ui_o).is_empty());
+    }
+
+    /// Drag & drop: a foreign slot's pick is a stand-in (nothing removed); its
+    /// drop on the own inventory is the vanilla take of the source slot, any
+    /// other drop / right click only drops the stand-in. A hand from the own
+    /// inventory dropped on a foreign slot goes back (cancel) and is given.
+    /// Invariant: nothing is ever sent through a foreign slot except the take,
+    /// and every send is a MoveTo (no Remove, no local consume).
+    #[test]
+    fn drag_drop_behaviour() {
+        let Some(image) = game() else { return };
+        let orig = read(&image);
+        let pl = plans(&orig);
+        let mut code = read(&image);
+        patch_all_inv(&mut code);
+        let u = &pl.u;
+        let fun = |n: &str| find_named(&code, n).expect(n);
+        let (pick, click, give_n) = (fun(N_FGN_PICK), fun(N_FGN_CLICK), fun("mpAllInvGiveN"));
+        let gi_g = (orig.globals.len()..code.globals.len())
+            .find(|&i| code.globals[i] == u.gi_t)
+            .expect("gi global");
+        let (gbox, gtarget) = (RefGlobal(gi_g - 1), RefGlobal(gi_g + 1));
+        let new_g = |t: RefType| {
+            let g = (orig.globals.len()..code.globals.len())
+                .filter(|&i| code.globals[i] == t)
+                .collect::<Vec<_>>();
+            RefGlobal(*g.last().expect("global"))
+        };
+        let (gsrc, gmpg) = (new_g(u.slot_t), new_g(u.group_t));
+        // Slot.drop's safety net reads that group
+        let dr = &code.functions[u.slot_drop_fi];
+        assert!(matches!(dr.ops[5], Opcode::GetGlobal { global, .. } if global == gmpg));
+        let kf = field_of_virtual(&code, u.item_v_t, "k").unwrap().0;
+        assert_eq!(kf, u.item_k, "slot item k");
+        let (ks, cs) = (
+            DYN + string_index(&code, "k").unwrap().0,
+            DYN + string_index(&code, "count").unwrap().0,
+        );
+
+        let mut sim = Sim {
+            code: &code,
+            p: u,
+            orig_n: orig.functions.len(),
+            globals: HashMap::new(),
+            heap: vec![],
+            ctrl: false,
+            shift: false,
+            mouse: false,
+            multi: true,
+            drag: None,
+            log: vec![],
+        };
+        let (uinv_tag, ic_tag, slot_tag) = (V::I(1), V::I(2), V::I(3));
+        sim.globals.insert(u.uinv_cls.0, uinv_tag.clone());
+        sim.globals.insert(u.ic_cls.0, ic_tag.clone());
+        sim.globals.insert(u.slot_cls.0, slot_tag.clone());
+        let player = |sim: &mut Sim| {
+            let pl = sim.obj(&[(u.bp_connected.0, V::B(true))]);
+            let inv = sim.obj(&[(u.inv_owner.0, pl.clone())]);
+            sim.set(&pl, u.bp_inv.0, inv.clone());
+            (pl, inv)
+        };
+        let (a, inv_a) = player(&mut sim);
+        let (_b, inv_b) = player(&mut sim);
+        let (_c, inv_c) = player(&mut sim);
+        let game = sim.obj(&[(u.game_me.0, a.clone()), (u.game_loading.0, V::B(false))]);
+        let cls = sim.obj(&[(u.game_inst.0, game)]);
+        sim.globals.insert(u.game_cls.0, cls);
+        let gui = sim.obj(&[]);
+        let uinv = |sim: &mut Sim, inv: &V| {
+            sim.obj(&[(TAG, uinv_tag.clone()), (u.uinv_inv.0, inv.clone())])
+        };
+        let (ui_a, ui_b, ui_c) = (
+            uinv(&mut sim, &inv_a),
+            uinv(&mut sim, &inv_b),
+            uinv(&mut sim, &inv_c),
+        );
+        let chest = sim.obj(&[]);
+        let ui_chest = uinv(&mut sim, &chest);
+        let item =
+            |sim: &mut Sim, k: &V, n: i32| sim.obj(&[(u.item_k.0, k.clone()), (COUNT, V::I(n))]);
+        let (ka, kb) = (sim.obj(&[]), sim.obj(&[]));
+        let slot = |sim: &mut Sim, mode: usize, parent: &V, it: V, tag: bool| {
+            let api = sim.obj(&[]);
+            let mut f = vec![
+                (u.slot_mode.0, V::En(mode, vec![])),
+                (u.parent.0, parent.clone()),
+                (u.slot_api.0, api),
+                (u.slot_gui.0, gui.clone()),
+                (ITEM, it),
+            ];
+            if tag {
+                f.push((TAG, slot_tag.clone()));
+            }
+            sim.obj(&f)
+        };
+        let found = u.found as usize;
+        let it = item(&mut sim, &kb, 5);
+        let slot_b = slot(&mut sim, found, &ui_b, it, true);
+        let it = item(&mut sim, &kb, 2);
+        let slot_c = slot(&mut sim, found, &ui_c, it, true);
+        let it = item(&mut sim, &ka, 7);
+        let slot_a = slot(&mut sim, 0, &ui_a, it, true);
+        let slot_a2 = slot(&mut sim, 0, &ui_a, V::Null, true);
+        let it = item(&mut sim, &ka, 9);
+        let slot_chest = slot(&mut sim, found, &ui_chest, it, true);
+        let other = slot(&mut sim, 0, &ui_a, V::Null, false);
+        let on_pick = V::Clo(RefFun(1), Box::new(V::Null));
+        let ev = |sim: &mut Sim, button: i32| sim.obj(&[(u.ev_button.0, V::I(button))]);
+        let (left, right) = (ev(&mut sim, 0), ev(&mut sim, 1));
+        let names =
+            |log: &[(&'static str, Vec<V>)]| log.iter().map(|(n, _)| *n).collect::<Vec<_>>();
+        let mut all: Vec<(&'static str, Vec<V>)> = vec![];
+        let mut flush = |sim: &mut Sim| all.append(&mut sim.log);
+
+        // panels closed: nothing at all
+        assert_eq!(
+            sim.run(pick, vec![slot_b.clone(), on_pick.clone()]),
+            V::B(false)
+        );
+        assert_eq!(
+            sim.run(click, vec![slot_a.clone(), left.clone()]),
+            V::B(false)
+        );
+        assert!(sim.log.is_empty());
+        assert_eq!(sim.global(gsrc), V::Null);
+        // open: panels [title, inventory-content -> ui.comp.Inventory] for B and C
+        let bx = sim.obj(&[]);
+        let mut panels = vec![];
+        for ui in [&ui_b, &ui_c] {
+            let content = sim.obj(&[(TAG, ic_tag.clone()), (UINV, ui.clone())]);
+            let title = sim.obj(&[]);
+            let pn = sim.obj(&[]);
+            sim.set_children(&pn, vec![title, content]);
+            panels.push(pn);
+        }
+        sim.set_children(&bx, panels);
+        sim.globals.insert(gbox.0, bx);
+
+        // own pick: remembered, vanilla goes on
+        assert_eq!(
+            sim.run(pick, vec![slot_a.clone(), on_pick.clone()]),
+            V::B(false)
+        );
+        assert!(sim.log.is_empty());
+        assert_eq!(sim.global(gsrc), slot_a);
+        // no hand: a click is vanilla's
+        assert_eq!(
+            sim.run(click, vec![slot_b.clone(), left.clone()]),
+            V::B(false)
+        );
+
+        // foreign pick: a stand-in of the whole stack in the private group
+        let stand_in = |sim: &mut Sim, s: &V| {
+            assert_eq!(sim.run(pick, vec![s.clone(), on_pick.clone()]), V::B(true));
+            let cur = sim.get(&gui, u.ui_pick.0);
+            assert_ne!(cur, V::Null);
+            assert_eq!(sim.get(&cur, u.pick_group.0), sim.global(gmpg));
+            cur
+        };
+        let cur = stand_in(&mut sim, &slot_b);
+        assert_eq!(names(&sim.log), ["group", "startPick", "closure"]);
+        let pv = sim.get(&cur, u.pick_item.0);
+        assert_eq!((sim.get(&pv, ks), sim.get(&pv, cs)), (kb.clone(), V::I(5)));
+        assert_eq!(
+            sim.log[2].1,
+            std::slice::from_ref(&on_pick),
+            "onPick runs (drag: drop on release)"
+        );
+        assert_eq!(sim.global(gsrc), slot_b);
+        assert!(matches!(sim.log[1].1[3], V::Clo(f, _) if f == fun("mpAllInvFgnCancel")));
+        flush(&mut sim);
+        // with a hand, a pick is vanilla's (and src is forgotten)
+        assert_eq!(
+            sim.run(pick, vec![slot_c.clone(), on_pick.clone()]),
+            V::B(false)
+        );
+        assert!(sim.log.is_empty());
+        assert_eq!(sim.global(gsrc), V::Null);
+        sim.set(&gui, u.ui_pick.0, V::Null);
+
+        // stand-in drops that only cancel: right click, own source, a third
+        // player's panel, a chest, a non-item slot
+        for (target, e) in [
+            (&slot_a, &right),
+            (&slot_b, &left),
+            (&slot_c, &left),
+            (&slot_chest, &left),
+            (&other, &left),
+        ] {
+            stand_in(&mut sim, &slot_b);
+            sim.log.clear();
+            assert_eq!(sim.run(click, vec![target.clone(), e.clone()]), V::B(true));
+            assert_eq!(names(&sim.log), ["stopPick"], "{target:?}");
+            assert_eq!(sim.get(&gui, u.ui_pick.0), V::Null);
+            flush(&mut sim);
+        }
+        // the group is created once
+        stand_in(&mut sim, &slot_b);
+        assert_eq!(names(&sim.log), ["startPick", "closure"]);
+        sim.log.clear();
+        sim.set(&gui, u.ui_pick.0, V::Null);
+        // drop on the own inventory (an empty slot too): the vanilla take
+        for target in [&slot_a, &slot_a2] {
+            stand_in(&mut sim, &slot_b);
+            sim.log.clear();
+            assert_eq!(
+                sim.run(click, vec![target.clone(), left.clone()]),
+                V::B(true)
+            );
+            assert_eq!(names(&sim.log), ["stopPick", "take"]);
+            assert_eq!(sim.log[1].1, std::slice::from_ref(&slot_b));
+            flush(&mut sim);
+        }
+        // the source is no longer a foreign slot (its panel shows a chest now)
+        stand_in(&mut sim, &slot_b);
+        sim.set(&ui_b, u.uinv_inv.0, chest.clone());
+        sim.log.clear();
+        assert_eq!(
+            sim.run(click, vec![slot_a.clone(), left.clone()]),
+            V::B(true)
+        );
+        assert_eq!(names(&sim.log), ["stopPick"]);
+        sim.set(&ui_b, u.uinv_inv.0, inv_b.clone());
+        flush(&mut sim);
+        // panels closed while the stand-in is held: the next click drops it
+        stand_in(&mut sim, &slot_b);
+        let bx = sim.global(gbox);
+        sim.globals.insert(gbox.0, V::Null);
+        sim.log.clear();
+        assert_eq!(
+            sim.run(click, vec![slot_a.clone(), left.clone()]),
+            V::B(true)
+        );
+        assert_eq!(names(&sim.log), ["stopPick"]);
+        sim.globals.insert(gbox.0, bx.clone());
+        flush(&mut sim);
+
+        // the tick: a dragged stand-in released off any slot goes; held while
+        // the mouse is down; a click-to-pick one stays
+        let tick = fun(N_TICK);
+        let cur = stand_in(&mut sim, &slot_b);
+        sim.set(&cur, u.pick_dor.0, V::B(true));
+        sim.log.clear();
+        sim.mouse = true;
+        sim.run(tick, vec![gui.clone()]);
+        assert!(!names(&sim.log).contains(&"stopPick"));
+        sim.mouse = false;
+        sim.run(tick, vec![gui.clone()]);
+        assert!(names(&sim.log).contains(&"stopPick"));
+        assert_eq!(sim.get(&gui, u.ui_pick.0), V::Null);
+        let cur = stand_in(&mut sim, &slot_b);
+        sim.set(&cur, u.pick_dor.0, V::B(false));
+        sim.log.clear();
+        sim.run(tick, vec![gui.clone()]);
+        assert!(!names(&sim.log).contains(&"stopPick"));
+        sim.set(&gui, u.ui_pick.0, V::Null);
+        flush(&mut sim);
+
+        // a hand from the own inventory (slot_a, 3 of its 7) dropped on B's slot
+        let items_g = sim.obj(&[]);
+        // hold: a hand (from wherever); hand: picked from slot_a (src), then held
+        let hold = |sim: &mut Sim, k: &V, n: i32| {
+            let it = sim.obj(&[(u.item_k.0, k.clone()), (COUNT, V::I(n))]);
+            let cur = sim.obj(&[(u.pick_item.0, it), (u.pick_group.0, items_g.clone())]);
+            sim.set(&gui, u.ui_pick.0, cur);
+        };
+        let hand = |sim: &mut Sim, k: &V, n: i32| {
+            sim.set(&gui, u.ui_pick.0, V::Null);
+            assert_eq!(
+                sim.run(pick, vec![slot_a.clone(), on_pick.clone()]),
+                V::B(false)
+            );
+            assert_eq!(sim.global(gsrc), slot_a);
+            hold(sim, k, n);
+        };
+        assert_eq!(
+            sim.run(pick, vec![slot_a.clone(), on_pick.clone()]),
+            V::B(false)
+        );
+        let netop = |log: &[(&str, Vec<V>)]| -> Vec<(V, V, V)> {
+            log.iter()
+                .filter(|(n, _)| *n == "netop")
+                .map(|(_, a)| match &a[0] {
+                    V::En(k, args) if *k == u.move_to.0 => {
+                        (args[0].clone(), args[1].clone(), a[1].clone())
+                    }
+                    o => panic!("not a MoveTo: {o:?}"),
+                })
+                .collect()
+        };
+        hand(&mut sim, &ka, 3);
+        assert_eq!(
+            sim.run(click, vec![slot_b.clone(), left.clone()]),
+            V::B(true)
+        );
+        assert_eq!(names(&sim.log), ["stopPick", "netop"]);
+        assert_eq!(netop(&sim.log), [(inv_b.clone(), V::I(3), slot_a.clone())]);
+        assert_eq!(sim.global(gtarget), inv_b);
+        flush(&mut sim);
+        // shift: the amount box, its callback gives through slot_a to C
+        sim.shift = true;
+        hand(&mut sim, &ka, 3);
+        assert_eq!(
+            sim.run(click, vec![slot_c.clone(), left.clone()]),
+            V::B(true)
+        );
+        assert_eq!(names(&sim.log), ["stopPick", "select"]);
+        assert!(matches!(&sim.log[1].1[3], V::Clo(f, s) if *f == give_n && **s == slot_a));
+        assert_eq!(sim.global(gtarget), inv_c);
+        sim.shift = false;
+        flush(&mut sim);
+        // back in slot_a is another kind, or fewer than the hand: nothing given
+        for (k, n) in [(&kb, 3), (&ka, 8)] {
+            hand(&mut sim, k, n);
+            assert_eq!(
+                sim.run(click, vec![slot_b.clone(), left.clone()]),
+                V::B(true)
+            );
+            assert_eq!(names(&sim.log), ["stopPick"]);
+            flush(&mut sim);
+        }
+        // vanilla's: right click, an own target, a chest target, a non-item slot
+        for (target, e) in [
+            (&slot_b, &right),
+            (&slot_a2, &left),
+            (&slot_chest, &left),
+            (&other, &left),
+        ] {
+            hand(&mut sim, &ka, 3);
+            assert_eq!(sim.run(click, vec![target.clone(), e.clone()]), V::B(false));
+            assert!(sim.log.is_empty(), "{target:?}");
+        }
+        // a click vanilla handles with the hand (drop / swap) forgets src
+        hand(&mut sim, &ka, 3);
+        assert_eq!(
+            sim.run(click, vec![slot_a2.clone(), left.clone()]),
+            V::B(false)
+        );
+        assert_eq!(sim.global(gsrc), V::Null);
+        hold(&mut sim, &ka, 3);
+        assert_eq!(
+            sim.run(click, vec![slot_b.clone(), left.clone()]),
+            V::B(false)
+        );
+        assert!(sim.log.is_empty());
+        // a pick while panels are closed forgets src too
+        hand(&mut sim, &ka, 3);
+        sim.set(&gui, u.ui_pick.0, V::Null);
+        sim.globals.insert(gbox.0, V::Null);
+        assert_eq!(
+            sim.run(pick, vec![slot_chest.clone(), on_pick.clone()]),
+            V::B(false)
+        );
+        assert_eq!(sim.global(gsrc), V::Null);
+        sim.globals.insert(gbox.0, bx.clone());
+        hold(&mut sim, &ka, 3);
+        assert_eq!(
+            sim.run(click, vec![slot_b.clone(), left.clone()]),
+            V::B(false)
+        );
+        assert!(sim.log.is_empty());
+        // panels closed: vanilla's
+        sim.globals.insert(gbox.0, V::Null);
+        assert_eq!(
+            sim.run(click, vec![slot_b.clone(), left.clone()]),
+            V::B(false)
+        );
+        assert!(sim.log.is_empty());
+        sim.globals.insert(gbox.0, bx);
+        // a hand from a chest (last pick there) onto a foreign slot: vanilla's
+        sim.set(&gui, u.ui_pick.0, V::Null);
+        assert_eq!(
+            sim.run(pick, vec![slot_chest.clone(), on_pick.clone()]),
+            V::B(false)
+        );
+        assert_eq!(sim.global(gsrc), slot_chest);
+        hold(&mut sim, &ka, 3);
+        assert_eq!(
+            sim.run(click, vec![slot_b.clone(), left.clone()]),
+            V::B(false)
+        );
+        assert!(sim.log.is_empty());
+        flush(&mut sim);
+
+        // invariant over every path: sends are MoveTo through the own slot,
+        // only the take touches a foreign slot
+        let foreign_slots = [&slot_b, &slot_c];
+        for (n, a) in &all {
+            match *n {
+                "netop" => {
+                    assert!(matches!(&a[0], V::En(k, _) if *k == u.move_to.0));
+                    assert_eq!(&a[1], &slot_a);
+                }
+                "take" => assert!(foreign_slots.contains(&&a[0])),
+                "stopPick" | "startPick" | "closure" | "group" | "select" => {}
+                o => panic!("unexpected {o}"),
+            }
+        }
+        assert!(all.iter().any(|(n, _)| *n == "take"));
+        assert!(all.iter().any(|(n, _)| *n == "netop"));
     }
 }
