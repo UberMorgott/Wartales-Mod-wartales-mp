@@ -43,8 +43,10 @@
 //       moves hovered the world, the release clicked a town); a release
 //       without any move passes on as a click.
 //   Windows: on each windowRoot reflow of a modal (draggable) window, default-cursor interactives of the
-//       title row (top HEADER_PX of the window) get propagateEvents, so a push
-//       on the title reaches the window's drag; buttons (cursor: button) stay.
+//       title row (top HEADER_PX of the window) get their onPush wrapped (own
+//       handler, then the window's drag push), so a push on the title starts
+//       the drag; hover / move stay with them (tooltips work); buttons
+//       (cursor: button) stay as they are.
 //   mpDragRestore(obj, follow, key) applies the saved offset, if any.
 //   Absolute children count as placed by their flow (moved, clamped) on an
 //       axis with an align: Flow.hx:1779-1806 adds the offsets there (the chest
@@ -94,6 +96,7 @@ const BASE_PREFIX: &str = "mpWinBase:";
 pub(crate) const KEY_CHEST: &str = "GameInventory#chest";
 pub(crate) const KEY_INV: &str = "GameInventory#inv";
 const HEADER_CLASS: &str = "title";
+const HEAD_MARK: &str = "mpDragHead";
 const S_ERR: &str = "mp: drag: ";
 const N_BEGIN: &str = "mpDragBegin";
 const N_RESTORE: &str = "mpDragRestore";
@@ -101,10 +104,10 @@ const N_CLAMP: &str = "mpDragClamp";
 const N_PANEL: &str = "mpDragPanel";
 const N_WIN_INSTALL: &str = "mpWinInstall";
 /// Functions appended by `api()` (report, save, restore, save base, restore
-/// base, event, cancel, begin, clamp, panel push, panel late, panel, head, win
-/// reflow, win push, win install).
+/// base, event, cancel, begin, clamp, panel push, panel late, panel, win push,
+/// head push, head, win reflow, win install).
 #[cfg(test)]
-pub(crate) const API_FNS: usize = 16;
+pub(crate) const API_FNS: usize = 17;
 
 /// The shared drag functions other passes call (findexes).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -172,7 +175,8 @@ struct Ctx {
     button: RefField,
     propagate: RefField,
     cursor: RefField,
-    it_propagate: RefField,
+    /// h2d.Object.name: marks a header interactive whose onPush is wrapped.
+    name: RefField,
     modal: RefField,
     frame_flow: RefField,
     window_root: RefField,
@@ -299,7 +303,7 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
     let window_root = typed(code, win_t, "windowRoot", flow_t)?;
     let (on_push, push_t) = field(code, inter_t, "onPush")?;
     let (cursor, cursor_t) = field(code, inter_t, "cursor")?;
-    let it_propagate = typed(code, inter_t, "propagateEvents", bool_t)?;
+    let name = typed(code, obj_t, "name", str_t)?;
     let cursor_default = enum_index(code, cursor_t, "Default")?;
     let is_of_type = static_fn(code, "$Std", "isOfType")?.findex;
     want_sig(code, is_of_type, "Std.isOfType", &[dyn_t, dyn_t], bool_t)?;
@@ -464,7 +468,7 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         button,
         propagate,
         cursor,
-        it_propagate,
+        name,
         modal,
         frame_flow,
         window_root,
@@ -525,6 +529,8 @@ struct Globals {
     /// "offset-x" / "offset-y": the inline attributes a pin sets.
     attr_x: RefGlobal,
     attr_y: RefGlobal,
+    /// The name given to a header interactive once its onPush is wrapped.
+    head_mark: RefGlobal,
 }
 
 /// `Trap exc -> catch` ... `OUT: EndTrap; Ret v` / `catch: report(exc); Ret v`.
@@ -603,6 +609,7 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         title: str_global(code, c.str_t, HEADER_CLASS),
         attr_x: str_global(code, c.str_t, "offset-x"),
         attr_y: str_global(code, c.str_t, "offset-y"),
+        head_mark: str_global(code, c.str_t, HEAD_MARK),
     };
     let report = add_report(code, c, &g)?;
     let save = add_save(code, c, g.prefix, report, Some((g.base, g.attr_x, g.attr_y)))?;
@@ -616,9 +623,10 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
     let (panel_push, cap_t) = add_panel_push(code, c, begin)?;
     let late = add_panel_late(code, c, report, save_base, restore, save, clamp, cap_t)?;
     let panel = add_panel(code, c, &g, report, late, panel_push, cap_t)?;
-    let head = add_head(code, c)?;
-    let win_reflow = add_win_reflow(code, c, report, clamp, head)?;
     let win_push = add_win_push(code, c, report, begin)?;
+    let (head_push, head_t) = add_head_push(code, c, win_push)?;
+    let head = add_head(code, c, &g, head_push, head_t)?;
+    let win_reflow = add_win_reflow(code, c, report, clamp, head)?;
     let win_install = add_win_install(code, c, report, restore, win_push, win_reflow)?;
     for (f, n) in [
         (begin, N_BEGIN),
@@ -2346,26 +2354,100 @@ fn add_panel(
     )
 }
 
-/// `head(o, rel, skip)`: header elements let a push through to the window.
+/// Header push wrapper `(cap(orig onPush, win), hxd.Event) -> void` and its
+/// capture enum type: the element's own onPush, then `winPush(win, e)` (which
+/// starts the drag only for a left push in the header band of a modal window).
+/// Not trapped itself: the element's handler is vanilla code; winPush is trapped.
+fn add_head_push(code: &mut Bytecode, c: &Ctx, win_push: RefFun) -> Result<(RefFun, RefType)> {
+    code.types.push(Type::Enum {
+        name: RefString(0),
+        global: RefGlobal(0),
+        constructs: vec![EnumConstruct {
+            name: RefString(0),
+            params: vec![c.push_t, c.win_t],
+        }],
+    });
+    let cap_t = RefType(code.types.len() - 1);
+    let mut r = Regs(vec![cap_t, c.ev_t]);
+    let (cx, e) = (Reg(0), Reg(1));
+    let (v, orig, win) = (r.r(c.void_t), r.r(c.push_t), r.r(c.win_t));
+    let mut a = Asm::new();
+    for (dst, i) in [(orig, 0), (win, 1)] {
+        a.op(Opcode::EnumField {
+            dst,
+            value: cx,
+            construct: RefEnumConstruct(0),
+            field: RefField(i),
+        });
+    }
+    a.jmp(
+        Opcode::JNull {
+            reg: orig,
+            offset: 0,
+        },
+        "drag",
+    );
+    a.op(Opcode::CallClosure {
+        dst: v,
+        fun: orig,
+        args: vec![e],
+    });
+    a.label("drag");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: win_push,
+        arg0: win,
+        arg1: e,
+    });
+    a.op(Opcode::Ret { ret: v });
+    let f = push_fn(
+        code,
+        vec![cap_t, c.ev_t],
+        c.void_t,
+        r.0,
+        a.finish(),
+        c.dbg_file,
+    )?;
+    Ok((f, cap_t))
+}
+
+/// `head(o, rel, win)`: pushes on header elements also start the window drag.
 ///
 /// A window's title row (place name, icon, text with a tooltip, ...) often
 /// has interactives of its own; they keep the push, so the window's
 /// interactive (the drag start) only saw the thin margin above them. Every
 /// h2d.Interactive below `o` whose top (`rel` + local y, relative to the
 /// window) is within HEADER_PX and whose cursor is Default (not a button: X,
-/// tabs, ... use `cursor: button`) gets `propagateEvents = true`, so the push
-/// reaches the window's interactive after them. `skip` (the window's own
-/// interactive) is left alone: a propagating window interactive would hand
-/// the push on to windowRoot's click-outside close. Subtrees starting below
-/// the band are not walked. Runs from the window's reflow (content built after
-/// init is covered); exceptions reach the caller's trap.
-fn add_head(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
+/// tabs, ... use `cursor: button`) gets its onPush wrapped (`headPush`: its
+/// own handler, then `winPush(win, e)`) and is named HEAD_MARK (an unnamed
+/// one only: the name marks it as done, so a later reflow never wraps twice).
+/// Only the push changes: over / move / out stay with the element, so its
+/// tooltip keeps working (propagateEvents, the earlier way, handed every
+/// event on to the window interactive below, which took the hover: the unit
+/// sheet's effect icons lost their tooltips). The window's own interactive is
+/// left alone. Subtrees starting below the band are not walked. Runs from the
+/// window's reflow (content built after init is covered); exceptions reach
+/// the caller's trap.
+fn add_head(
+    code: &mut Bytecode,
+    c: &Ctx,
+    g: &Globals,
+    head_push: RefFun,
+    head_t: RefType,
+) -> Result<RefFun> {
     let me = next_findex(code)?;
     let k0 = int_const(code, 0);
     let k_def = int_const(code, c.cursor_default);
     let f_head = float_const(code, HEADER_PX);
-    let mut r = Regs(vec![c.obj_t, c.f64_t, c.inter_t]);
-    let (o, rel, skip) = (Reg(0), Reg(1), Reg(2));
+    let mut r = Regs(vec![c.obj_t, c.f64_t, c.win_t]);
+    let (o, rel, win) = (Reg(0), Reg(1), Reg(2));
+    let (skip, nm, orig, hc, clo) = (
+        r.r(c.inter_t),
+        r.r(c.str_t),
+        r.r(c.push_t),
+        r.r(head_t),
+        r.r(c.push_t),
+    );
     let (v, ch, n, i, raw, d, co, b) = (
         r.r(c.void_t),
         r.r(c.arr_t),
@@ -2386,6 +2468,11 @@ fn add_head(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         r.r(c.i32_t),
     );
     let mut a = Asm::new();
+    a.op(Opcode::Field {
+        dst: skip,
+        obj: win,
+        field: c.interactive,
+    });
     a.op(Opcode::Field {
         dst: ch,
         obj: o,
@@ -2493,14 +2580,41 @@ fn add_head(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         },
         "loop",
     );
-    a.op(Opcode::Bool {
-        dst: b,
-        value: ValBool(true),
+    // Unnamed only (the name marks it wrapped): onPush = headPush(orig, win).
+    a.op(Opcode::Field {
+        dst: nm,
+        obj: it,
+        field: c.name,
+    });
+    a.jmp(Opcode::JNotNull { reg: nm, offset: 0 }, "down");
+    a.op(Opcode::GetGlobal {
+        dst: nm,
+        global: g.head_mark,
     });
     a.op(Opcode::SetField {
         obj: it,
-        field: c.it_propagate,
-        src: b,
+        field: c.name,
+        src: nm,
+    });
+    a.op(Opcode::Field {
+        dst: orig,
+        obj: it,
+        field: c.on_push,
+    });
+    a.op(Opcode::MakeEnum {
+        dst: hc,
+        construct: RefEnumConstruct(0),
+        args: vec![orig, win],
+    });
+    a.op(Opcode::InstanceClosure {
+        dst: clo,
+        fun: head_push,
+        obj: hc,
+    });
+    a.op(Opcode::SetField {
+        obj: it,
+        field: c.on_push,
+        src: clo,
     });
     a.label("down");
     a.op(Opcode::Call3 {
@@ -2508,14 +2622,14 @@ fn add_head(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         fun: me,
         arg0: co,
         arg1: y,
-        arg2: skip,
+        arg2: win,
     });
     a.jmp(Opcode::JAlways { offset: 0 }, "loop");
     a.label("out");
     a.op(Opcode::Ret { ret: v });
     let f = push_fn(
         code,
-        vec![c.obj_t, c.f64_t, c.inter_t],
+        vec![c.obj_t, c.f64_t, c.win_t],
         c.void_t,
         r.0,
         a.finish(),
@@ -2581,9 +2695,8 @@ fn add_win_reflow(
     // Title row: pushes on its non-button elements reach the drag. Only for
     // windows that can be dragged (modal): the HUD (GameUI is a ui.Window,
     // modal None) keeps its pushes where they were.
-    let (zf, wit, md, mi, kn) = (
+    let (zf, md, mi, kn) = (
         r.r(c.f64_t),
-        r.r(c.inter_t),
         r.r(c.modal_t),
         r.r(c.i32_t),
         r.r(c.i32_t),
@@ -2608,17 +2721,12 @@ fn add_win_reflow(
         "nohead",
     );
     a.op(Opcode::Float { dst: zf, ptr: f0 });
-    a.op(Opcode::Field {
-        dst: wit,
-        obj: win,
-        field: c.interactive,
-    });
     a.op(Opcode::Call3 {
         dst: v,
         fun: head,
         arg0: win,
         arg1: zf,
-        arg2: wit,
+        arg2: win,
     });
     a.label("nohead");
     a.op(Opcode::Field {
@@ -3397,7 +3505,7 @@ mod tests {
         }
         let api = DragApi {
             panel: back.functions[n + 11].findex,
-            win_install: back.functions[n + 15].findex,
+            win_install: back.functions[n + 16].findex,
         };
         assert!(
             matches!(b.ops[end], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == api.win_install)
@@ -3545,6 +3653,7 @@ mod tests {
         begin: RefFun,
         clamp: RefFun,
         late: RefFun,
+        head_push: RefFun,
         head: RefFun,
     }
 
@@ -3563,7 +3672,8 @@ mod tests {
             begin: f(7),
             clamp: f(8),
             late: f(10),
-            head: f(12),
+            head_push: f(13),
+            head: f(14),
         }
     }
 
@@ -3628,6 +3738,10 @@ mod tests {
                     let off = if name == "offset-x" { c.off_x } else { c.off_y };
                     k.set(&pr, off, n);
                     Some(V::Null)
+                } else if f == c.get_class {
+                    Some(V::S("cls".into()))
+                } else if f == c.class_name {
+                    Some(V::S("Win".into()))
                 } else if f == c.std_string || f == c.println {
                     panic!("drag code threw (report called)")
                 } else {
@@ -3807,8 +3921,11 @@ mod tests {
         assert_eq!(event(&mut s, &c, &f, wheel), V::B(true));
     }
 
-    /// Title row: default-cursor interactives in the top band let the push
-    /// through; buttons, the window's own interactive and body elements don't change.
+    /// Title row: default-cursor interactives in the top band get their push
+    /// wrapped (own handler, then the window drag) but never propagateEvents,
+    /// so hover / move stay with them (their tooltips: the unit sheet's
+    /// effect icons). Buttons, the window's own interactive, body elements and
+    /// named interactives don't change; a second reflow does not wrap twice.
     #[test]
     fn header_elements_pass_push() {
         let Some(image) = game() else { return };
@@ -3816,6 +3933,8 @@ mod tests {
         let c = ctx(&code).unwrap();
         let f = fns(&code, n);
         let mut s = sim(&code, n, &c);
+        let (win, _) = scene(&mut s, &c);
+        let prop = typed(&code, c.inter_t, "propagateEvents", c.bool_t).unwrap();
         let k = &mut s.c;
         let def = c.cursor_default;
         let other = if def == 0 { 1 } else { 0 };
@@ -3823,7 +3942,7 @@ mod tests {
             let e = k.enm(cur, vec![]);
             let it = k.obj(&[
                 (c.cursor, e),
-                (c.it_propagate, V::B(false)),
+                (prop, V::B(false)),
                 (c.visible, V::B(true)),
                 (c.y, V::F(y)),
             ]);
@@ -3855,22 +3974,69 @@ mod tests {
             (c.y, V::F(60.0)),
         ]);
         k.set(&deep_it, c.y, V::F(15.0));
+        // A named interactive in the band (someone else's name): left alone.
+        let named = inter(k, def, 0.0);
+        k.set(&named, c.name, V::S("x".into()));
         let kids = k.arr(
             c.arr_len,
             c.arr_arr,
-            vec![own.clone(), title, V::Null, body, low],
+            vec![own.clone(), title, V::Null, body, low, named.clone()],
         );
-        let win = k.obj(&[(c.children, kids)]);
-        s.run(f.head, vec![win, V::F(0.0), own.clone()]);
-        assert_eq!(s.c.get(&title_it, c.it_propagate), V::B(true));
+        let modal = k.enm(if c.modal_none == 0 { 1 } else { 0 }, vec![]);
+        for (fl, v) in [
+            (c.children, kids),
+            (c.interactive, own.clone()),
+            (c.modal, modal),
+            (c.abs_y, V::F(0.0)),
+            (c.calc_w, V::F(400.0)),
+            (c.frame_flow, V::Null),
+        ] {
+            k.set(&win, fl, v);
+        }
+        // The title element's own push handler (a stand-in vanilla call).
+        let orig = V::Fun(c.set_need_reflow);
+        for it in [&own, &title_it, &button, &body_it, &deep_it, &named] {
+            k.set(it, c.on_push, orig.clone());
+        }
+        s.run(f.head, vec![win.clone(), V::F(0.0), win.clone()]);
+        let wrapped = s.c.get(&title_it, c.on_push);
+        let V::Clo(hf, cap) = wrapped.clone() else {
+            panic!("title onPush not wrapped: {wrapped:?}")
+        };
+        assert_eq!(hf, f.head_push);
+        assert_eq!(s.c.get(&title_it, c.name), V::S(HEAD_MARK.into()));
         for (it, what) in [
             (&own, "own"),
+            (&title_it, "title"),
             (&button, "button"),
             (&body_it, "body"),
             (&deep_it, "deep"),
+            (&named, "named"),
         ] {
-            assert_eq!(s.c.get(it, c.it_propagate), V::B(false), "{what}");
+            assert_eq!(
+                s.c.get(it, prop),
+                V::B(false),
+                "{what}: hover must not pass on"
+            );
+            if what != "title" {
+                assert_eq!(s.c.get(it, c.on_push), orig, "{what} untouched");
+            }
         }
+
+        // Next reflow: already wrapped, not again.
+        s.run(f.head, vec![win.clone(), V::F(0.0), win.clone()]);
+        assert_eq!(s.c.get(&title_it, c.on_push), wrapped);
+
+        // A left push on the title: its own handler, then the drag starts.
+        mouse(&mut s, 300.0, 20.0);
+        s.c.take("needReflow");
+        let kd = s.c.enm(c.ev_push, vec![]);
+        let e = s.c.obj(&[(c.kind, kd), (c.propagate, V::B(false)), (c.button, V::I(0))]);
+        assert_eq!(s.c.key_get(&cap, "e1"), win);
+        s.run(hf, vec![*cap, e.clone()]);
+        assert_eq!(s.c.take("needReflow").len(), 1, "own onPush ran");
+        assert_eq!(s.c.take("startCapture").len(), 1, "drag started");
+        assert_eq!(s.c.get(&e, c.propagate), V::B(false));
     }
 
     fn packed(x: i32, y: i32) -> V {
