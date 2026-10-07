@@ -25,8 +25,8 @@
 //     a new controller (new game, reload) resets the state below;
 //     soft-kicked clients still in host.clients TIMEOUT s later: c.stop();
 //     deferred Joins: replayed (same handler, same client, still connected;
-//       the gate lets a replay through) once no barrier is active; still
-//       active JOIN_CAP s later: the parked clients are disconnected;
+//       the gate lets a replay through) once no barrier is active; a client
+//       still parked JOIN_CAP s after its own Join is disconnected;
 //     waitLocks entries no longer in host.clients (left, or replaced by their
 //       reconnection), soft-kicked, or with a parked Join: removed. The last
 //       ones connected before waitForClients took host.clients but have
@@ -528,6 +528,7 @@ struct Globals {
     kicked: RefGlobal,
     kicked_at: RefGlobal,
     pending: RefGlobal,
+    /// When each `pending` entry was parked (boxed sys_time, same index).
     pending_at: RefGlobal,
     join_msg: RefGlobal,
     ctrl: RefGlobal,
@@ -814,6 +815,10 @@ fn add_own(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
         global: g.pending,
         src: arr,
     });
+    a.op(Opcode::SetGlobal {
+        global: g.pending_at,
+        src: arr,
+    });
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(false),
@@ -853,6 +858,7 @@ fn add_join_gate(
         r.r(p.str_t),
         r.r(p.void_t),
     );
+    let (times, boxed) = (r.r(p.arr_t), r.r(p.dyn_t));
     let mut a = Asm::new();
     a.op(Opcode::Field {
         dst: b,
@@ -941,6 +947,8 @@ fn add_join_gate(
         arg1: Reg(0),
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "no");
+    // The parked clients and, index for index, when each was parked: every Join
+    // gets its own JOIN_CAP.
     a.op(Opcode::GetGlobal {
         dst: pend,
         global: g.pending,
@@ -952,39 +960,48 @@ fn add_join_gate(
         },
         "have",
     );
-    a.op(Opcode::Int {
-        dst: n,
-        ptr: na.zero,
-    });
-    a.op(Opcode::Type { dst: ty, ty: na.ty });
-    a.op(Opcode::Call2 {
-        dst: raw,
-        fun: na.alloc,
-        arg0: ty,
-        arg1: n,
-    });
-    a.op(Opcode::UnsafeCast {
-        dst: cast,
-        src: raw,
-    });
-    a.op(Opcode::Call1 {
-        dst: pend,
-        fun: na.wrap,
-        arg0: cast,
-    });
-    a.op(Opcode::SetGlobal {
-        global: g.pending,
-        src: pend,
+    for (dst, global) in [(pend, g.pending), (times, g.pending_at)] {
+        a.op(Opcode::Int {
+            dst: n,
+            ptr: na.zero,
+        });
+        a.op(Opcode::Type { dst: ty, ty: na.ty });
+        a.op(Opcode::Call2 {
+            dst: raw,
+            fun: na.alloc,
+            arg0: ty,
+            arg1: n,
+        });
+        a.op(Opcode::UnsafeCast {
+            dst: cast,
+            src: raw,
+        });
+        a.op(Opcode::Call1 {
+            dst,
+            fun: na.wrap,
+            arg0: cast,
+        });
+        a.op(Opcode::SetGlobal { global, src: dst });
+    }
+    a.label("have");
+    a.op(Opcode::GetGlobal {
+        dst: times,
+        global: g.pending_at,
     });
     a.op(Opcode::Call0 {
         dst: now,
         fun: p.sys_time,
     });
-    a.op(Opcode::SetGlobal {
-        global: g.pending_at,
+    a.op(Opcode::ToDyn {
+        dst: boxed,
         src: now,
     });
-    a.label("have");
+    a.op(Opcode::Call2 {
+        dst: n,
+        fun: p.push,
+        arg0: times,
+        arg1: boxed,
+    });
     a.op(Opcode::Call2 {
         dst: n,
         fun: p.push,
@@ -1077,6 +1094,7 @@ fn add_tick(
     );
     let exc = r.r(p.dyn_t);
     let pend = r.r(p.arr_t);
+    let (times, cap) = (r.r(p.arr_t), r.r(p.f64_t));
     let log_joining = str_global(code, p.str_t, LOG_JOINING);
     let mut a = Asm::new();
     let log = |a: &mut Asm, g: RefGlobal, tail: Option<Reg>| {
@@ -1258,6 +1276,10 @@ fn add_tick(
         },
         "barrier",
     );
+    a.op(Opcode::GetGlobal {
+        dst: times,
+        global: g.pending_at,
+    });
     a.op(Opcode::Call2 {
         dst: b,
         fun: active,
@@ -1265,58 +1287,55 @@ fn add_tick(
         arg1: game,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "replay");
-    a.op(Opcode::GetGlobal {
-        dst: at,
-        global: g.pending_at,
-    });
-    a.op(Opcode::Sub {
-        dst: d,
-        a: now,
-        b: at,
-    });
-    a.op(Opcode::Float { dst: at, ptr: fcap });
-    a.jmp(
-        Opcode::JSGte {
-            a: at,
-            b: d,
-            offset: 0,
-        },
-        "barrier",
-    );
-    a.op(Opcode::Null { dst: kicked });
-    a.op(Opcode::SetGlobal {
-        global: g.pending,
-        src: kicked,
-    });
-    a.op(Opcode::Int { dst: i, ptr: i0 });
+    // Oldest first: each parked client goes JOIN_CAP s after its own Join.
+    a.op(Opcode::Float { dst: cap, ptr: fcap });
     a.loop_head("drops");
     a.op(Opcode::Field {
         dst: len,
-        obj: late,
+        obj: times,
         field: p.arr_len,
     });
     a.jmp(
         Opcode::JSGte {
-            a: i,
+            a: zero,
             b: len,
             offset: 0,
         },
-        "barrier",
+        "capped",
     );
     a.op(Opcode::Field {
         dst: raw,
-        obj: late,
+        obj: times,
         field: p.arr_raw.0,
     });
     a.op(Opcode::GetArray {
         dst: e,
         array: raw,
-        index: i,
+        index: zero,
     });
-    a.op(Opcode::Add {
-        dst: i,
-        a: i,
-        b: one,
+    a.op(Opcode::SafeCast { dst: at, src: e });
+    a.op(Opcode::Sub {
+        dst: d,
+        a: now,
+        b: at,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: cap,
+            b: d,
+            offset: 0,
+        },
+        "capped",
+    );
+    a.op(Opcode::Call1 {
+        dst: e,
+        fun: p.shift,
+        arg0: times,
+    });
+    a.op(Opcode::Call1 {
+        dst: e,
+        fun: p.shift,
+        arg0: late,
     });
     a.op(Opcode::UnsafeCast { dst: c, src: e });
     a.op(Opcode::Field {
@@ -1337,6 +1356,8 @@ fn add_tick(
         args: vec![c],
     });
     a.jmp(Opcode::JAlways { offset: 0 }, "drops");
+    a.label("capped");
+    a.jmp(Opcode::JAlways { offset: 0 }, "barrier");
 
     // Each entry leaves the parked list before its handler runs, so a handler that
     // throws leaves the rest parked for the next tick.
@@ -1359,6 +1380,11 @@ fn add_tick(
         },
         "replayed",
     );
+    a.op(Opcode::Call1 {
+        dst: e,
+        fun: p.shift,
+        arg0: times,
+    });
     a.op(Opcode::Call1 {
         dst: e,
         fun: p.shift,
@@ -1414,6 +1440,10 @@ fn add_tick(
     a.op(Opcode::Null { dst: kicked });
     a.op(Opcode::SetGlobal {
         global: g.pending,
+        src: kicked,
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.pending_at,
         src: kicked,
     });
 
@@ -1691,7 +1721,7 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
         kicked: global(p.arr_t),
         kicked_at: global(p.f64_t),
         pending: global(p.arr_t),
-        pending_at: global(p.f64_t),
+        pending_at: global(p.arr_t),
         join_msg: global(p.msg_t),
         ctrl: global(p.ctrl_t),
         replaying: global(p.bool_t),
@@ -2166,7 +2196,10 @@ mod tests {
                 match op {
                     Opcode::Label | Opcode::EndTrap { .. } | Opcode::Trap { .. } => {}
                     Opcode::Ret { ret } => return r[ret.0 as usize].clone(),
-                    Opcode::Mov { dst, src } | Opcode::UnsafeCast { dst, src } => {
+                    Opcode::Mov { dst, src }
+                    | Opcode::UnsafeCast { dst, src }
+                    | Opcode::SafeCast { dst, src }
+                    | Opcode::ToDyn { dst, src } => {
                         r[dst.0 as usize] = r[src.0 as usize].clone()
                     }
                     Opcode::Null { dst } | Opcode::Type { dst, .. } => r[dst.0 as usize] = V::Null,
@@ -2416,5 +2449,41 @@ mod tests {
         assert!(s.at(&Ev::Stop(b)).is_some(), "{:?}", s.events);
         assert_eq!(s.at(&Ev::Join(b)), None);
         assert!(s.clients().is_empty() && s.wait_locks().is_empty());
+    }
+
+    /// Each parked Join has its own JOIN_CAP: a client parked 80 s after the
+    /// first one is not disconnected with it, but JOIN_CAP after its own Join.
+    #[test]
+    fn join_cap_is_per_join() {
+        let Some((orig, code)) = sim_image() else {
+            return;
+        };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
+        s.tick();
+        let b = s.connect();
+        s.set(s.ctrl, p.lock_sync, V::B(true));
+        s.phase();
+        s.join_arrives(b);
+        s.run_to(80.0);
+        let c = s.connect();
+        s.join_arrives(c);
+        s.run_to(JOIN_CAP + 1.0);
+        assert!(s.at(&Ev::Stop(b)).is_some(), "{:?}", s.events);
+        assert_eq!(s.at(&Ev::Stop(c)), None, "{:?}", s.events);
+        s.run_to(80.0 + JOIN_CAP - 1.0);
+        assert_eq!(s.at(&Ev::Stop(c)), None, "{:?}", s.events);
+        s.run_to(80.0 + JOIN_CAP + 1.0);
+        assert!(s.at(&Ev::Stop(c)).is_some(), "{:?}", s.events);
+        assert_eq!(s.at(&Ev::Join(c)), None);
+
+        // Once the switch settles, the one still parked goes ahead.
+        let d = s.connect();
+        s.join_arrives(d);
+        s.run_to(80.0 + JOIN_CAP + 10.0);
+        s.set(s.ctrl, p.lock_sync, V::B(false));
+        s.run_to(80.0 + JOIN_CAP + 20.0);
+        assert!(s.at(&Ev::Join(d)).is_some(), "{:?}", s.events);
+        assert_eq!(s.at(&Ev::Stop(d)), None);
     }
 }

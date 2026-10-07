@@ -210,7 +210,7 @@ handler's `set_ownerObject`; a kicked client still connected 30 s later is
 tail (copied op for op). The host's Join handler parks a Join that arrives
 during a switch (`lockSyncMode`, a non-empty wait/callback/queue list, or a
 phase begun less than 3 s ago) and the tick replays it when the switch ends (a
-switch still running 90 s later disconnects the parked client instead):
+switch still running 90 s after a client's own Join disconnects that client instead):
 a client full-synced mid-switch would miss the switch's earlier RPCs. Lines in
 `shim.log`: `mp: barrier: ...`. Skipped (logged) on mismatch.
 
