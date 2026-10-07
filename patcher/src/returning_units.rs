@@ -24,7 +24,10 @@
 //   R3 During a battle R2 does nothing (swapOwner does not rebind the
 //      battle's own unit objects); the entry stays and Battle.disposeBattle,
 //      after `game.battle = null`, runs R2 for every player (mpRestoreAll).
-// A map left from another GameState is dropped by R1 (no stale game graph).
+//   R4 Game.dispose, op 0 (`mpForgetUnits`): the map of that game's state is
+//      let go with it, so a finished game's state and units stay reachable no
+//      longer. A map left from another GameState is also dropped by R1 and by
+//      R2 (which never hands out another game's units).
 // All of it runs on the host only. Log lines: `mp: drop-in: remembered units of
 // <uid>` and `mp: drop-in: units returned to <uid>: <n>`.
 // Limitation: after a host restart, or a reload of a save written while the
@@ -94,6 +97,8 @@ struct Plan {
     db_fi: usize,
     db_at: usize,
     db_game_f: RefField,
+    /// Game.dispose: the game's end, where the map is let go.
+    gd_fi: usize,
     dbg_file: usize,
 }
 
@@ -281,6 +286,13 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("Battle.disposeBattle: does not end with `game.battle = null; return` (already patched?)");
     }
     let db_fi = fun_index(code, db.findex)?;
+    // Game.dispose(): a call at op 0, which no jump targets.
+    let gd = method(code, game_t, "dispose")?;
+    want_sig(code, gd.findex, "Game.dispose", &[game_t], void_t)?;
+    if (0..gd.ops.len()).any(|i| jump_targets(gd, i).contains(&0)) {
+        bail!("Game.dispose: a jump targets op 0");
+    }
+    let gd_fi = fun_index(code, gd.findex)?;
     let dbg_file = game_file;
     Ok(Plan {
         game_t,
@@ -332,6 +344,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         db_fi,
         db_at: n - 1,
         db_game_f,
+        gd_fi,
         dbg_file,
     })
 }
@@ -503,6 +516,7 @@ fn add_restore(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
         r.r(p.str_t),
         r.r(p.dyn_t),
     );
+    let cur = r.r(p.gs_t);
     let (game, pl) = (Reg(0), Reg(1));
     let mut a = Asm::new();
     a.jmp(
@@ -530,6 +544,36 @@ fn add_restore(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
         global: g.map,
     });
     a.jmp(Opcode::JNull { reg: m, offset: 0 }, "end");
+    // Only this game's map: one left from another game is let go.
+    a.op(Opcode::Field {
+        dst: st,
+        obj: game,
+        field: p.state_f,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: cur,
+        global: g.state,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: st,
+            b: cur,
+            offset: 0,
+        },
+        "ours",
+    );
+    a.op(Opcode::Null { dst: m });
+    a.op(Opcode::SetGlobal {
+        global: g.map,
+        src: m,
+    });
+    a.op(Opcode::Null { dst: cur });
+    a.op(Opcode::SetGlobal {
+        global: g.state,
+        src: cur,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "end");
+    a.label("ours");
     a.op(Opcode::Field {
         dst: uid,
         obj: pl,
@@ -809,6 +853,51 @@ fn add_restore_all(code: &mut Bytecode, p: &Plan, g: &Globals, restore: RefFun) 
     push_fn(code, vec![p.game_t], p.void_t, r.0, a.finish(), p.dbg_file)
 }
 
+/// `mpForgetUnits(game)` (Game.dispose): the map of this game goes with it, so
+/// no finished game's state and units stay reachable.
+fn add_forget(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
+    let mut r = Regs(vec![p.game_t]);
+    let (st, cur, m, v) = (r.r(p.gs_t), r.r(p.gs_t), r.r(p.map_t), r.r(p.void_t));
+    let mut a = Asm::new();
+    a.op(Opcode::GetGlobal {
+        dst: cur,
+        global: g.state,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: cur,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Field {
+        dst: st,
+        obj: Reg(0),
+        field: p.state_f,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: st,
+            b: cur,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Null { dst: m });
+    a.op(Opcode::SetGlobal {
+        global: g.map,
+        src: m,
+    });
+    a.op(Opcode::Null { dst: cur });
+    a.op(Opcode::SetGlobal {
+        global: g.state,
+        src: cur,
+    });
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.game_t], p.void_t, r.0, a.finish(), p.dbg_file)
+}
+
 fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
     let g = Globals {
         map: add_global(code, p.map_t),
@@ -817,6 +906,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
     let remember = add_remember(code, p, &g)?;
     let restore = add_restore(code, p, &g)?;
     let restore_all = add_restore_all(code, p, &g, restore)?;
+    let forget = add_forget(code, p, &g)?;
 
     let f = &mut code.functions[p.rm_fi];
     let v = new_reg(f, p.void_t);
@@ -892,6 +982,22 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
         "patched returning units fn@{} (disposeBattle) op {}: units of a player who dropped in during the battle",
         f.findex.0, p.db_at
     );
+
+    let f = &mut code.functions[p.gd_fi];
+    let v = new_reg(f, p.void_t);
+    insert_ops(
+        f,
+        0,
+        vec![Opcode::Call1 {
+            dst: v,
+            fun: forget,
+            arg0: Reg(0),
+        }],
+    );
+    eprintln!(
+        "patched returning units fn@{} (Game.dispose) op 0: the remembered units go with their game",
+        f.findex.0
+    );
     Ok(())
 }
 
@@ -931,7 +1037,7 @@ mod tests {
         let back = read(&write(&code));
 
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 3);
+        assert_eq!(back.functions.len(), n + 4);
         let changed: Vec<usize> = orig
             .functions
             .iter()
@@ -940,7 +1046,7 @@ mod tests {
             .filter(|(_, (a, b))| !same(a, b))
             .map(|(i, _)| i)
             .collect();
-        let mut want = vec![p.rm_fi, p.join_fi, p.db_fi];
+        let mut want = vec![p.rm_fi, p.join_fi, p.db_fi, p.gd_fi];
         want.sort();
         assert_eq!(changed, want);
 
@@ -963,5 +1069,62 @@ mod tests {
         assert!(plan(&again).is_err());
         patch_returning_units(&mut again);
         assert!(write(&again) == patched);
+    }
+
+    /// The map lives as long as its game: Game.dispose of that game lets it
+    /// go (another game's dispose does not), and a restore in another game
+    /// drops a map left behind instead of using it.
+    #[test]
+    fn map_goes_with_its_game() {
+        use crate::testsim::{Core, Sim, V};
+        let Some(image) = game() else { return };
+        let orig = read(&image);
+        let p = plan(&orig).expect("plan");
+        let mut code = read(&image);
+        patch_returning_units(&mut code);
+        let (n, ng) = (orig.functions.len(), orig.globals.len());
+        let f = |k: usize| code.functions[n + k].findex;
+        let (remember, restore, forget) = (f(0), f(1), f(3));
+        let (copy, map_new, map_set, swap) = (p.copy, p.map_new, p.map_set, p.swap_owner);
+        let (str_add, println) = (p.str_add, p.println);
+        let mut s = Sim::new(
+            &code,
+            n,
+            move |c: &mut Core, f: RefFun, a: &[V]| {
+                if f == copy {
+                    Some(a[0].clone())
+                } else if f == map_new || f == println {
+                    Some(V::Null)
+                } else if f == map_set {
+                    let V::S(k) = &a[1] else { panic!() };
+                    c.key_set(&a[0], format!("s{k}"), a[2].clone());
+                    Some(V::Null)
+                } else if f == str_add {
+                    Some(V::S(String::new()))
+                } else if f == swap {
+                    panic!("nothing is handed over")
+                } else {
+                    None
+                }
+            },
+            |_: &mut Core, _: usize, _: &[V]| panic!("no virtual call"),
+        );
+        let (gs1, gs2, units) = (s.c.obj(&[]), s.c.obj(&[]), s.c.obj(&[]));
+        let game1 = s.c.obj(&[(p.state_f, gs1.clone())]);
+        let game2 = s.c.obj(&[(p.state_f, gs2)]);
+        let pl =
+            s.c.obj(&[(p.user_f, V::S("u1".into())), (p.all_units_f, units)]);
+        let (gmap, gstate) = (RefGlobal(ng), RefGlobal(ng + 1));
+        s.run(remember, vec![game1.clone(), pl.clone()]);
+        assert_ne!(s.global(gmap), V::Null);
+        assert_eq!(s.global(gstate), gs1);
+        s.run(forget, vec![game2.clone()]);
+        assert_eq!(s.global(gstate), gs1, "another game's dispose");
+        s.run(forget, vec![game1.clone()]);
+        assert_eq!((s.global(gmap), s.global(gstate)), (V::Null, V::Null));
+        // left behind (no dispose seen): the next game's restore drops it
+        s.run(remember, vec![game1, pl.clone()]);
+        s.run(restore, vec![game2, pl]);
+        assert_eq!((s.global(gmap), s.global(gstate)), (V::Null, V::Null));
     }
 }

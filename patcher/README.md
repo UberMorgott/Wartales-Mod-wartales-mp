@@ -407,8 +407,8 @@ the host still owns and that is still in the troop (units already given away,
 dismissed or dead stay as they are). During a battle the hand-back waits:
 the battle's unit objects would keep the old owner, so the entry stays pending
 and `Battle.disposeBattle` (after `game.battle = null`) runs it for every
-player. A map left from another game state is dropped. Items stay with the
-host. Logs:
+player. The map goes with its game (`Game.dispose`), and one left from another
+game state is dropped, never used. Items stay with the host. Logs:
 `mp: drop-in: remembered units of <uid>`, `mp: drop-in: units returned to
 <uid>: <n>`. After a host restart the map is empty; the vanilla Transfer button
 still works. Shapes are validated; a mismatch skips the pass (logged).
