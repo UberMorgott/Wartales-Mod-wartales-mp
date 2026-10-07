@@ -47,6 +47,7 @@ mod npc_talk;
 mod party_inventory;
 mod ping_cell;
 mod ready_start;
+mod returning_units;
 mod skill_cost;
 mod style_guard;
 mod take_all;
@@ -93,6 +94,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     barrier::patch_barrier(&mut code);
     ready_start::patch_ready_start(&mut code);
     drop_in::patch_drop_in(&mut code);
+    returning_units::patch_returning_units(&mut code);
     diag::patch_diag(&mut code);
     activity_diag::patch_activity_diag(&mut code);
     follow::patch_follow(&mut code);

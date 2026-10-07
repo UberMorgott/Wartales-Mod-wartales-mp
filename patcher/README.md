@@ -382,10 +382,28 @@ host right away (same guards as Pause, plus `!get_isLocalP2P()`), and
 `getServerID` admits an unknown user while `state.players.length` is below the
 lobby's `maxPlayers` (4, read from `createLobby`); a full party is still
 refused. Log: `mp: drop-in: new player admitted <uid>`. The newcomer owns no
-units until someone gives them some: unit sheet, Transfer (vanilla
-`UnitInfo.transferUnit` / `PlayersPanel`, available to the unit's owner; the
-host owns the units of players who were absent at load). Shapes are validated;
+units until someone gives them some: in camp, unit sheet, Stats tab,
+Transfer (vanilla `UnitInfo.transferUnit` / `PlayersPanel`; shown in camp
+mode only, enabled for the unit's owner; the host owns the units of players
+who were absent at load). Transfer clears the unit's camp tool (vanilla). Shapes are validated;
 a mismatch skips the pass (logged).
+
+**Returning units** (`src/returning_units.rs`): when a co-op load starts
+without some save players, vanilla `Game.removingPlayers` (Game.hx:1029) gives
+their units and items to the host and deletes their player, so a player who
+drops in later came back with nothing. The host now remembers each absent
+player's units (`allUnits` copy, keyed by uid, in a patch-added process-wide
+`StringMap`; nothing is saved) and, right after the returning player's
+`initContent` in the Join handler (Game.hx:434), `swapOwner`s back every unit
+the host still owns and that is still in the troop (units already given away,
+dismissed or dead stay as they are). During a battle the hand-back waits:
+the battle's unit objects would keep the old owner, so the entry stays pending
+and `Battle.disposeBattle` (after `game.battle = null`) runs it for every
+player. A map left from another game state is dropped. Items stay with the
+host. Logs:
+`mp: drop-in: remembered units of <uid>`, `mp: drop-in: units returned to
+<uid>: <n>`. After a host restart the map is empty; the vanilla Transfer button
+still works. Shapes are validated; a mismatch skips the pass (logged).
 
 **Camp: any unit** (`src/camp_any_unit.rs`): in co-op camp only a unit's
 owner could drag it, assign it to a camp tool or move it between camp and
