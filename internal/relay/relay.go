@@ -16,6 +16,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/UberMorgott/wartales-mp/internal/applog"
 	"github.com/UberMorgott/wartales-mp/internal/wsx"
@@ -95,11 +96,15 @@ func (s *Server) ListenAndServe(addr string, onLink func(net.Conn)) error {
 // dispatch peeks at the first bytes to tell a websocket from a proxy-link.
 func (s *Server) dispatch(c net.Conn, onLink func(net.Conn)) {
 	br := bufio.NewReader(c)
+	// A connection that never speaks must not hold a goroutine forever; the
+	// handshake that follows sets its own bounds.
+	_ = c.SetReadDeadline(time.Now().Add(wsx.HandshakeTimeout))
 	head, err := br.Peek(4)
 	if err != nil {
 		_ = c.Close() // the peer never sent anything; nothing to report to
 		return
 	}
+	_ = c.SetReadDeadline(time.Time{})
 	if s.OnInbound != nil {
 		s.OnInbound(c.RemoteAddr()) // it spoke: the port is reachable from there
 	}

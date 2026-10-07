@@ -20,6 +20,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Opcodes we care about.
@@ -36,6 +37,13 @@ const (
 const MaxFrame = 64 << 20
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+// HandshakeTimeout bounds the upgrade request of a peer that has not
+// authenticated yet; the game sends its request at once.
+const HandshakeTimeout = 10 * time.Second
+
+// maxRequest bounds the upgrade request; the game's is a few hundred bytes.
+const maxRequest = 16 << 10
 
 // AuthFunc is the server side of WSConnection.onAuth: given the X-Ident value
 // it returns the password the client must have used, or ok=false to refuse.
@@ -55,9 +63,15 @@ type Conn struct {
 
 // Accept performs the server side handshake on an already accepted TCP (or TLS)
 // connection. br must be the reader the caller has been peeking with, or nil.
+//
+// The peer is not authenticated yet, so the request must arrive whole within
+// HandshakeTimeout and maxRequest bytes.
 func Accept(c net.Conn, br *bufio.Reader, auth AuthFunc) (*Conn, error) {
 	if br == nil {
 		br = bufio.NewReader(c)
+	}
+	if err := c.SetDeadline(time.Now().Add(HandshakeTimeout)); err != nil {
+		return nil, err
 	}
 	headers, err := readRequest(br)
 	if err != nil {
@@ -92,6 +106,9 @@ func Accept(c net.Conn, br *bufio.Reader, auth AuthFunc) (*Conn, error) {
 	if _, err := c.Write([]byte(resp)); err != nil {
 		return nil, err
 	}
+	if err := c.SetDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
 	return &Conn{Conn: c, Ident: ident, Headers: headers, br: br}, nil
 }
 
@@ -118,8 +135,9 @@ func checkPass(hash, pass, got string) bool {
 
 func readRequest(br *bufio.Reader) (map[string]string, error) {
 	headers := map[string]string{}
+	budget := maxRequest
 	for i := 0; ; i++ {
-		line, err := br.ReadString('\n')
+		line, err := readLine(br, &budget)
 		if err != nil {
 			return nil, err
 		}
@@ -138,6 +156,25 @@ func readRequest(br *bufio.Reader) (map[string]string, error) {
 		headers[key] = strings.TrimSpace(line[p+1:])
 		if len(headers) > 64 {
 			return nil, errors.New("websocket: too many headers")
+		}
+	}
+}
+
+// readLine reads one request line, charging it to budget.
+func readLine(br *bufio.Reader, budget *int) (string, error) {
+	var line []byte
+	for {
+		frag, err := br.ReadSlice('\n')
+		*budget -= len(frag)
+		if *budget < 0 {
+			return "", errors.New("websocket: request too large")
+		}
+		line = append(line, frag...)
+		if err == nil {
+			return string(line), nil
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return "", err
 		}
 	}
 }

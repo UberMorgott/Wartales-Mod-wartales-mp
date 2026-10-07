@@ -24,6 +24,18 @@ import (
 // dead host surfaces as an error rather than as a client side timeout.
 const CallTimeout = 15 * time.Second
 
+// HelloTimeout bounds the wait for a guest's hello: until it is vetted the
+// guest is nobody, and must not hold a goroutine.
+const HelloTimeout = 10 * time.Second
+
+const (
+	// maxHello bounds the hello line; a real one is a few hundred bytes.
+	maxHello = 64 << 10
+	// maxLine bounds every later line: a lobby/chat carries at most one of
+	// the game's websocket frames (64 MiB, wsx.MaxFrame) plus its envelope.
+	maxLine = 64<<20 + 64<<10
+)
+
 // Envelope is the wire frame, identical in shape to the master's JSON frame.
 type Envelope struct {
 	UID  int             `json:"uid"`
@@ -115,8 +127,10 @@ func Serve(c net.Conn, accept Accept, h Handler, onClose func(*Peer)) {
 	br := bufio.NewReader(c)
 	out := &conn{c: c}
 
-	first, err := readEnvelope(br)
-	if err != nil || first.Cmd != "link/hello" {
+	// SDR streams ignore deadlines, so the wait is bounded by closing c.
+	expired := time.AfterFunc(HelloTimeout, func() { _ = c.Close() })
+	first, err := readEnvelope(br, maxHello)
+	if !expired.Stop() || err != nil || first.Cmd != "link/hello" {
 		return
 	}
 	var u User
@@ -145,7 +159,7 @@ func Serve(c net.Conn, accept Accept, h Handler, onClose func(*Peer)) {
 	}
 
 	for {
-		e, err := readEnvelope(br)
+		e, err := readEnvelope(br, maxLine)
 		if err != nil {
 			return
 		}
@@ -218,7 +232,7 @@ func DialConn(c net.Conn, u User, onPush func(cmd string, args json.RawMessage),
 		}
 		br := bufio.NewReader(c)
 		for {
-			e, err := readEnvelope(br)
+			e, err := readEnvelope(br, maxLine)
 			if err != nil {
 				if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 					cl.mu.Lock()
@@ -323,10 +337,24 @@ func (c *Client) shutdown() {
 	}
 }
 
-func readEnvelope(br *bufio.Reader) (Envelope, error) {
-	line, err := br.ReadBytes('\n')
-	if err != nil {
-		return Envelope{}, err
+// errTooLong ends a link whose peer sent a line over the limit.
+var errTooLong = errors.New("link: line too long")
+
+// readEnvelope reads one line of at most limit bytes.
+func readEnvelope(br *bufio.Reader, limit int) (Envelope, error) {
+	var line []byte
+	for {
+		frag, err := br.ReadSlice('\n')
+		if len(line)+len(frag) > limit {
+			return Envelope{}, errTooLong
+		}
+		line = append(line, frag...)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return Envelope{}, err
+		}
 	}
 	var e Envelope
 	if err := json.Unmarshal(line, &e); err != nil {
