@@ -13,6 +13,14 @@ tooltip system onto the preview's `ItemIcon` and `TextFixed` children and adds t
 small functions (`ItemTip(icon.item)`, a vertical `Flow` of `SkillTip` per
 `unitClass.baseSkills` entry) to the game's HashLink bytecode (`hlboot.dat`).
 
+**All or nothing.** Every pass checks the exact shapes it edits first. A pass
+(or a part of one) that does not match the game build leaves the bytecode
+untouched and logs `<pass> skipped: <why>`; `wartales_tips_patch` then refuses
+the whole image, naming every mismatching pass, and the shim serves the game
+unpatched: a build the co-op set does not fully fit never runs half-patched.
+Only the print-only diagnostics (`diag`, `activity_diag`, `debrief_diag`,
+`camp_choice`) are skipped alone. "Skipped (logged)" below means exactly that.
+
 It also carries one gameplay patch, **enemy friendly fire**: an area attack
 cast by a non-player unit also hits that unit's own allies (never the caster),
 the way player area attacks already work. Only the area loop of
@@ -36,7 +44,7 @@ offer. Career Plan may target an attribute outside the offer (every upgradable
 attribute gets +/- buttons), so its base is 0 there. `count >= 0` keeps the old
 behaviour. All players must run the same
 build: an unpatched host would apply the negative count. If the ops do not
-match, the fix is skipped (logged) and the other patches still apply.
+match, the fix is skipped (logged).
 
 **Customize slots** (`src/customize_slots.rs`): the new-game customize scene has
 five unit spots (`Model01..05`, `Camera01..05`; the count is taken from the
@@ -50,7 +58,7 @@ keep the spots; the troop's own animal goes before the auto-added Pony).
 unit's lobby entry with `p = getUser().id`, so `allUnitsAssigned` and
 `makeGroups` give it to the host. Same rule, same createTroop order on host
 and clients; troops of `slots` units or fewer are unchanged. If the ops do not
-match, the fix is skipped (logged) and the other patches still apply.
+match, the fix is skipped (logged).
 
 **Co-op: nobody waits** (`src/coop_gates.rs`): every co-op consensus in the
 world is decided on the host and already has a vanilla force path (hold the

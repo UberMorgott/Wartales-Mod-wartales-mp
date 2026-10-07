@@ -689,7 +689,7 @@ pub(crate) fn patch_alt_world(code: &mut Bytecode) {
     let r = plan(code).and_then(|p| apply(code, &p));
     if let Err(e) = r {
         snap.restore(code);
-        eprintln!("alt world skipped: {e:#}");
+        crate::skipped(format!("alt world skipped: {e:#}"));
     }
 }
 

@@ -1138,7 +1138,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_net_guard(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("network guard skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("network guard skipped: {e:#}")),
     }
 }
 

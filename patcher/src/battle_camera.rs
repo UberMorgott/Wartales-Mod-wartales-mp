@@ -299,15 +299,15 @@ fn apply_opening(code: &mut Bytecode, (fi, c): (usize, usize)) {
 pub(crate) fn patch_battle_camera(code: &mut Bytecode) {
     match drag_switch(code) {
         Ok(p) => apply_pan(code, &p),
-        Err(e) => eprintln!("battle camera pan skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("battle camera pan skipped: {e:#}")),
     }
     match wheel(code) {
         Ok(p) => apply_wheel(code, p),
-        Err(e) => eprintln!("battle camera wheel skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("battle camera wheel skipped: {e:#}")),
     }
     match opening(code) {
         Ok(p) => apply_opening(code, p),
-        Err(e) => eprintln!("battle camera opening zoom skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("battle camera opening zoom skipped: {e:#}")),
     }
 }
 

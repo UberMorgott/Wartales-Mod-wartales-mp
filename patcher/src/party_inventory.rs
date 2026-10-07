@@ -1613,14 +1613,14 @@ pub(crate) fn patch_party_inventory(code: &mut Bytecode) {
     let t = match types(code) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("party inventory skipped: {e:#}");
+            crate::skipped(format!("party inventory skipped: {e:#}"));
             return;
         }
     };
     let m = match plan_consume(code, &t) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("party inventory skipped: {e:#}");
+            crate::skipped(format!("party inventory skipped: {e:#}"));
             return;
         }
     };
@@ -1629,14 +1629,14 @@ pub(crate) fn patch_party_inventory(code: &mut Bytecode) {
     let snap = Snap::take(code);
     let before = code.functions[m.use_list_fi].clone();
     if let Err(e) = apply_consume(code, &t, &m) {
-        eprintln!("party inventory skipped: {e:#}");
+        crate::skipped(format!("party inventory skipped: {e:#}"));
         code.functions[m.use_list_fi] = before;
         snap.restore(code);
         return;
     }
     match dialog {
         Ok(d) => apply_dialog(code, d),
-        Err(e) => eprintln!("party inventory dialogs skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("party inventory dialogs skipped: {e:#}")),
     }
 }
 
@@ -1712,7 +1712,7 @@ pub(crate) fn patch_party_counts(code: &mut Bytecode) {
                 code.functions[sites[0].0].findex.0, code.functions[sites[1].0].findex.0
             );
         }
-        Err(e) => eprintln!("party counts skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("party counts skipped: {e:#}")),
     }
 }
 
@@ -1824,7 +1824,7 @@ pub(crate) fn patch_party_lists(code: &mut Bytecode) {
                 code.functions[sites[2].0].findex.0
             );
         }
-        Err(e) => eprintln!("party lists skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("party lists skipped: {e:#}")),
     }
 }
 
@@ -1881,7 +1881,7 @@ pub(crate) fn patch_party_recipes(code: &mut Bytecode) {
                 code.functions[fi].findex.0
             );
         }
-        Err(e) => eprintln!("party recipes skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("party recipes skipped: {e:#}")),
     }
 }
 
@@ -2213,7 +2213,7 @@ pub(crate) fn patch_party_activities(code: &mut Bytecode) {
     let (t, m, f, acts) = match plan() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("party activities skipped: {e:#}");
+            crate::skipped(format!("party activities skipped: {e:#}"));
             return;
         }
     };
@@ -2228,7 +2228,7 @@ pub(crate) fn patch_party_activities(code: &mut Bytecode) {
         Ok(x) => x,
         Err(e) => {
             snap.restore(code);
-            eprintln!("party activities skipped: {e:#}");
+            crate::skipped(format!("party activities skipped: {e:#}"));
             return;
         }
     };

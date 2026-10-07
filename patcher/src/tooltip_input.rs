@@ -461,7 +461,7 @@ pub(crate) fn patch(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("tooltip input skipped: {e:#}");
+            crate::skipped(format!("tooltip input skipped: {e:#}"));
             return;
         }
     };
@@ -476,7 +476,7 @@ pub(crate) fn patch(code: &mut Bytecode) {
         }
         Err(e) => {
             snap.restore(code);
-            eprintln!("tooltip input skipped: {e:#}");
+            crate::skipped(format!("tooltip input skipped: {e:#}"));
         }
     }
 }

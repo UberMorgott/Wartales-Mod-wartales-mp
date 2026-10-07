@@ -752,7 +752,7 @@ pub(crate) fn patch_work_mirror(code: &mut Bytecode) {
     let r = plan(code).and_then(|p| apply(code, &p).map(|_| ()));
     if let Err(e) = r {
         snap.restore(code);
-        eprintln!("work mirror skipped: {e:#}");
+        crate::skipped(format!("work mirror skipped: {e:#}"));
     }
 }
 

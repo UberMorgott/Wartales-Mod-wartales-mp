@@ -122,7 +122,7 @@ fn apply(code: &mut Bytecode, p: &Plan) {
 pub(crate) fn patch_camp_any_unit(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, &p),
-        Err(e) => eprintln!("camp any unit skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("camp any unit skipped: {e:#}")),
     }
 }
 

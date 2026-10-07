@@ -178,7 +178,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_debrief_enable(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("debrief enable skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("debrief enable skipped: {e:#}")),
     }
 }
 

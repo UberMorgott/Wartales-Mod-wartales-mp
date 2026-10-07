@@ -804,7 +804,7 @@ pub(crate) fn patch_dialog_recruit(code: &mut Bytecode) {
     let r = plan(code).and_then(|p| apply(code, &p));
     if let Err(e) = r {
         snap.restore(code);
-        eprintln!("dialog recruit lock skipped: {e:#}");
+        crate::skipped(format!("dialog recruit lock skipped: {e:#}"));
     }
 }
 

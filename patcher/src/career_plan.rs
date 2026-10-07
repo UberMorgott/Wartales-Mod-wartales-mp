@@ -458,7 +458,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_career_plan(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("career-plan fix skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("career-plan fix skipped: {e:#}")),
     }
 }
 

@@ -469,7 +469,7 @@ pub(crate) fn patch_npc_talk(code: &mut Bytecode) {
     let r = plan(code).and_then(|p| apply(code, &p));
     if let Err(e) = r {
         snap.restore(code);
-        eprintln!("npc talk skipped: {e:#}");
+        crate::skipped(format!("npc talk skipped: {e:#}"));
     }
 }
 

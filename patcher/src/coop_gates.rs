@@ -983,12 +983,12 @@ const REQUESTS: [(&str, &str, &str, Option<&str>); 2] = [
 pub(crate) fn patch_coop_gates(code: &mut Bytecode) {
     match plan_button(code) {
         Ok(p) => apply_button(code, &p),
-        Err(e) => eprintln!("coop gate button skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("coop gate button skipped: {e:#}")),
     }
     for (class, name, what, guard) in REQUESTS {
         match plan_request_forces(code, class, name, guard) {
             Ok(p) => apply_request_forces(code, &p, what),
-            Err(e) => eprintln!("coop gate {what} skipped: {e:#}"),
+            Err(e) => crate::skipped(format!("coop gate {what} skipped: {e:#}")),
         }
     }
     for (what, plan) in [
@@ -998,7 +998,7 @@ pub(crate) fn patch_coop_gates(code: &mut Bytecode) {
     ] {
         match plan(code) {
             Ok(p) => apply_bool_read(code, &p),
-            Err(e) => eprintln!("coop gate {what} skipped: {e:#}"),
+            Err(e) => crate::skipped(format!("coop gate {what} skipped: {e:#}")),
         }
     }
 }

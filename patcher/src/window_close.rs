@@ -154,7 +154,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_window_close(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("window close skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("window close skipped: {e:#}")),
     }
 }
 

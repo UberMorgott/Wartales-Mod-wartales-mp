@@ -941,14 +941,14 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     };
     match plan_tavern(code, &p, place_t) {
         Ok(tv) => p.tav = Some(tv),
-        Err(e) => eprintln!("force leave: owned tavern part skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("force leave: owned tavern part skipped: {e:#}")),
     }
     match plan_camp(code, &p) {
         Ok((c, locks)) => {
             p.locks.extend(locks);
             p.camp = Some(c);
         }
-        Err(e) => eprintln!("force leave: camp part skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("force leave: camp part skipped: {e:#}")),
     }
     Ok(p)
 }
@@ -5381,7 +5381,7 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("force leave skipped: {e:#}");
+            crate::skipped(format!("force leave skipped: {e:#}"));
             return;
         }
     };
@@ -5412,7 +5412,7 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
             for (f, i) in saved.into_iter().zip(sites) {
                 code.functions[i] = f;
             }
-            eprintln!("force leave skipped: {e:#}");
+            crate::skipped(format!("force leave skipped: {e:#}"));
         }
     }
 }

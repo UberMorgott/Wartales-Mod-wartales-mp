@@ -86,7 +86,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_hold_speed(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("hold speed skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("hold speed skipped: {e:#}")),
     }
 }
 

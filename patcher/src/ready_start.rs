@@ -1694,7 +1694,7 @@ pub(crate) fn patch_ready_start(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("ready start skipped: {e:#}");
+            crate::skipped(format!("ready start skipped: {e:#}"));
             return;
         }
     };
@@ -1706,7 +1706,7 @@ pub(crate) fn patch_ready_start(code: &mut Bytecode) {
         for (&i, f) in touched.iter().zip(saved) {
             code.functions[i] = f;
         }
-        eprintln!("ready start skipped: {e:#}");
+        crate::skipped(format!("ready start skipped: {e:#}"));
     }
 }
 

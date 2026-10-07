@@ -601,7 +601,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_customize_slots(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("customize-slots fix skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("customize-slots fix skipped: {e:#}")),
     }
 }
 

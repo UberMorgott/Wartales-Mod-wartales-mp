@@ -1833,7 +1833,7 @@ pub(crate) fn patch_follow(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("follow skipped: {e:#}");
+            crate::skipped(format!("follow skipped: {e:#}"));
             return;
         }
     };
@@ -1849,7 +1849,7 @@ pub(crate) fn patch_follow(code: &mut Bytecode) {
         code.constants.as_ref().map_or(0, |c| c.len()),
     );
     if let Err(e) = apply(code, p) {
-        eprintln!("follow skipped: {e:#}");
+        crate::skipped(format!("follow skipped: {e:#}"));
         code.types.truncate(snap.0);
         code.functions.truncate(snap.1);
         code.globals.truncate(snap.2);

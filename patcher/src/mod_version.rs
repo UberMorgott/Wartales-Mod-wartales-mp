@@ -241,7 +241,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_mod_version(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("mod version skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("mod version skipped: {e:#}")),
     }
 }
 

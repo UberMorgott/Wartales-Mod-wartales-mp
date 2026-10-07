@@ -2003,7 +2003,7 @@ pub(crate) fn patch_timeline_hud(code: &mut Bytecode) {
     });
     if let Err(e) = r {
         snap.restore(code);
-        eprintln!("timeline hud skipped: {e:#}");
+        crate::skipped(format!("timeline hud skipped: {e:#}"));
     }
 }
 

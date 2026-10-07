@@ -4495,10 +4495,10 @@ pub(crate) fn patch_window_drag(code: &mut Bytecode) {
     let wp = win_plan(code);
     let pp = panel_plan(code);
     if let Err(e) = &wp {
-        eprintln!("window drag (windows) skipped: {e:#}");
+        crate::skipped(format!("window drag (windows) skipped: {e:#}"));
     }
     if let Err(e) = &pp {
-        eprintln!("window drag (inventory panels) skipped: {e:#}");
+        crate::skipped(format!("window drag (inventory panels) skipped: {e:#}"));
     }
     if wp.is_err() && pp.is_err() {
         return;
@@ -4506,14 +4506,14 @@ pub(crate) fn patch_window_drag(code: &mut Bytecode) {
     let c = match ctx(code) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("window drag skipped: {e:#}");
+            crate::skipped(format!("window drag skipped: {e:#}"));
             return;
         }
     };
     let api = match api(code) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("window drag skipped: {e:#}");
+            crate::skipped(format!("window drag skipped: {e:#}"));
             return;
         }
     };

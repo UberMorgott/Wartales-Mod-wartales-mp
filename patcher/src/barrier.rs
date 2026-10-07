@@ -1798,7 +1798,7 @@ pub(crate) fn patch_barrier(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("barrier skipped: {e:#}");
+            crate::skipped(format!("barrier skipped: {e:#}"));
             return;
         }
     };
@@ -1810,7 +1810,7 @@ pub(crate) fn patch_barrier(code: &mut Bytecode) {
         for (&i, f) in touched.iter().zip(saved) {
             code.functions[i] = f;
         }
-        eprintln!("barrier skipped: {e:#}");
+        crate::skipped(format!("barrier skipped: {e:#}"));
     }
 }
 

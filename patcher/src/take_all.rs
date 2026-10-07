@@ -849,7 +849,7 @@ pub(crate) fn patch_take_all(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("take all skipped: {e:#}");
+            crate::skipped(format!("take all skipped: {e:#}"));
             return;
         }
     };
@@ -857,7 +857,7 @@ pub(crate) fn patch_take_all(code: &mut Bytecode) {
     let before = code.functions[p.fi].clone();
     let fi = p.fi;
     if let Err(e) = apply(code, p) {
-        eprintln!("take all skipped: {e:#}");
+        crate::skipped(format!("take all skipped: {e:#}"));
         code.functions[fi] = before;
         snap.restore(code);
     }

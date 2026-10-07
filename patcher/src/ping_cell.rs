@@ -1864,13 +1864,13 @@ fn cell_apply(code: &mut Bytecode, p: &CellPlan) -> Result<()> {
 pub(crate) fn patch_ping_cell(code: &mut Bytecode) {
     match depth_plan(code) {
         Ok(p) => depth_apply(code, &p),
-        Err(e) => eprintln!("ping depth skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("ping depth skipped: {e:#}")),
     }
     let snap = crate::asm::Snap::take(code);
     let r = cell_plan(code).and_then(|p| cell_apply(code, &p));
     if let Err(e) = r {
         snap.restore(code);
-        eprintln!("ping cell skipped: {e:#}");
+        crate::skipped(format!("ping cell skipped: {e:#}"));
     }
 }
 

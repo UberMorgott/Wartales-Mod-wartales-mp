@@ -173,7 +173,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_skill_cost(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("skill cost skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("skill cost skipped: {e:#}")),
     }
 }
 

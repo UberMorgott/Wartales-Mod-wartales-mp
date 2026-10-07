@@ -4626,7 +4626,7 @@ pub(crate) fn patch_all_inv(code: &mut Bytecode) {
                 ("ui", u.err()),
             ] {
                 if let Some(e) = e {
-                    eprintln!("all inventories skipped ({what}): {e:#}");
+                    crate::skipped(format!("all inventories skipped ({what}): {e:#}"));
                 }
             }
             return;
@@ -4652,7 +4652,7 @@ pub(crate) fn patch_all_inv(code: &mut Bytecode) {
     .map(|&i| (i, code.functions[i].clone()))
     .collect();
     if let Err(e) = ui_apply(code, &up) {
-        eprintln!("all inventories skipped: {e:#}");
+        crate::skipped(format!("all inventories skipped: {e:#}"));
         for (i, f) in before {
             code.functions[i] = f;
         }

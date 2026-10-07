@@ -158,7 +158,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_loot_all(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("loot all skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("loot all skipped: {e:#}")),
     }
 }
 

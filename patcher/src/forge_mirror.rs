@@ -1387,7 +1387,7 @@ pub(crate) fn patch_forge_mirror(code: &mut Bytecode) {
     let r = plan(code).and_then(|p| apply(code, &p).map(|_| ()));
     if let Err(e) = r {
         snap.restore(code);
-        eprintln!("forge mirror skipped: {e:#}");
+        crate::skipped(format!("forge mirror skipped: {e:#}"));
     }
 }
 

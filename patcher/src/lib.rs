@@ -2,8 +2,11 @@
 //
 // wartales-tips: patches Wartales' HashLink bytecode (hlboot.dat) in memory: start-choice
 // tooltips (this file) plus one module per co-op fix / feature / diagnostic, applied in
-// order by `patch_image`. Each pass validates the shapes it edits; on a mismatch the
-// start-choice and friendly-fire passes fail the patch, every other pass is skipped (logged). What each pass does: patcher/README.md.
+// order by `patch_image`. Each pass validates the shapes it edits; on a mismatch it
+// leaves the image untouched and reports it (`skipped`), and `patch_image` then refuses
+// the whole image: a game build the co-op set does not fully match runs unpatched,
+// never half-patched. Only the print-only diagnostics (diag, activity_diag,
+// debrief_diag, camp_choice) are skipped alone. What each pass does: patcher/README.md.
 
 mod activity_diag;
 mod activity_injury;
@@ -73,8 +76,23 @@ use std::io::Cursor;
 /// Marker written nowhere in the image; used by callers to name this patch in logs.
 pub const PATCH_NAME: &str = "wartales-tips start-choice item tooltips";
 
-/// Applies every patch to a bytecode image held in memory and returns the new image.
+thread_local! {
+    /// What the running `patch_image` found not matching this game build.
+    static SKIPPED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A pass, or a part of one, does not match this game build and left `code`
+/// untouched: logged, and `patch_image` then refuses the whole image (no game
+/// runs with half the co-op set). Print-only diagnostics log their own skip.
+pub(crate) fn skipped(why: String) {
+    eprintln!("{why}");
+    SKIPPED.with(|s| s.borrow_mut().push(why));
+}
+
+/// Applies every patch to a bytecode image held in memory and returns the new
+/// image; fails when any behaviour-changing pass does not match the image.
 pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
+    SKIPPED.with(|s| s.borrow_mut().clear());
     let mut code = Bytecode::deserialize(&mut Cursor::new(image)).context("read bytecode")?;
     patch_start_choice_item_tips(&mut code)?;
     patch_start_choice_unit_tips(&mut code)?;
@@ -131,6 +149,14 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     battle_camera::patch_battle_camera(&mut code);
     title_version::patch_title_version(&mut code);
     jit_names::patch_jit_names(&mut code);
+    let skipped = SKIPPED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    if !skipped.is_empty() {
+        bail!(
+            "{} pass(es) do not match this game build: {}",
+            skipped.len(),
+            skipped.join("; ")
+        );
+    }
     let mut out = Vec::with_capacity(image.len() + 4096);
     code.serialize(&mut out).context("write bytecode")?;
     Ok(out)
@@ -1246,6 +1272,27 @@ mod tests {
             let err = patch_image(&[b'H', b'L', b'B', v, 0, 0, 0, 0]).unwrap_err();
             assert!(format!("{err:#}").contains("nsupported"), "version {v}: {err:#}");
         }
+    }
+
+    /// The installed game is patched in full; the same image with one co-op
+    /// function changed (Controller.waitForClients no longer reads waitLocks,
+    /// so the barrier pass mismatches) is refused as a whole, naming that pass.
+    #[test]
+    fn a_mismatching_pass_refuses_the_image() {
+        let Some(image) = game() else { return };
+        patch_image(&image).expect("installed game: every pass applies");
+        let mut code = read(&image);
+        let ctrl = obj_type(&code, "st.Controller").unwrap();
+        let fi = fun_index(&code, method(&code, ctrl, "waitForClients").unwrap().findex).unwrap();
+        for op in &mut code.functions[fi].ops {
+            if matches!(op, Opcode::GetThis { .. }) {
+                *op = Opcode::Nop;
+            }
+        }
+        let mut broken = Vec::new();
+        code.serialize(&mut broken).expect("write");
+        let err = format!("{:#}", patch_image(&broken).unwrap_err());
+        assert!(err.contains("barrier skipped"), "{err}");
     }
 
     /// Patches a copy of the installed game's bytecode (skipped when absent): the

@@ -368,7 +368,7 @@ fn apply(code: &mut Bytecode, p: &Plan) {
 pub(crate) fn patch_drop_in(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, &p),
-        Err(e) => eprintln!("drop-in skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("drop-in skipped: {e:#}")),
     }
 }
 

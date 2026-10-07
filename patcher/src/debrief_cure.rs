@@ -116,7 +116,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_debrief_cure(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("debrief cure skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("debrief cure skipped: {e:#}")),
     }
 }
 

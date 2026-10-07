@@ -137,7 +137,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_censer_tip(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("censer tip skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("censer tip skipped: {e:#}")),
     }
 }
 

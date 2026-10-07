@@ -260,7 +260,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_tavern_resume(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("tavern resume skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("tavern resume skipped: {e:#}")),
     }
 }
 

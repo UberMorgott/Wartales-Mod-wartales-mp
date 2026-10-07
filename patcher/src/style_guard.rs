@@ -930,17 +930,17 @@ pub(crate) fn patch_style_guard(code: &mut Bytecode) {
     let c = match common(code) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("style guard skipped: {e:#}");
+            crate::skipped(format!("style guard skipped: {e:#}"));
             return;
         }
     };
     match style_plan(code, &c) {
         Ok(p) => apply_style(code, &c, p),
-        Err(e) => eprintln!("style guard (applyStyle) skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("style guard (applyStyle) skipped: {e:#}")),
     }
     match over_plan(code, &c) {
         Ok(p) => apply_over(code, &c, p),
-        Err(e) => eprintln!("style guard (game over) skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("style guard (game over) skipped: {e:#}")),
     }
 }
 

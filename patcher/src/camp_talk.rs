@@ -205,7 +205,7 @@ pub(crate) fn patch_camp_talk(code: &mut Bytecode) {
         Ok(p) => apply(code, &p),
         Err(e) => {
             snap.restore(code);
-            eprintln!("camp talk skipped: {e:#}");
+            crate::skipped(format!("camp talk skipped: {e:#}"));
         }
     }
 }

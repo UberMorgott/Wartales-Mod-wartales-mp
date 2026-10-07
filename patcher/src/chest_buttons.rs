@@ -1633,14 +1633,14 @@ pub(crate) fn patch_chest_buttons(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("chest buttons skipped: {e:#}");
+            crate::skipped(format!("chest buttons skipped: {e:#}"));
             return;
         }
     };
     let snap = Snap::take(code);
     let ctor_before = code.functions[p.ctor_fi].clone();
     if let Err(e) = apply(code, p) {
-        eprintln!("chest buttons skipped: {e:#}");
+        crate::skipped(format!("chest buttons skipped: {e:#}"));
         let fi = code
             .functions
             .iter()

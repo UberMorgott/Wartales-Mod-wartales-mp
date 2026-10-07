@@ -447,7 +447,7 @@ pub(crate) fn patch_activity_injury(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("activity injury skipped: {e:#}");
+            crate::skipped(format!("activity injury skipped: {e:#}"));
             return;
         }
     };
@@ -461,7 +461,7 @@ pub(crate) fn patch_activity_injury(code: &mut Bytecode) {
         for (i, f) in saved {
             code.functions[i] = f;
         }
-        eprintln!("activity injury skipped: {e:#}");
+        crate::skipped(format!("activity injury skipped: {e:#}"));
     }
 }
 

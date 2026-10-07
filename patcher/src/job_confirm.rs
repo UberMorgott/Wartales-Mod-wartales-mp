@@ -190,7 +190,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
 pub(crate) fn patch_job_confirm(code: &mut Bytecode) {
     match plan(code) {
         Ok(p) => apply(code, p),
-        Err(e) => eprintln!("job confirm skipped: {e:#}"),
+        Err(e) => crate::skipped(format!("job confirm skipped: {e:#}")),
     }
 }
 

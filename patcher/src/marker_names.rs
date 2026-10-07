@@ -294,13 +294,13 @@ pub(crate) fn patch_marker_names(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("marker names skipped: {e:#}");
+            crate::skipped(format!("marker names skipped: {e:#}"));
             return;
         }
     };
     let snap = Snap::take(code);
     if let Err(e) = apply(code, p) {
-        eprintln!("marker names skipped: {e:#}");
+        crate::skipped(format!("marker names skipped: {e:#}"));
         snap.restore(code);
     }
 }

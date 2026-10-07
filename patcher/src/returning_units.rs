@@ -901,7 +901,7 @@ pub(crate) fn patch_returning_units(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("returning units skipped: {e:#}");
+            crate::skipped(format!("returning units skipped: {e:#}"));
             return;
         }
     };
@@ -912,7 +912,7 @@ pub(crate) fn patch_returning_units(code: &mut Bytecode) {
         snap.restore(code);
         code.functions[p.rm_fi] = rm;
         code.functions[p.join_fi] = join;
-        eprintln!("returning units skipped: {e:#}");
+        crate::skipped(format!("returning units skipped: {e:#}"));
     }
 }
 

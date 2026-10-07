@@ -809,7 +809,7 @@ pub(crate) fn patch_tip_overflow(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("tip overflow skipped: {e:#}");
+            crate::skipped(format!("tip overflow skipped: {e:#}"));
             return;
         }
     };
@@ -823,7 +823,7 @@ pub(crate) fn patch_tip_overflow(code: &mut Bytecode) {
         Err(e) => {
             snap.restore(code);
             code.functions[p.fi] = saved;
-            eprintln!("tip overflow skipped: {e:#}");
+            crate::skipped(format!("tip overflow skipped: {e:#}"));
         }
     }
 }

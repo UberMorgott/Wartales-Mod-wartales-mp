@@ -208,13 +208,13 @@ pub(crate) fn patch_title_version(code: &mut Bytecode) {
     let p = match plan(code) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("title version skipped: {e:#}");
+            crate::skipped(format!("title version skipped: {e:#}"));
             return;
         }
     };
     let snap = Snap::take(code);
     if let Err(e) = apply(code, &p) {
-        eprintln!("title version skipped: {e:#}");
+        crate::skipped(format!("title version skipped: {e:#}"));
         snap.restore(code);
     }
 }

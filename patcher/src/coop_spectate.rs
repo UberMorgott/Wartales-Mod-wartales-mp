@@ -1252,7 +1252,7 @@ pub(crate) fn patch_coop_spectate(code: &mut Bytecode) {
     let r = plan(code).and_then(|p| apply(code, &p).map(|_| ()));
     if let Err(e) = r {
         snap.restore(code);
-        eprintln!("coop spectate skipped: {e:#}");
+        crate::skipped(format!("coop spectate skipped: {e:#}"));
     }
 }
 
