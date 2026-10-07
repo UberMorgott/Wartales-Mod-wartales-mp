@@ -30,6 +30,8 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Clients no longer freeze when an enemy summons units and hits them in the same moment (for example the Rat Matriarch's howl spawning rats): the client makes the new units alive before it runs the host's battle messages. *(Vanilla bug.)*
 - The join gate no longer deadlocks when a save is loaded while a player is joining.
 - The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.
+- A guest whose host left or crashed is no longer stuck on a black screen (seen after the host left the owned tavern and quit): the mod notices that the host's session is gone, and the game shows its normal disconnect message and returns to the title. A leaving player's own goodbye is now sent before their connection is closed.
+- A runaway style pass while the game-over window is built (for example after an escort dies and you press Continue) no longer leaves every button dead on every screen: the UI recovers, the error is logged to **shim.log**, and the normal pause menu opens instead. *(Vanilla bug.)*
 - A failed activity of a client (a lost fish or a broken lockpick on Extreme, or a failed activity that injures) no longer freezes fishing or the activity with a "Not allowed" error: the unit's injury is applied by the host and synced to everyone.
 
 ### Co-op play
@@ -41,13 +43,14 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Talking to a unit from the camp reserve or a party portrait waits, like a click on a unit in the camp, while another player is busy (banner editor, chest, craft): it no longer pulls everyone into the dialog and leaves that player on a black screen.
 - Pings: in battle the pinged cell, or the whole footprint of the unit standing on it, blinks for three seconds on every player's screen in the pinging player's nickname colour, and a pinged unit's outline blinks too; the old ripple rings are gone. A ping now plays an audible chat sound (at most every 0.3 s). Everywhere, the ping marker now lands where the pinging player's cursor is, instead of floating or sinking into the scenery for the others (its depth was read at UI coordinates, not render pixels).
 - Battle timeline: while a player unit acts, the first diamond (bottom left) shows its portrait instead of the crossed swords, with the nickname of the player who controls it above, in that player's colour. Back to the swords when nobody acts; blank during the enemy turn.
-- Co-op battle status list above and left of that diamond, during your side's round: one row per player with units still alive, nickname in the player's colour; `» acting`, grey `× done` (already took their turn this round), `· waiting`. Long nicknames are cut with `...`.
+- Co-op battle status list above and left of that diamond, during your side's round: one row per player with units still alive, nickname in the player's colour; `» acting`, a green check (already took their turn this round), a red cross (still waiting). Long nicknames are cut with `...`.
+- Camp: any player may drag any party unit, assign it to a camp tool or move it between the camp and the reserve, not only their own units. Battle control, items and the unit sheet keep the owner rules.
 - Caravan follow on the world map, on by default: your caravan follows the player who last moved by their own input (the host when several move at once). Your own click, mouse hold or pad move pauses it; it resumes 1 s after you arrive. Press **F** to turn it off for yourself (remembered) and again to turn it back on.
 - Co-op player markers (the screen-edge locator and the minimap arrows) show the player's nickname instead of P1..P4, in the player's colour. Nicknames longer than 12 characters are cut with `...`.
 - ALT highlight on the world map: holding the Outlines key (ALT) outlines the chests, gather nodes, treasure, tracks and other interactive elements on screen, as inside places; release clears them. Local only. Map places and roaming parties are not covered.
 - Party-wide inventory: dialog, crafting, repair and healing costs, fishing hooks and lockpicks are paid from your inventory, the chests and then the other players' inventories, and the counts on screen include the other players' items (fishing and lock picking no longer stop at 0 hooks / lockpicks while the chest or another player has some). The injury heal panel lists remedies the other players carry, and recipe ingredients in the Grimoire and item tooltips are no longer shown missing (red) when the chest or another player has them.
 - Shared chest panel: sort, quick stack (move your items the chest already holds) and take similar buttons.
-- Other players' inventories: a new bottom-bar button (co-op only) opens one panel per other connected player next to your inventory, draggable (positions kept). Full access, both ways: right click an item in a player's panel to take it (shift: choose the amount); while the panels are open, ctrl + right click an item in your own inventory to give it to the player whose panel you last hovered or clicked (ctrl + shift: choose the amount). To equip someone else's item, take it first. Dragging items onto or out of another player's panel is blocked. Every player needs this version: an older one refuses the transfer.
+- Other players' inventories: a new bottom-bar button (co-op only) (the inventory chest with a companions badge) opens one panel per other connected player at the left edge of the screen, draggable (positions kept). Full access, both ways: right click an item in a player's panel to take it (shift: choose the amount); while the panels are open, ctrl + right click an item in your own inventory to give it to the player whose panel you last hovered or clicked (ctrl + shift: choose the amount). To equip someone else's item, take it first. Dragging items onto or out of another player's panel is blocked. Every player needs this version: an older one refuses the transfer.
 - Forging is visible to the other players: while a player forges, everyone else in that place sees the worker at the anvil hammer, with each hit's particles and sound (perfect / good / bad) and the success or fail gesture at the end. Their camera, UI and controls are not touched. Every player needs this version: an older one shows a far-away ping and its sound instead.
 - Shared mini-games (fishing, mining, wood cutting, lock picking, singing, gambling, the ruins puzzles) no longer take over the other players' screens: only the player doing it gets the mini-game window and camera; everyone else keeps their own camera, inventory and controls and watches that player's character do it in the scene. Every player needs this version.
 - Archery and the progress-bar activities (studying, money laundering, dismantling, altering, snaring, tracking, ...) are visible to the other players too: the character doing it makes a work motion for each click or shot, in a place or in the camp. Their camera, UI and controls are not touched. Every player needs this version: an older one shows a far-away ping and its sound instead.
@@ -61,6 +64,8 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do.
 - Switching a unit's profession keeps the experience earned in the old one, and applies at once without the confirm window.
 - Hold-to-confirm rings fill three times faster.
+- The title screen shows the installed mod version ("Co-op Fix v…") on its own line above the game version, so players can compare versions before joining.
+- Popup windows (unit sheet, shops, crafting, ...) and the inventory panels can be dragged by their title row. Positions are kept per window; a double click on the title row puts the window back. Dragging is local only and never clicks the world under the cursor.
 - In co-op a client closes its own window (unit sheet and other windows it opened itself) by clicking outside it, as the host always could; before, that click did nothing on a client.
 - Skill tooltips show the Valor point cost outside battle for every unit, including the new-game screens.
 - Tooltip keyword panels ("Poison", "Vigilance", ...) wrap into columns instead of running off the screen, and are not shown twice.
@@ -77,6 +82,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Writes game errors, co-op mode-switch steps and forced leaves to **shim.log**, to help with bug reports. This only adds log lines.
 - Writes the end steps of every activity and mini-game (ruins puzzles, lock picking, fishing, dice) and every refused co-op network call to **shim.log**, to find where a mini-game freezes. This only adds log lines.
 - Writes post-battle loot-window steps (window rebuilds, button states, hovered and clicked elements) and camp-dialog choice / confession rewards to **shim.log**. This only adds log lines.
+
 ## Install
 
 1. Download **winmm.dll** from **Assets** in the newest release. You do not need the **Source code** archives.
@@ -99,6 +105,7 @@ To update, close the game and replace **winmm.dll** with the new version. To uni
 
 ## Known issues
 
+- Not yet confirmed in a live co-op session: the guest's exit when the host vanished, any unit in the camp, the other players' inventories, and watching forging, work and mini-games. If one of them misbehaves, send **shim.log** from every player.
 - The post-battle loot fix (dead loot items / **Take all** with a damaged squad) is defensive: it removes the rebuild cause found in the game code but has not yet been confirmed in a live co-op session. If loot still does not react, send **shim.log** from every player (the loot-window diagnostics above are included).
 
 ## If it does not work
