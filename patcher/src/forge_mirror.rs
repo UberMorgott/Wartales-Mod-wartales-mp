@@ -172,6 +172,51 @@ fn ctor_literal(code: &Bytecode, ctor: &Function, f: RefField) -> Result<RefGlob
 /// The marker of an applied pass: its receiver's log tag.
 const RECV_TAG: &str = "mp: forge recv";
 
+/// feedbackOnAction switches on the tier and case k loads its grade's sound first:
+/// the mirror's fixed grades (0 Perfect, 1 Good, any other Bad) must be those.
+fn tier_grades_match(code: &Bytecode, fb: &Function, n_tiers: usize) -> Result<()> {
+    let switches: Vec<(usize, &Vec<i32>)> = fb
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| match o {
+            Opcode::Switch { offsets, .. } => Some((i, offsets)),
+            _ => None,
+        })
+        .collect();
+    let [(at, offsets)] = switches[..] else {
+        bail!(
+            "feedbackOnAction: expected one switch, found {}",
+            switches.len()
+        );
+    };
+    if offsets.len() != n_tiers {
+        bail!(
+            "feedbackOnAction switches over {} cases, EScoreTier has {n_tiers}",
+            offsets.len()
+        );
+    }
+    let sounds = [SND_PERFECT, SND_GOOD, SND_BAD];
+    for (k, &off) in offsets.iter().enumerate() {
+        let from = (at as i64 + 1 + off as i64) as usize;
+        let grade = fb
+            .ops
+            .get(from..)
+            .unwrap_or_default()
+            .iter()
+            .find_map(|o| match o {
+                Opcode::GetGlobal { global, .. } => {
+                    const_str(code, *global).and_then(|v| sounds.iter().position(|s| *s == v))
+                }
+                _ => None,
+            });
+        if grade != Some(k.min(2)) {
+            bail!("feedbackOnAction: EScoreTier case {k} is not the grade the mirror plays");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     if code.strings.iter().any(|s| s.as_str() == RECV_TAG) {
         bail!("already applied");
@@ -328,6 +373,10 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         .iter()
         .position(|n| n == "Success")
         .context("ActivityResult has no Success")? as i32;
+    // The grades the mirror plays per tier index (0 Perfect, 1 Good, any other
+    // Bad) are the ones vanilla's own feedback gives: feedbackOnAction switches
+    // on the tier, and case k loads its grade's sound first.
+    tier_grades_match(code, fa_m("feedbackOnAction")?, tiers.len())?;
 
     Ok(Plan {
         b,
@@ -1582,7 +1631,23 @@ mod tests {
             .iter()
             .position(|o| matches!(o, Opcode::GetGlobal { global, .. } if *global == p.hit_g))
             .unwrap();
+        let fb = fun_index(
+            &orig,
+            method(&orig, p.fa_t, "feedbackOnAction").unwrap().findex,
+        )
+        .unwrap();
         let breakers: Vec<(&str, Box<dyn Fn(&mut Bytecode)>)> = vec![
+            (
+                // a build whose EScoreTier order differs: tier 0 sounds Good
+                "tier order",
+                Box::new(move |c: &mut Bytecode| {
+                    for o in &mut c.functions[fb].ops {
+                        if let Opcode::Switch { offsets, .. } = o {
+                            offsets.swap(0, 1);
+                        }
+                    }
+                }),
+            ),
             (
                 "anim literal",
                 Box::new(move |c: &mut Bytecode| {
@@ -1710,7 +1775,11 @@ mod tests {
                 self.key_get(&a[0], &format!("k{k}"))
             } else if f == p.omap_set || f == p.omap_remove {
                 let V::O(k) = a[1] else { panic!() };
-                let v = if f == p.omap_set { a[2].clone() } else { V::Null };
+                let v = if f == p.omap_set {
+                    a[2].clone()
+                } else {
+                    V::Null
+                };
                 self.key_set(&a[0], format!("k{k}"), v);
                 if f == p.omap_set {
                     V::Null
