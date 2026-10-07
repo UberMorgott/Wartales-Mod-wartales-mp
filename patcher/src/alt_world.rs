@@ -740,10 +740,7 @@ mod tests {
     /// global are appended; a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (orig, p, back, fns) = patched(&image);
         assert_eq!(back.functions.len(), orig.functions.len() + 3);
         assert_eq!(back.globals.len(), orig.globals.len() + 1);
@@ -821,10 +818,7 @@ mod tests {
     /// Any of the three sites in an unexpected shape: refused, image unchanged.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let p = plan(&read(&image)).expect("plan");
         let breaks: [(usize, usize); 3] = [
             (p.nono_fi, p.nono_at),
@@ -917,10 +911,7 @@ mod tests {
     /// The world-map gate: true (no outline) unless ALT is held; other modes false.
     #[test]
     fn gate_follows_alt_on_world_only() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (orig, p, back, fns) = patched(&image);
         let mut s = sim(&back, orig.functions.len(), &p, &fns);
         let w = world(&mut s, &p);
@@ -947,10 +938,7 @@ mod tests {
     /// with an object; not the world mode: nothing, state kept.
     #[test]
     fn edge_updates_on_press_and_release() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (orig, p, back, fns) = patched(&image);
         let mut s = sim(&back, orig.functions.len(), &p, &fns);
         let w = world(&mut s, &p);
@@ -984,10 +972,7 @@ mod tests {
     /// its outline; culled, ALT up or another mode: nothing.
     #[test]
     fn cull_updates_on_screen_while_held() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (orig, p, back, fns) = patched(&image);
         let mut s = sim(&back, orig.functions.len(), &p, &fns);
         let w = world(&mut s, &p);

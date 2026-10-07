@@ -1796,10 +1796,7 @@ mod tests {
     /// pass changes nothing.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (cf, uf, jf, rf, tail_at) =
@@ -1857,10 +1854,7 @@ mod tests {
     /// refused and the image is left as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let p = plan(&read(&image)).expect("plan");
         let (rf, tail_at) = (p.ready_fi, p.tail_at);
         let jump_in = |f: &mut Function| {
@@ -2307,8 +2301,7 @@ mod tests {
     }
 
     fn sim_image() -> Option<(Bytecode, Bytecode)> {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
+        let Some(image) = game() else {
             return None;
         };
         let orig = read(&image);

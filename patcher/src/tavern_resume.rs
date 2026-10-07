@@ -274,16 +274,13 @@ pub(crate) fn patch_tavern_resume(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{check_flow, check_types, read, write, HLBOOT};
+    use crate::asm::testutil::{check_flow, check_types, game, read, write};
 
     /// doService gains one moved block; every other function is untouched; a
     /// second pass is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (fi, start, push, end, done) = (p.fi, p.start, p.push, p.end, p.done);
@@ -336,10 +333,7 @@ mod tests {
     /// A doService that already reads history between the push and done() is refused.
     #[test]
     fn refuses_history_read_before_done() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let p = plan(&read(&image)).expect("plan");
         let mut code = read(&image);
         let f = &mut code.functions[p.fi];
@@ -355,10 +349,7 @@ mod tests {
     /// read Tavern.history, so the late push changes nothing they see.
     #[test]
     fn simulation_never_reads_history() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let code = read(&image);
         let tavern_t = obj_type(&code, "st.player.Tavern").unwrap();
         let sim_t = obj_type(&code, "st.player.tavern.TavernSimulation").unwrap();

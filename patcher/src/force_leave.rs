@@ -5420,14 +5420,11 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{check_flow, check_types, read, shifted, write, HLBOOT};
+    use crate::asm::testutil::{check_flow, check_types, game, read, shifted, write};
 
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let tv = p.tav.as_ref().expect("owned tavern part planned");
@@ -5661,10 +5658,7 @@ mod tests {
     /// + log, busy machine: on screen + log), from flUpdate's wait timer.
     #[test]
     fn long_waits_are_reported_not_forced() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let aw = obj_type(&orig, "ui.win.ActivityWindow").unwrap();
@@ -5828,10 +5822,7 @@ mod tests {
     /// the pass still applies on top of G2/G6, and its hooks reach type-correct code.
     #[test]
     fn composes_with_other_passes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let tv = p.tav.as_ref().expect("owned tavern part planned");

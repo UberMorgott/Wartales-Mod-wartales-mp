@@ -1159,7 +1159,7 @@ fn inspect(code: &Bytecode, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{read, HLBOOT};
+    use crate::asm::testutil::{game, read};
 
     fn same(a: &Function, b: &Function) -> bool {
         format!("{:?}", a.ops) == format!("{:?}", b.ops)
@@ -1213,10 +1213,7 @@ mod tests {
     /// functions are appended, and every tooltip constructor runs under a trap.
     #[test]
     fn start_choice_tips_on_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let mut out = Vec::new();
         orig.serialize(&mut out).expect("write");

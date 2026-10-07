@@ -2272,10 +2272,7 @@ mod tests {
     /// second pass changes nothing.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let t = types(&orig).expect("types");
         let m = plan_consume(&orig, &t).expect("plan consume");
@@ -2354,10 +2351,7 @@ mod tests {
     /// hasItemWithChest / countWithChest: only their `Int 2` flag becomes 6; idempotent.
     #[test]
     fn patches_counts() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let mut code = read(&image);
         patch_party_counts(&mut code);
@@ -2390,10 +2384,7 @@ mod tests {
     /// Heal panel / injury tooltip `2 -> 6` and Button.syncText `256 -> 260` only; idempotent.
     #[test]
     fn patches_lists() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let mut code = read(&image);
         patch_party_lists(&mut code);
@@ -2439,10 +2430,7 @@ mod tests {
     /// hasItemWithChest; idempotent.
     #[test]
     fn patches_recipes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let (fi, at, wc) = plan_recipe_has(&orig).expect("plan");
         let mut code = read(&image);
@@ -2474,10 +2462,7 @@ mod tests {
     /// round-trips, a second pass changes nothing; also after the useList prologue.
     #[test]
     fn patches_activities() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let t = types(&orig).expect("types");
         let m = consume_refs(&orig, &t).expect("refs");

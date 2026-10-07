@@ -428,10 +428,7 @@ mod tests {
     /// well-typed function is appended; a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (fi, at) = (p.talk_fi, p.at);
@@ -488,10 +485,7 @@ mod tests {
     /// and left as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let p = plan(&read(&image)).expect("plan");
         let (fi, at) = (p.talk_fi, p.at);
         let mut code = read(&image);

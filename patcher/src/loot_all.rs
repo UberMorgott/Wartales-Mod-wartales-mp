@@ -174,14 +174,11 @@ pub(crate) fn patch_loot_all(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{read, HLBOOT};
+    use crate::asm::testutil::{game, read};
 
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (fi, gate_at) = (p.fi, p.gate_at);
@@ -229,10 +226,7 @@ mod tests {
     /// is refused and leaves the function as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let p = plan(&read(&image)).expect("plan");
         let (fi, gate_at) = (p.fi, p.gate_at);
         let backwards = |f: &mut Function| {

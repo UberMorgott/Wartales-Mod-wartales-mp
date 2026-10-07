@@ -946,8 +946,8 @@ pub(crate) fn patch_style_guard(code: &mut Bytecode) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::asm::testutil::{check_flow, check_types, read, write, HLBOOT};
     use super::*;
+    use crate::asm::testutil::{check_flow, check_types, game, read, write};
 
     /// Each Trap is closed by an EndTrap on the same register; no op inside the
     /// protected block returns or jumps out of it; the handler lies after it.
@@ -985,10 +985,7 @@ mod tests {
 
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let c = common(&orig).expect("common");
         let sp = style_plan(&orig, &c).expect("style plan");
@@ -1101,10 +1098,7 @@ mod tests {
     /// An applyStyle without the vanilla tail is refused and left as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let mut code = read(&image);
         let c = common(&code).expect("common");
         let p = style_plan(&code, &c).expect("plan");

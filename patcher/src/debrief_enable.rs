@@ -185,16 +185,13 @@ pub(crate) fn patch_debrief_enable(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{read, write, HLBOOT};
+    use crate::asm::testutil::{game, read, write};
 
     /// On the vanilla image and after cure + diag: only the two rebuild calls of
     /// Debrief.update change, into set_enable(button, desired); idempotent.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         for chain in [false, true] {
             let mut orig = read(&image);
             if chain {
@@ -574,10 +571,7 @@ mod tests {
     /// and no frame ever rebuilds, and the buttons follow later changes.
     #[test]
     fn replayed_update_never_rebuilds_and_follows_availability() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let mut vanilla = read(&image);
         debrief_cure::patch_debrief_cure(&mut vanilla);
         let mut w = World::default();
@@ -624,10 +618,7 @@ mod tests {
     /// A comparison that does not read button.enable is refused, image untouched.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let p = plan(&read(&image)).expect("plan");
         let (fi, at) = (p.fi, p.sites[0].at);
         let mut code = read(&image);

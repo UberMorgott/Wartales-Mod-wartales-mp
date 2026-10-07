@@ -467,15 +467,12 @@ pub(crate) fn patch_activity_injury(code: &mut Bytecode) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::asm::testutil::{check_flow, check_types, read, write, HLBOOT};
     use super::*;
+    use crate::asm::testutil::{check_flow, check_types, game, read, write};
 
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (ufi, afi, ffi) = (p.uinj_fi, p.ainj_fi, p.fish_fi);
@@ -583,10 +580,7 @@ mod tests {
     /// The pass also applies on top of every earlier pass (party_inventory edits FishingAction.startState).
     #[test]
     fn applies_in_full_chain() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let out = crate::patch_image(&image).expect("patch_image");
         let back = read(&out);
         assert!(plan(&back).is_err());
@@ -604,10 +598,7 @@ mod tests {
 
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let base = write(&orig);

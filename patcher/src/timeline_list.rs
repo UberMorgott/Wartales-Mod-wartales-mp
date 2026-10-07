@@ -1630,10 +1630,7 @@ mod tests {
     /// markers are emitted.
     #[test]
     fn list_loads_icons() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let mut code = read(&image);
         let p = super::super::plan(&code).expect("base plan");
         let lp = plan(&code, &p).expect("list plan");
@@ -1653,10 +1650,7 @@ mod tests {
     /// PlayerUnit(battle.Unit), is refused and the image left as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let mut code = read(&image);
         let st = obj_type(&code, "battle.State").expect("state");
         let (f, _) = field(&code, st, "players").expect("players");
@@ -1699,10 +1693,7 @@ mod tests {
     #[test]
     fn round_rollover_resets_marks() {
         use crate::testsim::{Sim, V};
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = super::super::plan(&orig).expect("base plan");
         let lp = plan(&orig, &p).expect("list plan");

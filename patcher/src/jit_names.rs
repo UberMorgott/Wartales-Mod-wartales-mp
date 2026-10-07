@@ -189,10 +189,7 @@ mod tests {
     /// libhl!hl_hash_gen), and without this pass the chain does produce one.
     #[test]
     fn no_null_name_hash_on_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         assert!(offending(&orig).is_empty(), "vanilla game already offends");
         let full = read(&crate::patch_image(&image).expect("patch"));

@@ -141,15 +141,12 @@ pub(crate) fn patch_debrief_cure(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{read, write, HLBOOT};
+    use crate::asm::testutil::{game, read, write};
 
     /// Only the one Call1 target in Debrief.update changes; a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (fi, at, heal) = (p.fi, p.at, p.heal);
@@ -200,10 +197,7 @@ mod tests {
     /// A cure block without the injury count is refused and left as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let p = plan(&read(&image)).expect("plan");
         let (fi, at) = (p.fi, p.at);
         let mut code = read(&image);

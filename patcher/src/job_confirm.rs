@@ -197,14 +197,11 @@ pub(crate) fn patch_job_confirm(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{read, HLBOOT};
+    use crate::asm::testutil::{game, read};
 
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (fi, text_at, call_at, dst, yes) = (p.fi, p.text_at, p.call_at, p.dst, p.yes);

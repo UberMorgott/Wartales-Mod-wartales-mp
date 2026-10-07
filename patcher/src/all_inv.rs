@@ -3802,7 +3802,7 @@ pub(crate) fn patch_all_inv(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{check_flow, check_types, read, shifted, write, HLBOOT};
+    use crate::asm::testutil::{check_flow, check_types, game, read, shifted, write};
     use crate::asm::testutil::{same, traps_ok};
     use std::collections::HashMap;
 
@@ -3829,10 +3829,7 @@ mod tests {
     /// calls them; a second pass changes nothing.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plans(&orig);
         assert_eq!(
@@ -3946,10 +3943,7 @@ mod tests {
     /// The pass runs in the full pipeline (after take_all / window_drag).
     #[test]
     fn applies_in_pipeline() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let out = crate::patch_image(&image).expect("patch");
         let code = read(&out);
         assert!(ui_applied(&code));
@@ -3966,10 +3960,7 @@ mod tests {
     /// A mismatch in any part skips the whole pass.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plans(&orig);
         let (nfi, sfi, sat, rfi, bfi, bret) = (
@@ -4417,10 +4408,7 @@ mod tests {
     /// container: only modes 0 / 6 of RPCs 7 / 0 open up, for other players.
     #[test]
     fn network_allow_behaviour() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let mut orig = read(&image);
         let p = plans(&orig);
         let mut code = read(&image);
@@ -4497,10 +4485,7 @@ mod tests {
     /// Remove conversion.
     #[test]
     fn slot_api_routing() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plans(&orig);
         let mut code = read(&image);
@@ -4536,10 +4521,7 @@ mod tests {
     /// ctrl / shift give, locked items, disconnect and battle in the tick.
     #[test]
     fn give_take_behaviour() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let pl = plans(&orig);
         let mut code = read(&image);
@@ -4728,10 +4710,7 @@ mod tests {
     /// during a battle.
     #[test]
     fn toggle_behaviour() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let pl = plans(&orig);
         let mut code = read(&image);

@@ -1883,10 +1883,7 @@ mod tests {
     /// sfx call swapped; three well-typed functions appended; a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let dp = depth_plan(&orig).expect("depth plan");
         let cp = cell_plan(&orig).expect("cell plan");
@@ -2010,10 +2007,7 @@ mod tests {
     #[test]
     fn square_gets_own_color_per_pinger() {
         use crate::testsim::{Sim, V};
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let cp = cell_plan(&orig).expect("cell plan");
         let orig_n = orig.functions.len();
@@ -2170,10 +2164,7 @@ mod tests {
     /// The color source is the one the nickname uses, and the sound id exists.
     #[test]
     fn color_and_sound_sources() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let code = read(&image);
         let cp = cell_plan(&code).expect("cell plan");
         assert_eq!(any_name(&code, cp.get_color), "getColor");
@@ -2192,10 +2183,7 @@ mod tests {
     /// Unexpected shapes skip the half they belong to and leave it as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let dp = depth_plan(&orig).expect("depth plan");
         let cp = cell_plan(&orig).expect("cell plan");

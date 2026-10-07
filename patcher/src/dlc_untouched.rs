@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::asm::testutil::{read, HLBOOT};
+    use crate::asm::testutil::{game, read};
     use crate::*;
 
     /// The vanilla DLC model: Steam ownership (`hasDLC`, `getDlcs`), each
@@ -102,10 +102,7 @@ mod tests {
 
     #[test]
     fn dlc_untouched() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let mut img = image.clone();
         for (needle, index, from, to) in hl_patches() {
             let hits: Vec<usize> = img

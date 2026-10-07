@@ -219,10 +219,7 @@ mod tests {
     /// op and jump is kept, the types check; a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let fis = plan(&orig).expect("plan").fis;
         assert_eq!(fis.len(), IMPLS.len());
@@ -255,10 +252,7 @@ mod tests {
     /// image is left as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let fis = plan(&read(&image)).expect("plan").fis;
         let mut code = read(&image);
         let f = &mut code.functions[fis[0]];

@@ -93,14 +93,11 @@ pub(crate) fn patch_hold_speed(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{read, HLBOOT};
+    use crate::asm::testutil::{game, read};
 
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let fi = plan(&orig).expect("plan").fi;
         let mut code = read(&image);

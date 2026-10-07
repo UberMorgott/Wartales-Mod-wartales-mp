@@ -3246,7 +3246,7 @@ pub(crate) fn patch_window_drag(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{check_flow, check_types, read, shifted, write, HLBOOT};
+    use crate::asm::testutil::{check_flow, check_types, game, read, shifted, write};
     use crate::asm::testutil::{same, traps_ok};
 
     /// Sites found, only Window.init and the GameInventory constructor change,
@@ -3254,10 +3254,7 @@ mod tests {
     /// changes nothing.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let wp = win_plan(&orig).expect("windows plan");
         let pp = panel_plan(&orig).expect("panels plan");
@@ -3340,10 +3337,7 @@ mod tests {
     /// The shared functions are appended once and found again by name.
     #[test]
     fn api_is_shared() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let mut code = read(&image);
         let n = code.functions.len();
         let a = api(&mut code).expect("api");
@@ -3380,10 +3374,7 @@ mod tests {
     /// chest_buttons adds) lands on the panel install, not past it.
     #[test]
     fn early_exits_reach_install() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let mut code = read(&image);
         let pp = panel_plan(&code).expect("panels plan");
         insert_ops(
@@ -3405,10 +3396,7 @@ mod tests {
     /// A shape mismatch at either site skips that part and leaves it untouched.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let wp = win_plan(&orig).expect("windows plan");
         let pp = panel_plan(&orig).expect("panels plan");
@@ -3577,10 +3565,7 @@ mod tests {
     /// event, so it never reaches the world under the cursor.
     #[test]
     fn move_is_immediate_and_release_saves() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (code, n) = built(&image);
         let c = ctx(&code).unwrap();
         let f = fns(&code, n);
@@ -3638,10 +3623,7 @@ mod tests {
     /// drops the drag and saves; later events of the dead drag do nothing.
     #[test]
     fn cancel_resets_the_drag() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (code, n) = built(&image);
         let c = ctx(&code).unwrap();
         let f = fns(&code, n);
@@ -3683,10 +3665,7 @@ mod tests {
     /// Push + release without a move is a click: the release goes on.
     #[test]
     fn click_without_move_passes_release() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (code, n) = built(&image);
         let c = ctx(&code).unwrap();
         let f = fns(&code, n);
@@ -3709,10 +3688,7 @@ mod tests {
     /// through; buttons, the window's own interactive and body elements don't change.
     #[test]
     fn header_elements_pass_push() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (code, n) = built(&image);
         let c = ctx(&code).unwrap();
         let f = fns(&code, n);
@@ -3783,10 +3759,7 @@ mod tests {
     /// included, so it drags. An absolute child without an align stays put.
     #[test]
     fn absolute_aligned_panel_drags() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (code, n) = built(&image);
         let c = ctx(&code).unwrap();
         let f = fns(&code, n);
@@ -3828,10 +3801,7 @@ mod tests {
     /// looked like a chest that never reopens).
     #[test]
     fn panel_restores_after_style_and_resets_to_base() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let (code, n) = built(&image);
         let c = ctx(&code).unwrap();
         let f = fns(&code, n);

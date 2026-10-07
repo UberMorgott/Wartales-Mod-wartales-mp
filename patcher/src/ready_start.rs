@@ -1269,10 +1269,7 @@ mod tests {
     /// changes nothing.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (start_fi, update_fi, join_fi, branch_at, branch_jump) = (
@@ -1702,8 +1699,7 @@ mod tests {
     }
 
     fn images() -> Option<(Bytecode, Bytecode)> {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
+        let Some(image) = game() else {
             return None;
         };
         let orig = read(&image);

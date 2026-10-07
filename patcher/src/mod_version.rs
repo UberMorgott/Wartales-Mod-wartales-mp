@@ -247,15 +247,12 @@ pub(crate) fn patch_mod_version(code: &mut Bytecode) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::asm::testutil::{check_flow, check_types, read, shifted, write, HLBOOT};
     use super::*;
+    use crate::asm::testutil::{check_flow, check_types, game, read, shifted, write};
 
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (fi, at, data) = (p.fi, p.at, p.data);

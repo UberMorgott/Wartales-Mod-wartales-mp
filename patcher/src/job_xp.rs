@@ -575,7 +575,7 @@ pub(crate) fn patch_job_xp(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{read, HLBOOT};
+    use crate::asm::testutil::{game, read};
 
     fn ops(o: &[Opcode]) -> String {
         format!("{o:?}")
@@ -587,10 +587,7 @@ mod tests {
     /// second pass changes nothing.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (rfi, rat, afi, aat) = (p.remove.fi, p.remove.at, p.add.fi, p.add.at);

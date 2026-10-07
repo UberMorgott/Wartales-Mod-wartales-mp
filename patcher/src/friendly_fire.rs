@@ -307,16 +307,13 @@ pub(crate) fn patch_enemy_area_friendly_fire(code: &mut Bytecode) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::HLBOOT;
+    use crate::asm::testutil::game;
 
     /// Patches the installed game's bytecode (skipped when it is absent) and
     /// checks the result reads back with both area sites passing `&cv`.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let out = patch_image(&image).expect("patch");
         let code = Bytecode::deserialize(&mut Cursor::new(&out)).expect("patched image reads back");
         let skill_t = obj_type(&code, "battle.skill.Skill").unwrap();

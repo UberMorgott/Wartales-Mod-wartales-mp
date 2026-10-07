@@ -889,10 +889,7 @@ mod tests {
     /// take body, the image round-trips, and a second pass changes nothing.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let (fi, body, found) = (p.fi, p.take.body, p.found);
@@ -938,10 +935,7 @@ mod tests {
     /// pass leaves the image as it was.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let body = plan(&read(&image)).expect("plan").take.body;
         let mut code = read(&image);
         let slot_t = obj_type(&code, "ui.comp.ItemSlot").unwrap();

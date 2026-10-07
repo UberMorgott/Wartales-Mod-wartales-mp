@@ -181,6 +181,15 @@ pub(crate) mod testutil {
 
     pub(crate) const HLBOOT: &str = r"D:\Steam\steamapps\common\Wartales\hlboot.dat";
 
+    /// The installed game's bytecode image; None (the test is skipped) when absent.
+    pub(crate) fn game() -> Option<Vec<u8>> {
+        let image = std::fs::read(HLBOOT).ok();
+        if image.is_none() {
+            eprintln!("skipped: {HLBOOT} not found");
+        }
+        image
+    }
+
     pub(crate) fn read(image: &[u8]) -> Bytecode {
         Bytecode::deserialize(&mut Cursor::new(image)).expect("read")
     }

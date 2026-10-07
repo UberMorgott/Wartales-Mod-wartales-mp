@@ -135,10 +135,7 @@ mod tests {
     /// isPlayer); a second pass finds no site and is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         assert_eq!(p.sites.len(), 4);
@@ -191,10 +188,7 @@ mod tests {
     /// the image as it was.
     #[test]
     fn refuses_missing_site() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let p = plan(&read(&image)).expect("plan");
         let mut code = read(&image);
         let (fi, at) = p.sites[1];

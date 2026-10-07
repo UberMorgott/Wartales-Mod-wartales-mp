@@ -608,7 +608,7 @@ pub(crate) fn patch_customize_slots(code: &mut Bytecode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::testutil::{read, HLBOOT};
+    use crate::asm::testutil::{game, read};
 
     fn ops(o: &[Opcode]) -> String {
         format!("{o:?}")
@@ -641,10 +641,7 @@ mod tests {
     /// land where intended, and a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let mut out = Vec::new();
         orig.serialize(&mut out).expect("write");

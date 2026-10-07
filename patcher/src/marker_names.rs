@@ -318,10 +318,7 @@ mod tests {
     /// one well-typed helper is appended; nothing else changes; a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         assert_eq!(p.sites.len(), 2);
@@ -396,10 +393,7 @@ mod tests {
     /// A jump onto the insertion point, a second set_text, or no set_text: skipped, untouched.
     #[test]
     fn refuses_unexpected_shapes() {
-        let Ok(image) = std::fs::read(HLBOOT) else {
-            eprintln!("skipped: {HLBOOT} not found");
-            return;
-        };
+        let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let base = write(&orig);
