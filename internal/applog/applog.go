@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -156,4 +157,27 @@ func Trunc(v any) string {
 		return s + "...(" + strconv.Itoa(full) + "B)"
 	}
 	return s
+}
+
+// Headers renders the handshake headers in a stable order for the log.
+func Headers(h map[string]string) string {
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		if b.Len() > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		if k == "x-pass" {
+			b.WriteString("<redacted>") // a password hash never belongs in a log
+			continue
+		}
+		b.WriteString(h[k])
+	}
+	return b.String()
 }

@@ -14,7 +14,6 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
-	"sort"
 	"strings"
 	"sync"
 
@@ -169,7 +168,7 @@ func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 		s.mu.Unlock()
 	}
 	s.Log.Printf("relay: %s connected (cid %d, ident %q, peer %s, headers %s)",
-		role, self.cid, self.ident, c.RemoteAddr(), applog.Trunc(headerLine(ws.Headers)))
+		role, self.cid, self.ident, c.RemoteAddr(), applog.Trunc(applog.Headers(ws.Headers)))
 	if !self.isHost {
 		s.toHost(packConnect(self.cid, self.ident))
 	}
@@ -221,29 +220,6 @@ func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 			s.toHost(packToHost(TypeData, self.cid, payload))
 		}
 	}
-}
-
-// headerLine renders the handshake headers in a stable order for the log.
-func headerLine(h map[string]string) string {
-	keys := make([]string, 0, len(h))
-	for k := range h {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		if b.Len() > 0 {
-			b.WriteString(" ")
-		}
-		b.WriteString(k)
-		b.WriteString("=")
-		if k == "x-pass" {
-			b.WriteString("<redacted>") // a password hash never belongs in a log
-			continue
-		}
-		b.WriteString(h[k])
-	}
-	return b.String()
 }
 
 func (s *Server) genCid() uint16 {

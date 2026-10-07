@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -295,7 +294,7 @@ func (s *Server) serve(c net.Conn) {
 	}
 	s.mu.Unlock()
 	s.opt.Log.Printf("master: game connected from %s (ident %q, headers %s)",
-		peer, ws.Ident, applog.Trunc(headerLine(ws.Headers)))
+		peer, ws.Ident, applog.Trunc(applog.Headers(ws.Headers)))
 
 	defer func() {
 		s.opt.Log.Printf("master: game session from %s ended (uid %q)", peer, sess.UserID())
@@ -377,29 +376,6 @@ func payload(cmd string, v any) string {
 		return "(not logged)"
 	}
 	return applog.Trunc(v)
-}
-
-// headerLine renders the handshake headers in a stable order for the log.
-func headerLine(h map[string]string) string {
-	keys := make([]string, 0, len(h))
-	for k := range h {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		if b.Len() > 0 {
-			b.WriteString(" ")
-		}
-		b.WriteString(k)
-		b.WriteString("=")
-		if k == "x-pass" {
-			b.WriteString("<redacted>") // a password hash never belongs in a log
-			continue
-		}
-		b.WriteString(h[k])
-	}
-	return b.String()
 }
 
 // Handle runs one command. Local lobby commands are forwarded to the host's
