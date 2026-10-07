@@ -1251,7 +1251,7 @@ int main(int argc, char **argv) {
 	check(log_contains(log, "bytecode: copy missing, regenerating") && log_contains(log, "bytecode: copy written"),
 		"shim.log records the copy being generated");
 	check(log_contains(log, "tips: patched image "), "shim.log records the tips stage");
-	check(!log_contains(log, "tips: not applied"), "the tips stage did not fall back");
+	check(!log_contains(log, "tips: refused"), "the tips stage did not refuse the image");
 
 	// 5. The kernel32 way: CreateFileW + 64 KB ReadFile chunks, handle identity.
 	h = CreateFileW(game, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
@@ -1329,6 +1329,19 @@ int main(int argc, char **argv) {
 		check(write_file(path2, fake_img, n), "wrote an hlboot.dat whose int #19 is 1");
 		check(served_untouched(path2, fake_img, n), "int constant changed: the original is served untouched");
 		check(log_contains(log, "patch: int constant #19 is 1, want 32, image left untouched"), "shim.log names the constant");
+
+		// 8c. The needle stage would apply, the tips stage (the co-op fixes)
+		//     cannot read the image (its last byte is cut): nothing is
+		//     patched, the needle-only half is never served.
+		wcscpy(dir2, scratch);
+		wcscat(dir2, L"\\fakegame-tips");
+		CreateDirectoryW(dir2, NULL);
+		wcscpy(path2, dir2);
+		wcscat(path2, L"\\hlboot.dat");
+		memcpy(fake_img, orig, n);
+		check(write_file(path2, fake_img, n - 1), "wrote an hlboot.dat cut short by one byte");
+		check(served_untouched(path2, fake_img, n - 1), "tips stage refused: the original is served untouched");
+		check(log_contains(log, "tips: refused the image, nothing patched: "), "shim.log records the refusal");
 	}
 
 	// 9. A write open is never redirected.

@@ -829,9 +829,9 @@ static void tips_capture_end(HANDLE h, HANDLE prev) {
 }
 
 // materialise_copy makes sure copy holds exactly tips(patch(source)) and
-// reports whether it may be handed out. FALSE means: use the original. The
-// tips stage (wartales-tips, structural) is best effort: if it refuses the
-// image, the copy is the needle-patched image alone.
+// reports whether it may be handed out. FALSE means: use the original. Both
+// stages are required: if the tips stage (wartales-tips, structural: every
+// co-op fix) refuses the image, nothing is patched.
 static BOOL materialise_copy(const wchar_t *source, const wchar_t *copy) {
 	unsigned char *img, *cur;
 	uint8_t *tips = NULL;
@@ -865,9 +865,13 @@ static BOOL materialise_copy(const wchar_t *source, const wchar_t *copy) {
 		img = tips;
 		n = tips_n;
 	} else {
+		// The co-op fixes live in this stage: the needle patches without
+		// them (no timeouts, unassigned players allowed) are a half-patched
+		// game, so the whole set is refused and the original handed out.
 		reason[sizeof(reason) - 1] = 0;
-		shim_log("tips: not applied: %s", (const char *)reason);
-		tips = NULL;
+		shim_log("tips: refused the image, nothing patched: %s", (const char *)reason);
+		free(img);
+		return FALSE;
 	}
 
 	cur = read_all(copy, &m);
