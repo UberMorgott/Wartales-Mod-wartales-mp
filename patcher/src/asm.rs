@@ -304,7 +304,11 @@ pub(crate) mod testutil {
                 Opcode::GetGlobal { dst, global } => {
                     assignable(code, code.globals[global.0], rt(dst))
                 }
+                Opcode::SetGlobal { global, src } => {
+                    assignable(code, rt(src), code.globals[global.0])
+                }
                 Opcode::Mov { dst, src } => assignable(code, rt(src), rt(dst)),
+                Opcode::Float { dst, .. } => is(dst, |t| matches!(t, Type::F64)),
                 Opcode::Bool { dst, .. } | Opcode::Not { dst, .. } => {
                     is(dst, |t| matches!(t, Type::Bool))
                 }
@@ -316,7 +320,11 @@ pub(crate) mod testutil {
                 // pointer into the char data and the first use is an access
                 // violation. String objects come from constant globals (str_global).
                 Opcode::String { dst, .. } => is(dst, |t| matches!(t, Type::Bytes)),
-                Opcode::Add { dst, a, b } | Opcode::Sub { dst, a, b } => {
+                Opcode::Add { dst, a, b }
+                | Opcode::Sub { dst, a, b }
+                | Opcode::Mul { dst, a, b }
+                | Opcode::SDiv { dst, a, b }
+                | Opcode::And { dst, a, b } => {
                     rt(dst) == rt(a)
                         && rt(a) == rt(b)
                         && is(dst, |t| matches!(t, Type::I32 | Type::F64))

@@ -2122,6 +2122,21 @@ mod tests {
             matches!(update.ops[goto_at + 2], Opcode::SetGlobal { global, .. } if global == issuing)
         );
 
+        // The type check is not vacuous: a float load into an i32 register fails it.
+        let mut bad = update.clone();
+        let fi = bad
+            .ops
+            .iter()
+            .position(|o| matches!(o, Opcode::Float { .. }))
+            .unwrap();
+        let i32_reg = Reg(bad.regs.iter().position(|t| *t == p.t.i32_).unwrap() as u32);
+        if let Opcode::Float { dst, .. } = &mut bad.ops[fi] {
+            *dst = i32_reg;
+        }
+        let n = bad.ops.len();
+        let back_ref = &back;
+        assert!(std::panic::catch_unwind(|| check_types(back_ref, &bad, 0..n)).is_err());
+
         // A second pass finds it applied and leaves the image alone.
         let mut again = read(&patched);
         assert!(plan(&again).is_err());
