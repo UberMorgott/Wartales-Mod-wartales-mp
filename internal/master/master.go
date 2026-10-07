@@ -445,12 +445,6 @@ func (s *Server) uplink() *link.Client {
 	return s.client
 }
 
-func (s *Server) linked() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.client != nil
-}
-
 // localSession returns the game's connection, if any: where pushes from the
 // host's master go while we are a guest.
 func (s *Server) localSession() *session {

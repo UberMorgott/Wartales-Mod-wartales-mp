@@ -285,12 +285,18 @@ type lobbyArgs struct {
 func (s *Server) lobbyCommand(cmd string, args json.RawMessage, p Peer) (any, error) {
 	if !p.Remote() && cmd != "lobby/resolveShortCode" {
 		cl := s.uplink()
-		if raw, ok, err := s.forward(cmd, args); ok {
+		raw, ok, err := s.forward(cmd, args)
+		switch {
+		case !ok:
+		case err == nil && cmd == "lobby/infoInvite" && !isLobbyInfo(raw):
+			// Not this host's invitation: it leads somewhere else, so the
+			// link goes and the invitation is resolved afresh below.
+			s.dropLink(cl)
+		case err == nil && cmd == "lobby/infoInvite":
+			return s.fromHost(cl, raw), nil
+		default:
 			if err == nil && cmd == "lobby/join" {
 				s.logHostTransport(raw)
-			}
-			if err == nil && cmd == "lobby/infoInvite" {
-				raw = s.fromHost(cl, raw)
 			}
 			return raw, err
 		}
@@ -908,13 +914,17 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 		return s.lobbyInfo(id)
 	}
 
-	if s.linked() {
-		cl := s.uplink()
+	if cl := s.uplink(); cl != nil {
 		raw, _, err := s.forward("lobby/resolveShortCode", args)
 		if err != nil {
 			return raw, err
 		}
-		return s.fromHost(cl, raw), nil
+		if isLobbyInfo(raw) {
+			return s.fromHost(cl, raw), nil
+		}
+		// The host we are linked to does not know this code: it is another
+		// host's, so the code's own routes are tried instead.
+		s.dropLink(cl)
 	}
 	c, err := code.DecodeAny(a.ShortCode)
 	if err != nil {
@@ -945,9 +955,13 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 			return nil, false
 		}
 		raw, err := cl.Call("lobby/resolveShortCode", args)
+		if err == nil && !isLobbyInfo(raw) {
+			err = errors.New("the host does not know this join code")
+		}
 		if err != nil {
 			// Connected, but not to a master that takes this code: a stale
-			// address now owned by someone else, a refused key, or a dead host.
+			// address now owned by someone else, a refused key, a dead host,
+			// or one that answered "no such lobby".
 			s.opt.Log.Printf("master: route %s answered the probe with an error, dropping it: %v", what, err)
 			failures = append(failures, what+": "+err.Error())
 			s.dropLink(cl)
@@ -994,6 +1008,15 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 		}
 	}
 	return nil, wireErrf("Cannot reach the host: %s", strings.Join(failures, "; "))
+}
+
+// isLobbyInfo reports whether a host's answer is a lobby, not the null that
+// means "no such lobby".
+func isLobbyInfo(raw json.RawMessage) bool {
+	var info struct {
+		ID string `json:"id"`
+	}
+	return json.Unmarshal(raw, &info) == nil && info.ID != ""
 }
 
 // dialDirect connects to the host's endpoint within DefaultDirectTimeout
