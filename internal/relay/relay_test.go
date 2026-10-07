@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // handshake opens a relay connection over a pipe the way the game does and
@@ -47,6 +48,21 @@ func handshake(t *testing.T, s *Server, ident, pass string) (c net.Conn, br *buf
 
 func quiet() *Server { return New(log.New(io.Discard, "", 0)) }
 
+// waitHost waits until the relay has published its host: the handshake's 101
+// reaches the peer before Serve registers the connection.
+func waitHost(t *testing.T, s *Server) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		s.mu.Lock()
+		up := s.hostCid != 0
+		s.mu.Unlock()
+		if up {
+			return
+		}
+	}
+	t.Fatal("the host was never published")
+}
+
 // Two hosts racing through the handshake: one of them is the host, the other
 // is dropped, and nothing is published before it is authenticated.
 func TestOneHostOutOfConcurrentHandshakes(t *testing.T) {
@@ -65,6 +81,7 @@ func TestOneHostOutOfConcurrentHandshakes(t *testing.T) {
 		})
 	}
 	wg.Wait()
+	waitHost(t, s)
 	s.mu.Lock()
 	hosts := 0
 	for _, c := range s.clients {
@@ -99,6 +116,7 @@ func TestUnauthenticatedGuestIsNeverPublished(t *testing.T) {
 		t.Fatal("host refused")
 	}
 	go func() { _, _ = io.Copy(io.Discard, hbr) }()
+	waitHost(t, s)
 	c, _, ok, done = handshake(t, s, "guest", "wrong")
 	if ok {
 		t.Fatal("a guest with a wrong password was accepted")

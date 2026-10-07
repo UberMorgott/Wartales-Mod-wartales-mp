@@ -54,6 +54,7 @@ func TestStalledGuestDoesNotBlockOthers(t *testing.T) {
 	if !ok {
 		t.Fatal("host refused")
 	}
+	waitHost(t, s)
 	stalled, _, ok, sdone := handshake(t, s, "stalled", s.SlavePW) // never read again
 	if !ok {
 		t.Fatal("guest refused")
