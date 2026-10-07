@@ -25,6 +25,7 @@ mod debrief_cure;
 mod debrief_diag;
 mod debrief_enable;
 mod diag;
+mod dialog_recruit;
 mod dlc_untouched;
 mod follow;
 mod force_leave;
@@ -81,6 +82,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     coop_gates::patch_coop_gates(&mut code);
     force_leave::patch_force_leave(&mut code);
     npc_talk::patch_npc_talk(&mut code);
+    dialog_recruit::patch_dialog_recruit(&mut code);
     camp_talk::patch_camp_talk(&mut code);
     camp_any_unit::patch_camp_any_unit(&mut code);
     camp_choice::patch_camp_choice(&mut code);

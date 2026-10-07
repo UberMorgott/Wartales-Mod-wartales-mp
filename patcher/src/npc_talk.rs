@@ -21,14 +21,19 @@
 //   other = false;
 //   for (p in game.getPlayerLocked(false)) {    // connected && lockedWith != null
 //       lw = p.lockedWith;
-//       if (lw == this) return true;             // same NPC: still refused
+//       if (lw == this) {                        // same NPC: still refused,
+//           if (p == game.me || this.getRecruitCost() == null) return true;
+//           other = true; continue;              // but another player reading a
+//       }                                        // recruit's sheet counts as below
 //       if (!Std.isOfType(lw, ent.p.Npc)) return true;  // chest, craft, activity...
 //       other = true;                            // busy with ANOTHER NPC
 //   }
 //   if (other) for (w in game.mode.windows) if (Std.isOfType(w, ui.win.Dialog)) return true;
 //   return false;
 //
-// Kept: a lock on the same NPC (two players never open it at once), every lock
+// Kept: a lock on the same NPC (two players never open it at once) except
+// another player's lock on a recruit (getRecruitCost != null: Npc.inspect of a
+// merc; the dialog then lets the Recruit choice through, dialog_recruit.rs), every lock
 // on a non-NPC entity (chest, craft, activity, garrison...), and every NPC lock
 // while a dialog window exists (the dialog's own inspect / customize choices lock
 // the dialog NPC; a second dialog must not start then). Only another player's
@@ -59,6 +64,9 @@ struct Plan {
     a_raw: (RefField, RefType),
     bp_t: RefType,
     bp_locked: (RefField, RefType),
+    g_me: (RefField, RefType),
+    recruit_cost: RefFun,
+    cost_t: RefType,
     g_mode: (RefField, RefType),
     m_windows: RefField,
     is_multi: RefFun,
@@ -88,6 +96,15 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let bp_locked = field(code, bp_t, "lockedWith")?;
     if !is_sub(code, npc_t, bp_locked.1) {
         bail!("ent.p.Npc is not a BasePlayer.lockedWith type");
+    }
+    let g_me = field(code, game_t, "me")?;
+    if g_me.1 != bp_t {
+        bail!("Game.me is not an ent.BasePlayer");
+    }
+    let recruit_cost = method(code, npc_t, "getRecruitCost")?.findex;
+    let (rc_args, cost_t) = sig(code, recruit_cost)?;
+    if rc_args != [npc_t] {
+        bail!("unexpected Npc.getRecruitCost signature");
     }
     let g_mode = field(code, game_t, "mode")?;
     let (m_windows, mw_t) = field(code, g_mode.1, "windows")?;
@@ -174,6 +191,9 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         a_raw,
         bp_t,
         bp_locked,
+        g_me,
+        recruit_cost,
+        cost_t,
         g_mode,
         m_windows,
         is_multi,
@@ -203,11 +223,13 @@ fn add_locked(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         r.r(p.bp_t),
         r.r(p.bp_locked.1),
     );
-    let (nc, mode, w, dc) = (
+    let (nc, mode, w, dc, me, cost) = (
         r.r(p.npc_cls_t),
         r.r(p.g_mode.1),
         r.r(p.win_t),
         r.r(p.dlg_cls_t),
+        r.r(p.g_me.1),
+        r.r(p.cost_t),
     );
     let mut a = Asm::new();
     a.op(Opcode::Call1 {
@@ -277,7 +299,7 @@ fn add_locked(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
             b: npc,
             offset: 0,
         },
-        "busy",
+        "same",
     );
     a.op(Opcode::GetGlobal {
         dst: nc,
@@ -290,6 +312,38 @@ fn add_locked(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         arg1: lw,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "busy");
+    a.op(Opcode::Bool {
+        dst: other,
+        value: ValBool(true),
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "players");
+    // Same NPC: another player's lock on a recruit counts as another NPC's.
+    a.label("same");
+    a.op(Opcode::Field {
+        dst: me,
+        obj: game,
+        field: p.g_me.0,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: pl,
+            b: me,
+            offset: 0,
+        },
+        "busy",
+    );
+    a.op(Opcode::Call1 {
+        dst: cost,
+        fun: p.recruit_cost,
+        arg0: npc,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: cost,
+            offset: 0,
+        },
+        "busy",
+    );
     a.op(Opcode::Bool {
         dst: other,
         value: ValBool(true),

@@ -466,7 +466,7 @@ struct Plan {
 }
 
 /// The vtable slot of method `name` declared (or overridden) by class `t`.
-fn slot(code: &Bytecode, t: RefType, name: &str) -> Result<RefField> {
+pub(crate) fn slot(code: &Bytecode, t: RefType, name: &str) -> Result<RefField> {
     let o = obj(code, t)?;
     let p = o
         .protos
