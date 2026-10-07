@@ -55,6 +55,32 @@ func (l *lobby) idOf(p Peer) string {
 	return p.UserID()
 }
 
+// heldBy reports whether p speaks for member m. An id alone proves nothing: a
+// guest names its own Session id in its hello, so it could name the owner's.
+// A remote member is the link it joined over; the local game is whichever of
+// its master sockets is talking, so any local session holds a local member,
+// and no remote peer ever does. Lock held.
+func (m *member) heldBy(p Peer) bool {
+	if m.peer == nil {
+		return false
+	}
+	if m.peer == p {
+		return true
+	}
+	return !p.Remote() && !m.peer.Remote()
+}
+
+// memberOf returns the member p speaks for in this lobby, or nil. Lock held.
+func (l *lobby) memberOf(p Peer) *member {
+	id := l.idOf(p)
+	for _, u := range l.users {
+		if u.ID == id && u.heldBy(p) {
+			return u
+		}
+	}
+	return nil
+}
+
 type store struct {
 	srv *Server
 
@@ -432,6 +458,14 @@ func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 	found := false
 	for _, u := range l.users {
 		if u.ID == id {
+			// A guest reconnecting over a new link takes its slot over; the
+			// local game's slot is never taken by a remote peer, whatever id
+			// that peer claims.
+			if p.Remote() && u.peer != nil && !u.peer.Remote() {
+				s.lobbies.mu.Unlock()
+				s.opt.Log.Printf("master: %s claimed the local player's id %s in lobby %s; refused", p.Name(), id, l.id)
+				return nil, wireErrf("Already in lobby")
+			}
 			u.Data, u.peer, u.Name, found = a.Data, p, p.Name(), true
 			break
 		}
@@ -505,7 +539,7 @@ func (s *Server) lobbySetData(a lobbyArgs, p Peer) error {
 		return wireErrf("Invalid data")
 	}
 	s.lobbies.mu.Lock()
-	if l.owner != l.idOf(p) {
+	if m := l.memberOf(p); m == nil || m.ID != l.owner {
 		s.lobbies.mu.Unlock()
 		return wireErrf("Cannot set data if not owner")
 	}
@@ -523,13 +557,14 @@ func (s *Server) lobbySetUserData(a lobbyArgs, p Peer) error {
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
-	id := l.idOf(p)
 	s.lobbies.mu.Lock()
-	for _, u := range l.users {
-		if u.ID == id {
-			u.Data = a.Data
-		}
+	m := l.memberOf(p)
+	if m == nil {
+		s.lobbies.mu.Unlock()
+		return wireErrf("Not in lobby %s", a.ID)
 	}
+	m.Data = a.Data
+	id := m.ID
 	s.lobbies.mu.Unlock()
 	s.lobbies.broadcast(l, p, "lobby/setUserData", map[string]any{"id": l.id, "uid": id, "data": a.Data})
 	return nil
@@ -556,12 +591,17 @@ func (s *Server) lobbyChat(a lobbyArgs, p Peer) error {
 	if l == nil {
 		return wireErrf("Unknown lobby %s", a.ID)
 	}
-	id := l.idOf(p)
 	type delivery struct {
 		to  Peer
 		msg json.RawMessage
 	}
 	s.lobbies.mu.Lock()
+	m := l.memberOf(p)
+	if m == nil {
+		s.lobbies.mu.Unlock()
+		return wireErrf("Not in lobby %s", a.ID)
+	}
+	id := m.ID
 	to := make([]delivery, 0, len(l.users))
 	for _, u := range l.users {
 		if u.peer == nil || u.ID == id {
@@ -625,7 +665,7 @@ func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
 	// echoing back an arbitrary id would put one the lobby's transport does
 	// not expect into every LobbyInfo we serve.
 	s.lobbies.mu.Lock()
-	if l.owner != l.idOf(p) {
+	if m := l.memberOf(p); m == nil || m.ID != l.owner {
 		s.lobbies.mu.Unlock()
 		return wireErrf("Cannot transfer if not owner")
 	}

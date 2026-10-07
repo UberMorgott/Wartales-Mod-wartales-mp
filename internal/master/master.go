@@ -21,6 +21,7 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/modver"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
 	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
+	"github.com/UberMorgott/wartales-mp/internal/uid"
 	"github.com/UberMorgott/wartales-mp/internal/wsx"
 )
 
@@ -176,12 +177,19 @@ func (s *Server) ServeLink(c net.Conn) {
 
 // ServeSDRLink handles one guest's proxy-link stream over the SDR bridge
 // (host role, SDR transport). Anyone who knows our SteamID can open a stream,
-// so the hello must carry the key from our join code.
+// so the hello must carry the key from our join code. Steam authenticated the
+// stream's peer, and an SDR lobby knows its members by Steam id, so a hello
+// claiming anybody else's Steam id is refused: it would take that player's
+// place.
 func (s *Server) ServeSDRLink(c net.Conn, peer uint64) {
 	s.serveLink(c, "sdr-link", func(u link.User) error {
 		if u.Key != s.opt.LinkKey {
 			s.opt.Log.Printf("sdr-link: stream from %d refused: wrong join code key", peer)
 			return wireErrf("Invalid join code")
+		}
+		if id64, ok := uid.SteamID64(u.Steam); u.Steam != "" && (!ok || id64 != peer) {
+			s.opt.Log.Printf("sdr-link: stream from %d refused: its hello claims Steam id %q", peer, u.Steam)
+			return wireErrf("Steam id does not match the connection")
 		}
 		return nil
 	})
