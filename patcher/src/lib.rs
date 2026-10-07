@@ -460,6 +460,35 @@ fn new_reg(f: &mut Function, t: RefType) -> Reg {
     Reg((f.regs.len() - 1) as u32)
 }
 
+/// `Game.dispose`'s function index, when it is `(Game) -> Void` and no jump
+/// targets its op 0 (where `forget_on_game_dispose` inserts).
+fn game_dispose_fi(code: &Bytecode) -> Result<usize> {
+    let game_t = obj_type(code, "Game")?;
+    let gd = method(code, game_t, "dispose")?;
+    let t = gd.t.as_fun(code).context("Game.dispose type")?;
+    if t.args[..] != [game_t] || !matches!(code.types[t.ret.0], Type::Void) {
+        bail!("Game.dispose: unexpected signature");
+    }
+    if (0..gd.ops.len()).any(|i| jump_targets(gd, i).contains(&0)) {
+        bail!("Game.dispose: a jump targets op 0");
+    }
+    fun_index(code, gd.findex)
+}
+
+/// At Game.dispose op 0: `g = null` for each of `globals` (nullable types), so
+/// state a pass keeps across frames never outlives its game.
+fn forget_on_game_dispose(code: &mut Bytecode, fi: usize, globals: &[RefGlobal]) {
+    let types: Vec<RefType> = globals.iter().map(|g| code.globals[g.0]).collect();
+    let f = &mut code.functions[fi];
+    let mut ops = vec![];
+    for (&global, t) in globals.iter().zip(types) {
+        let r = new_reg(f, t);
+        ops.push(Opcode::Null { dst: r });
+        ops.push(Opcode::SetGlobal { global, src: r });
+    }
+    insert_ops(f, 0, ops);
+}
+
 // ---------- bytecode editing ----------
 
 /// Insert `new_ops` before original op index `at`, keeping every jump target,

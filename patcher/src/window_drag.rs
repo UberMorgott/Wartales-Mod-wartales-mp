@@ -783,6 +783,7 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         rs_my0: add_global(code, c.f64_t),
         size: str_global(code, c.str_t, SIZE_PREFIX),
     };
+    let dispose_fi = game_dispose_fi(code)?;
     let report = add_report(code, c, &g)?;
     let save = add_save(
         code,
@@ -836,6 +837,13 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
     ] {
         name_fn(code, f, n);
     }
+    // Nothing of a drag (nor the last pushed object, kept for a double push)
+    // outlives its game. Last: an error above leaves Game.dispose untouched.
+    forget_on_game_dispose(
+        code,
+        dispose_fi,
+        &[g.obj, g.follow, g.scene, g.last, g.rs_cont],
+    );
     Ok(DragApi { panel, win_install })
 }
 
@@ -4577,8 +4585,10 @@ mod tests {
         let n = orig.functions.len();
         assert_eq!(back.functions.len(), n + API_FNS);
         assert_eq!(back.types[..orig.types.len()], orig.types[..]);
+        // the drag state goes with the game: Game.dispose clears it
+        let gd = crate::game_dispose_fi(&orig).unwrap();
         for i in 0..n {
-            let want = i == wp.fi || i == pp.fi;
+            let want = i == wp.fi || i == pp.fi || i == gd;
             assert_eq!(
                 !same(&orig.functions[i], &back.functions[i]),
                 want,

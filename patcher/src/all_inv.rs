@@ -4850,6 +4850,8 @@ mod tests {
             u.net_pick_fi,
             u.click_fi,
             u.slot_drop_fi,
+            // window_drag's API: its drag state goes with the game
+            crate::game_dispose_fi(&orig).unwrap(),
         ];
         for i in 0..n {
             assert_eq!(

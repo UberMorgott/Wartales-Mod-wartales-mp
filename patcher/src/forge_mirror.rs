@@ -199,17 +199,20 @@ fn tier_grades_match(code: &Bytecode, fb: &Function, n_tiers: usize) -> Result<(
     let sounds = [SND_PERFECT, SND_GOOD, SND_BAD];
     for (k, &off) in offsets.iter().enumerate() {
         let from = (at as i64 + 1 + off as i64) as usize;
-        let grade = fb
-            .ops
-            .get(from..)
-            .unwrap_or_default()
-            .iter()
-            .find_map(|o| match o {
-                Opcode::GetGlobal { global, .. } => {
-                    const_str(code, *global).and_then(|v| sounds.iter().position(|s| *s == v))
+        // The case's straight-line head, up to its first jump or return: the
+        // sound it loads there is the one it plays.
+        let mut grade = None;
+        for i in from..fb.ops.len() {
+            if let Opcode::GetGlobal { global, .. } = fb.ops[i] {
+                grade = const_str(code, global).and_then(|v| sounds.iter().position(|s| *s == v));
+                if grade.is_some() {
+                    break;
                 }
-                _ => None,
-            });
+            }
+            if !jump_targets(fb, i).is_empty() || matches!(fb.ops[i], Opcode::Ret { .. }) {
+                break;
+            }
+        }
         if grade != Some(k.min(2)) {
             bail!("feedbackOnAction: EScoreTier case {k} is not the grade the mirror plays");
         }
@@ -1389,6 +1392,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 4]> {
 
     // ping__impl: if (forgeRecv(this, x, y, z, player)) return;
     mirror::hook_ping(code, p, recv);
+    forget_on_game_dispose(code, p.dispose_fi, &[st.idle]);
     // The three senders, at the entry of each ForgeAction step.
     let hook = |f: &mut Function, kind, arg: Option<Reg>, shard: Option<Reg>| {
         let mut nr = |t: RefType| {
@@ -1503,7 +1507,7 @@ mod tests {
         let back = read(&patched);
         let n = orig.functions.len();
         assert_eq!(back.functions.len(), n + 5);
-        let sites = [p.init_fi, p.done_fi, p.end_fi, p.impl_fi];
+        let sites = [p.init_fi, p.done_fi, p.end_fi, p.impl_fi, p.dispose_fi];
         for i in 0..n {
             assert_eq!(
                 !same(&orig.functions[i], &back.functions[i]),

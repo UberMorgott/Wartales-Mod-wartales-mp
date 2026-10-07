@@ -22,8 +22,9 @@
 //      and a later click still acts: a button the game re-uses while its window
 //      stays open (rest after a cancelled confirm, tutorial pages) keeps working.
 //      A third global holds the newest record's time: once it is 5 s old no
-//      record can drop a click, so the next click starts both maps afresh and
-//      no button data (with the window and game behind it) is kept longer.
+//      record can drop a click, so the next click starts both maps afresh;
+//      Game.dispose (op 0) drops both maps, so no button data (with the window
+//      and game behind it) outlives its game.
 //      While the host's mode-switch barrier runs (Controller.lockSyncMode, or
 //      clients in waitLocks) every wait-all click is dropped, however late:
 //      syncLeaveMode/syncEnterMode queue a second request behind the first and
@@ -157,6 +158,8 @@ struct ButtonPlan {
     pad_fi: usize,
     pad_at: usize,
     on_click_f: RefField,
+    /// Game.dispose: the repeat guard's maps go with their game.
+    dispose_fi: usize,
 }
 
 fn plan_button(code: &Bytecode) -> Result<ButtonPlan> {
@@ -385,6 +388,7 @@ fn plan_button(code: &Bytecode) -> Result<ButtonPlan> {
         pad_fi,
         pad_at,
         on_click_f,
+        dispose_fi: game_dispose_fi(code)?,
     })
 }
 
@@ -659,6 +663,7 @@ fn apply_button(code: &mut Bytecode, p: &ButtonPlan) {
         hlbc::types::RefGlobal(code.globals.len() - 1)
     });
     let guard = repeat_guard(code, p, globals);
+    forget_on_game_dispose(code, p.dispose_fi, &globals[..2]);
     let n = guard.len();
     let f = &mut code.functions[p.click_fi];
     insert_ops(f, p.click_at + 1, guard);
@@ -1175,7 +1180,7 @@ mod tests {
             plan_window_lock(&orig).expect("window lock"),
             plan_camp_window(&orig).expect("camp window"),
         ];
-        let mut touched = vec![bp.click_fi, bp.hold_fi, bp.pad_fi];
+        let mut touched = vec![bp.click_fi, bp.hold_fi, bp.pad_fi, bp.dispose_fi];
         touched.extend(reqs.iter().map(|r| r.fi));
         touched.extend(reads.iter().map(|r| r.fi));
 

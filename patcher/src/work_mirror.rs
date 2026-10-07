@@ -662,6 +662,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 5]> {
     let recv = add_recv(code, p, &g, worker, (idle, idle_of))?;
 
     mirror::hook_ping(code, p, recv);
+    forget_on_game_dispose(code, p.dispose_fi, &[g.idle]);
     // senders at the entry of the four window steps: workSend(this.game, this.activity, code, kind)
     let ints = [
         (int_const(code, 0), int_const(code, 0)),
@@ -775,7 +776,7 @@ mod tests {
         let n = orig.functions.len();
         assert_eq!(back.functions.len(), n + 6);
         let mut sites = p.sites.to_vec();
-        sites.extend([p.cancel_fi, p.impl_fi]);
+        sites.extend([p.cancel_fi, p.impl_fi, p.dispose_fi]);
         for i in 0..n {
             assert_eq!(
                 !same(&orig.functions[i], &back.functions[i]),

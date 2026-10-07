@@ -24,7 +24,8 @@
 //     worker's current anim; a hit (1) reads it, or takes the current anim
 //     when the start was missed (joined late); the end (2) reads and forgets
 //     it, so a later activity of that worker starts afresh. Two players
-//     working at once each keep their own;
+//     working at once each keep their own; Game.dispose drops the map, so a
+//     worker whose end was missed is not kept past its game;
 //   - `<mirror>Idle({e, anim})`: that anim, looped, on a worker still in the
 //     scene (the onEnd of a one-shot anim, bound to the worker and the idle
 //     it had when the anim started).
@@ -105,6 +106,8 @@ pub(crate) struct Base {
     /// Controller.ping__impl and the register its (last) Ret returns.
     pub(crate) impl_fi: usize,
     pub(crate) impl_ret: Reg,
+    /// Game.dispose: the per-worker idle maps go with their game.
+    pub(crate) dispose_fi: usize,
 }
 
 /// The camp side of the worker lookup, read from Activity.setUnit__impl's loop.
@@ -394,6 +397,7 @@ pub(crate) fn base(code: &Bytecode) -> Result<Base> {
         str_add,
         impl_fi,
         impl_ret,
+        dispose_fi: game_dispose_fi(code)?,
     })
 }
 
