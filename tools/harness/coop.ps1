@@ -62,6 +62,8 @@ Add-Type -Namespace Harness -Name Win -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+[DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
 public struct RECT { public int Left, Top, Right, Bottom; }
 public struct POINT { public int X, Y; }
 '@
@@ -70,6 +72,20 @@ Add-Type -AssemblyName System.Drawing
 # pixels. Unaware, a 150 % display gave logical rects, so shots were cropped
 # to the top-left two thirds and clicks missed.
 [void][Harness.Win]::SetProcessDpiAwarenessContext([IntPtr]-4)
+
+# Foreground focus can be refused (another app is active), so the game window is
+# made topmost for the action; true only when it really is on top at its centre,
+# so a shot or click never lands on another app's window.
+function Raise-Window([IntPtr]$hw, [Harness.Win+RECT]$r) {
+    [void][Harness.Win]::SetWindowPos($hw, [IntPtr]-1, 0, 0, 0, 0, 0x43) # TOPMOST, NOMOVE|NOSIZE|SHOWWINDOW
+    [void][Harness.Win]::SetForegroundWindow($hw)
+    Start-Sleep -Milliseconds 400
+    $c = New-Object Harness.Win+POINT
+    $c.X = [int](($r.Left + $r.Right) / 2); $c.Y = [int](($r.Top + $r.Bottom) / 2)
+    $top = [Harness.Win]::GetAncestor([Harness.Win]::WindowFromPoint($c), 2) # GA_ROOT
+    return $top -eq $hw
+}
+function Lower-Window([IntPtr]$hw) { [void][Harness.Win]::SetWindowPos($hw, [IntPtr]-2, 0, 0, 0, 0, 0x13) } # NOTOPMOST, NOACTIVATE
 
 function Instance-No([string]$i) { return [array]::IndexOf(@('A', 'B', 'C', 'D'), $i.ToUpper()) + 1 }
 
@@ -229,13 +245,14 @@ switch ($Action) {
             $cx = $X - ($o.X - $r.Left); $cy = $Y - ($o.Y - $r.Top)
             # A real click (foreground + cursor + button), as a player's; posted
             # WM_LBUTTON* messages do not reach the game's input.
-            [void][Harness.Win]::SetForegroundWindow($hw)
-            Start-Sleep -Milliseconds 150
+            if ($X -lt 0 -or $Y -lt 0 -or $X -ge ($r.Right - $r.Left) -or $Y -ge ($r.Bottom - $r.Top)) { Write-Host "${i}: $X,$Y is outside the window, click skipped"; continue }
+            if (-not (Raise-Window $hw $r)) { Lower-Window $hw; Write-Host "${i}: window not on top, click skipped"; continue }
             [void][Harness.Win]::SetCursorPos($o.X + $cx, $o.Y + $cy)
             Start-Sleep -Milliseconds 120
             [Harness.Win]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero) # LEFTDOWN
             Start-Sleep -Milliseconds 80
             [Harness.Win]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero) # LEFTUP
+            Lower-Window $hw
             Write-Host "${i}: click at client $cx,$cy"
         }
     }
@@ -252,12 +269,12 @@ switch ($Action) {
             if ($w -le 0 -or $hgt -le 0) { Write-Host "$i window has no size"; continue }
             # Screen capture of the foreground window: PrintWindow returns black
             # for the world map (and for some UI) on this DX swap chain.
-            [void][Harness.Win]::SetForegroundWindow($hw)
-            Start-Sleep -Milliseconds 400
+            if (-not (Raise-Window $hw $r)) { Lower-Window $hw; Write-Host "$i window not on top, no shot"; continue }
             $bmp = New-Object Drawing.Bitmap $w, $hgt
             $g = [Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
             $g.Dispose()
+            Lower-Window $hw
             $f = Join-Path $run ("{0}-{1}{2}.png" -f $i, (Get-Date -Format 'HHmmss'), $(if ($Tag) { "-$Tag" } else { '' }))
             $bmp.Save($f, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
             Write-Host "$i screenshot: $f (${w}x$hgt)"

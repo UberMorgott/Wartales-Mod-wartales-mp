@@ -36,7 +36,11 @@
 //       start           LoadMultiGame.startGame() of the open lobby window.
 //       backup <n>      onClick of Pause.backups[n] (the pause menu's backup
 //                       button n, a st.SaveKey) of the open Pause window.
-//     dir+"ack.txt" = "<seq> ok|dispatched|unknown|nogame|nosave|nowindow", and
+//       give <n>        host fixture: Unit.swapOwner (what the vanilla Transfer
+//                       button, PlayersPanel.transfer, calls) of the last n army
+//                       units it owns (army[0] kept) to the first other player
+//                       of state.players; ack "noplayer" without one.
+//     dir+"ack.txt" = "<seq> ok|dispatched|unknown|nogame|nosave|nowindow|noplayer", and
 //     a shim.log line.
 //   An exception: "harness: error <exc>" and ack "<seq> error".
 //
@@ -156,6 +160,8 @@ struct Ctx {
     user_make: RefFun,
     get_user_fn: RefFun,
     save_player: RefField,
+    save_file: RefField,
+    str_len: RefField,
     game_g: RefGlobal,
     game_cls_t: RefType,
     game_inst: RefField,
@@ -223,6 +229,14 @@ struct Ctx {
     battle_player_turn: RefField,
     state_t: RefType,
     army: RefField,
+    /// GameState.players (hxbit proxy), Unit.swapOwner (the vanilla Transfer
+    /// button's call, PlayersPanel.transfer), BasePlayer.inventory.
+    state_players: RefField,
+    /// GameState.getUnits(?filter: ref<i32>), called with a null filter.
+    get_units: RefFun,
+    ref_i32_t: RefType,
+    swap_owner: RefFun,
+    player_inv: RefField,
     arr_len: RefField,
     arr_arr: (RefField, RefType),
     game_ui: (RefField, RefType),
@@ -436,6 +450,10 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
     let save_header = field_of_virtual(code, load_current.1, "header")?;
     let header_multi = field_of_virtual(code, save_header.1, "multi")?;
     let save_player = field_of_virtual(code, save_header.1, "playerId")?;
+    let save_file = field_of_virtual(code, load_current.1, "file")?;
+    if save_file.1 != str_t {
+        bail!("save info file is not a String");
+    }
     if save_player.1 != str_t {
         bail!("save header playerId is not a String");
     }
@@ -515,6 +533,13 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
     let debrief = field(code, debrief_win_t, "debrief")?;
     let inv_t = obj_type(code, "st.Inventory")?;
     let loot = typed(code, debrief.1, "loot", inv_t)?;
+    let gu = method(code, state_t, "getUnits")?;
+    let get_units = gu.findex;
+    let ref_i32_t = *fun_args(code, gu).get(1).context("getUnits: no filter")?;
+    if !matches!(code.types[ref_i32_t.0], Type::Ref(x) if x == i32_t) {
+        bail!("getUnits: filter is not a ref<i32>");
+    }
+    want_sig(code, get_units, &[state_t, ref_i32_t], arr_t, "getUnits")?;
     let f = |t: RefType, n: &str| typed(code, t, n, f64_t);
     Ok(Ctx {
         void_t,
@@ -548,6 +573,8 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         user_make,
         get_user_fn: gu_findex,
         save_player: save_player.0,
+        save_file: save_file.0,
+        str_len: typed(code, str_t, "length", i32_t)?,
         game_g,
         game_cls_t,
         game_inst,
@@ -596,7 +623,8 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         unit_name: typed(code, unit_t, "name", str_t)?,
         unit_ap: typed(code, unit_t, "aptitudePoints", i32_t)?,
         unit_owner: (typed(code, unit_t, "owner", player_t)?, player_t),
-        player_name: typed(code, player_t, "name", str_t)?,
+        // the player id: both harness players share one Steam name
+        player_name: typed(code, player_t, "user", str_t)?,
         player_connected: typed(code, player_t, "connected", bool_t)?,
         bunit_t,
         bunit_data: typed(code, bunit_t, "data", unit_t)?,
@@ -610,6 +638,11 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         battle_player_turn: typed(code, battle_t, "isPlayerTurn", bool_t)?,
         state_t,
         army: typed(code, state_t, "army", arr_t)?,
+        state_players: typed(code, state_t, "players", proxy_t)?,
+        get_units,
+        ref_i32_t,
+        swap_owner: mfn(unit_t, "swapOwner", &[unit_t, player_t], void_t)?,
+        player_inv: typed(code, player_t, "inventory", inv_t)?,
         arr_len: typed(code, arr_t, "length", i32_t)?,
         arr_arr,
         game_ui,
@@ -891,6 +924,9 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_start = gs("start");
     let s_slot = gs("slot");
     let s_backup = gs("backup ");
+    let s_give = gs("give ");
+    let s_noplayer = gs("noplayer");
+    let s_hostlog = gs("harness: host save ");
     let s_ok = gs("ok");
     let s_dispatched = gs("dispatched");
     let s_unknown = gs("unknown");
@@ -945,6 +981,9 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let mode = r.r(c.g.mode.1);
     let host = r.r(c.g.host.1);
     let me = r.r(c.g.me.1);
+    let oth = r.r(c.g.me.1);
+    let cnt = r.r(c.i32_t);
+    let rf = r.r(c.ref_i32_t);
     let lcls = r.r(c.lobby.1);
     let lob = r.r(c.lobby.3);
     let lst = r.r(c.lobby_state.1);
@@ -1155,7 +1194,36 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.if_null(g, "host_list");
     a.gg(lmode, c.load_multi_mode);
     a.label("host_list");
+    // PREFS.admin forced around the listing: a non-admin loadGames drops every
+    // save whose header has cheatAllow, i.e. each fixture saved after a console
+    // cheat. Restored after (the handler restores it when the call throws).
+    a.gg(mcls, c.main_g);
+    a.fld(prefs, mcls, c.prefs.0);
+    a.op(Opcode::NullCheck { reg: prefs });
+    a.fld(old, prefs, c.admin);
+    a.op(Opcode::SetGlobal {
+        global: admin_g,
+        src: old,
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetGlobal {
+        global: pending_g,
+        src: b,
+    });
+    a.setf(prefs, c.admin, b);
     a.call(list, c.load_games, &[lmode]);
+    a.setf(prefs, c.admin, old);
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::SetGlobal {
+        global: pending_g,
+        src: b,
+    });
     a.if_null(list, "ack");
     a.fld(n, list, c.arr_len);
     a.int(kk, k1);
@@ -1169,12 +1237,62 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     );
     a.fld(arr, list, c.arr_arr.0);
     a.int(ix, k0);
+    // `host <name>`: the first listed save whose file contains <name>
+    // (the list is newest first; autosaves lead it), else the first one.
+    a.int(kk, k5);
+    a.call(s, c.substr, &[rest, kk, ni]);
+    a.fld(i, s, c.str_len);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JEq {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "host_pick",
+    );
+    a.loop_head("host_find");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.op(Opcode::ToVirtual { dst: cur, src: d });
+    a.if_null(cur, "host_find");
+    a.fld(s2, cur, c.save_file);
+    a.if_null(s2, "host_find");
+    a.call(i, c.index_of, &[s2, s, ni]);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JSLt {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "host_find",
+    );
+    a.op(Opcode::Decr { dst: ix });
+    a.label("host_pick");
     a.op(Opcode::GetArray {
         dst: d,
         array: arr,
         index: ix,
     });
     a.op(Opcode::ToVirtual { dst: cur, src: d });
+    a.fld(s2, cur, c.save_file);
+    a.gg(s, s_hostlog);
+    a.call(s, c.add, &[s, s2]);
+    a.op(Opcode::Mov { dst: d, src: s });
+    a.call(void, c.println, &[d]);
     a.op(Opcode::New { dst: lw });
     a.call(void, c.load_ctor, &[lw, lmode]);
     a.setf(lw, c.load_current.0, cur);
@@ -1289,6 +1407,108 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("ack");
     a.label("not_backup");
 
+    // verb: give <n>  (host: the vanilla Transfer button's swapOwner for its
+    // last n army units, the first one kept, to the first other player)
+    verb(&mut a, s_give, "not_give", Some(k5));
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(gst, g, c.g.state);
+    a.if_null(gst, "ack");
+    a.fld(me, g, c.g.me.0);
+    a.if_null(me, "ack");
+    a.gg(res, s_unknown);
+    a.call(ni, c.parse_int, &[s]);
+    a.if_null(ni, "ack");
+    a.op(Opcode::SafeCast { dst: cnt, src: ni });
+    a.op(Opcode::Null { dst: ni });
+    a.gg(res, s_noplayer);
+    a.fld(proxy, gst, c.state_players);
+    a.if_null(proxy, "ack");
+    a.fld(parr, proxy, c.proxy_array.0);
+    a.op(Opcode::SafeCast {
+        dst: list,
+        src: parr,
+    });
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.loop_head("give_p");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.op(Opcode::SafeCast { dst: oth, src: d });
+    a.if_null(oth, "give_p");
+    a.jmp(
+        Opcode::JEq {
+            a: oth,
+            b: me,
+            offset: 0,
+        },
+        "give_p",
+    );
+    a.fld(list, gst, c.army);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.op(Opcode::Mov { dst: ix, src: n });
+    a.loop_head("give_u");
+    a.op(Opcode::Decr { dst: ix });
+    a.int(kk, k1);
+    a.jmp(
+        Opcode::JSLt {
+            a: ix,
+            b: kk,
+            offset: 0,
+        },
+        "give_done",
+    );
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JSLte {
+            a: cnt,
+            b: kk,
+            offset: 0,
+        },
+        "give_done",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::SafeCast { dst: unit, src: d });
+    a.if_null(unit, "give_u");
+    a.fld(owner, unit, c.unit_owner.0);
+    a.jmp(
+        Opcode::JNotEq {
+            a: owner,
+            b: me,
+            offset: 0,
+        },
+        "give_u",
+    );
+    a.call(void, c.swap_owner, &[unit, oth]);
+    a.op(Opcode::Decr { dst: cnt });
+    a.go("give_u");
+    a.label("give_done");
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_give");
+
     // verb: dump
     verb(&mut a, s_dump, "ack", None);
     a.gg(j, s_open);
@@ -1346,6 +1566,19 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.lit(code, ",\"me\":");
     w.a.fld(me, g, c.g.me.0);
     w.player(code, me, s);
+    // the local player's own inventory: item stack count
+    w.lit(code, ",\"items\":");
+    w.a.if_null(me, "no_items");
+    w.a.fld(inv, me, c.player_inv);
+    w.a.if_null(inv, "no_items");
+    w.a.call(list, c.all_items, &[inv]);
+    w.a.if_null(list, "no_items");
+    w.a.fld(n, list, c.arr_len);
+    w.val(n);
+    w.a.go("items_end");
+    w.a.label("no_items");
+    w.lit(code, "null");
+    w.a.label("items_end");
     // battle: whose turn, and that unit's skills as this machine sees them
     w.lit(code, ",\"battle\":");
     w.a.fld(battle, g, c.g.battle);
@@ -1426,7 +1659,9 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.lit(code, ",\"army\":[");
     w.a.fld(gst, g, c.g.state);
     w.a.if_null(gst, "army_end");
-    w.a.fld(list, gst, c.army);
+    // GameState.getUnits: every player's allUnits (a client's `army` can be empty)
+    w.a.op(Opcode::Null { dst: rf });
+    w.a.call(list, c.get_units, &[gst, rf]);
     w.a.if_null(list, "army_end");
     w.a.fld(n, list, c.arr_len);
     w.a.fld(arr, list, c.arr_arr.0);
@@ -1666,7 +1901,16 @@ mod tests {
                     }
                     _ => None,
                 });
-                names.push(name.unwrap_or("?".into()));
+                let last = *args.last().unwrap();
+                let fun = f.ops[..j].iter().rev().find_map(|o| match o {
+                    Opcode::StaticClosure { dst, fun } if *dst == last => Some(fun.0),
+                    _ => None,
+                });
+                let name = name.unwrap_or("?".into());
+                names.push(match fun {
+                    Some(i) if std::env::var_os("LIST_FINDEX").is_some() => format!("{name}@{i}"),
+                    _ => name,
+                });
             }
             if !names.is_empty() {
                 println!("{cls}: {}", names.join(" "));
