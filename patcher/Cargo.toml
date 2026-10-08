@@ -13,6 +13,10 @@ crate-type = ["rlib", "staticlib"]
 name = "wartales-tips"
 path = "src/main.rs"
 
+[features]
+# Local co-op test harness (harness.rs): only for shim\build.ps1 -Test, never shipped.
+harness = []
+
 [dependencies]
 hlbc = { path = "vendor/hlbc", default-features = false }
 anyhow = "1"

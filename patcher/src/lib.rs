@@ -37,6 +37,8 @@ mod follow;
 mod force_leave;
 mod forge_mirror;
 mod friendly_fire;
+#[cfg(feature = "harness")]
+mod harness;
 mod hold_speed;
 // A call to a patch-added function right after a NullCheck on its first argument makes the
 // HashLink JIT hash a NULL function name and crash at startup; a Nop breaks that (see jit_names.rs).
@@ -169,6 +171,8 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loading_draw::patch_loading_draw(&mut code);
     scroll_hit::patch_scroll_hit(&mut code);
     jit_names::patch_jit_names(&mut code);
+    #[cfg(feature = "harness")]
+    harness::patch_harness(&mut code);
     let skipped = SKIPPED.with(|s| std::mem::take(&mut *s.borrow_mut()));
     if !skipped.is_empty() {
         bail!(
