@@ -43,6 +43,7 @@ mod hold_speed;
 mod jit_names;
 mod job_confirm;
 mod job_xp;
+mod loading_draw;
 mod loot_all;
 mod marker_names;
 mod mirror;
@@ -158,6 +159,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     alt_world::patch_alt_world(&mut code);
     battle_camera::patch_battle_camera(&mut code);
     title_version::patch_title_version(&mut code);
+    loading_draw::patch_loading_draw(&mut code);
     jit_names::patch_jit_names(&mut code);
     let skipped = SKIPPED.with(|s| std::mem::take(&mut *s.borrow_mut()));
     if !skipped.is_empty() {

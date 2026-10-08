@@ -153,6 +153,15 @@ client only (`!Game.isAuth`), when the list of `battle.currentUnit` is emptied,
 `Battle.update` redraws the skill bar, as after an action).
 Host and solo are unchanged. Skipped (logged) on mismatch.
 
+**Loading draw** (`src/loading_draw.rs`, issue #3): `Game.render` drew
+`Main.loadingS2d` only once `Game.state` exists. A joining client waits for the
+host between `Game.init` (which creates the loading scene) and `Game.start`
+(which sets the state) while `hxd.System.mainLoop` keeps presenting frames that
+nothing draws or clears, so the loading screen flickered. While the state is
+null, `Game.render` now draws the loading scene when one is up, the same call
+vanilla makes once a state exists. Nothing changes afterwards or without a
+loading scene. Skipped (logged) on mismatch.
+
 **Skill vars** (`src/skill_vars.rs`, issue #2): `ScriptedSkill.initScript`
 binds `unit.getSkillPersist(id).vars` into the skill script once, and
 `Battle.getOrCreateSkill` caches the skill. On a client, hxbit sync replaces
