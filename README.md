@@ -70,7 +70,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do.
 - Switching a unit's profession keeps the experience earned in the old one, and applies at once without the confirm window.
 - Hold-to-confirm rings fill three times faster.
-- Enemies of a higher level than your squad can drop their worn equipment (weapons, armor, trinkets); before, anything above your best unit's level never dropped. Armor still drops only if one of your units' classes can wear it.
+- Enemies of a higher level than your squad can drop their worn equipment (weapons, armor, trinkets); before, anything above your best unit's level never dropped. Armor drops even if none of your units' classes can wear it (keep it for a later recruit, or sell it).
 - Named champions and bosses can drop their worn equipment too, with the same chance as other enemies (their signature weapon still always drops). Their unique items marked as not lootable stay excluded, and arena champions keep their gear, since the arena gives it as a reward.
 - The battle's guaranteed piece of enemy equipment comes from the strongest fallen enemy (highest level; a champion or boss before a normal enemy of the same level) instead of whichever enemy the game listed first. A boss's always-dropped signature weapon no longer uses up that guaranteed piece.
 - The title screen shows the installed mod version ("Co-op Fix v…") on its own line above the game version, so players can compare versions before joining.

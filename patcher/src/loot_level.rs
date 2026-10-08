@@ -141,6 +141,78 @@ pub(crate) fn patch_loot_level(code: &mut Bytecode) {
     }
 }
 
+// Armor drops even when none of your units' classes can wear it.
+//
+// In each candidate closure an armor item takes a separate branch (the
+// `for (u in units) if (u.isPlayer() && canEquip)` loop above):
+//
+//   Call2 b = item.isType(Armor); JTrue b -> armor branch; push(item); Ret
+//
+// The `JTrue` becomes a `Nop`, so armor is pushed like weapons and trinkets.
+// disableLoot / feature, NoEquipDrop, ForceDropWeapon and the chances are
+// unchanged. Gear nobody in the squad can wear is still an ordinary item:
+// stored, sold, dismantled, or worn by a later recruit.
+
+/// Index of the armor-branch `JTrue` in each of the nine candidate closures.
+fn armor_sites(code: &Bytecode) -> Result<Vec<(usize, usize)>> {
+    let unit_t = obj_type(code, "st.Unit")?;
+    let can_equip = method(code, unit_t, "canEquip")?.findex;
+    let cant_equip = method(code, unit_t, "hasCantEquipReasons")?.findex;
+    let ref_level = method(code, obj_type(code, "st.GameState")?, "getReferenceLevel")?.findex;
+    let debrief = debug_file(code, "src/battle/Debrief.hx")?;
+    let equips = |o: &Opcode| {
+        matches!(o, Opcode::Call2 { fun, .. } if *fun == can_equip || *fun == cant_equip)
+    };
+    let mut sites = Vec::new();
+    for (fi, f) in code.functions.iter().enumerate() {
+        if !matches!(f.debug_info.as_deref(), Some([(file, _), ..]) if *file == debrief)
+            || !calls(f, ref_level)
+            || !f.ops.iter().any(equips)
+        {
+            continue;
+        }
+        let ops = &f.ops;
+        let is_type = |j: usize| {
+            matches!(ops[j - 1], Opcode::Call2 { fun, .. } if fname(code, fun) == "isType")
+        };
+        let found: Vec<usize> = (1..ops.len())
+            .filter(|&j| match ops[j] {
+                Opcode::JTrue { cond, offset } => {
+                    let t = (j as i32 + 1 + offset) as usize;
+                    is_type(j)
+                        && matches!(ops[j - 1], Opcode::Call2 { dst, .. } if dst == cond)
+                        && ops[t..(t + 40).min(ops.len())].iter().any(equips)
+                }
+                _ => false,
+            })
+            .collect();
+        match found[..] {
+            [j] => sites.push((fi, j)),
+            [] if (1..ops.len()).any(|j| is_type(j) && matches!(ops[j], Opcode::Nop)) => {
+                bail!("already applied")
+            }
+            _ => bail!("fn@{}: expected one armor branch, found {}", f.findex.0, found.len()),
+        }
+    }
+    if sites.len() != 9 {
+        bail!("expected 9 loot candidate closures, found {}", sites.len());
+    }
+    Ok(sites)
+}
+
+/// Lets armor drop whatever classes the squad has, or leaves `code` untouched and logs why.
+pub(crate) fn patch_armor_any(code: &mut Bytecode) {
+    match armor_sites(code) {
+        Ok(sites) => {
+            for &(fi, j) in &sites {
+                code.functions[fi].ops[j] = Opcode::Nop;
+            }
+            eprintln!("patched armor drop x{}: armor drops whatever the squad can wear", sites.len());
+        }
+        Err(e) => crate::skipped(format!("armor drop skipped: {e:#}")),
+    }
+}
+
 // Champions and bosses can drop their worn gear too.
 //
 // genLoot skips the whole worn-gear roll for a class with the NoEquipDrop flag
@@ -499,6 +571,42 @@ pub(crate) fn patch_loot_order(code: &mut Bytecode) {
 mod tests {
     use super::*;
     use crate::asm::testutil::{game, read};
+
+    #[test]
+    fn armor_any_installed_game() {
+        let Some(image) = game() else { return };
+        let orig = read(&image);
+        let sites = armor_sites(&orig).expect("sites");
+        // Also after the level pass (canEquip already swapped).
+        let mut lvl = read(&image);
+        patch_loot_level(&mut lvl);
+        assert_eq!(armor_sites(&lvl).expect("sites after level"), sites);
+
+        let mut code = read(&image);
+        patch_armor_any(&mut code);
+        let mut patched = Vec::new();
+        code.serialize(&mut patched).expect("write");
+        let back = read(&patched);
+        for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
+            let site = sites.iter().find(|s| s.0 == i);
+            for (k, (x, y)) in a.ops.iter().zip(&b.ops).enumerate() {
+                let changed = format!("{x:?}") != format!("{y:?}");
+                assert_eq!(changed, site.is_some_and(|s| s.1 == k), "fn #{i} op {k}");
+            }
+            assert_eq!(a.ops.len(), b.ops.len());
+            if let Some(s) = site {
+                assert!(matches!(a.ops[s.1], Opcode::JTrue { .. }));
+                assert!(matches!(b.ops[s.1], Opcode::Nop));
+            }
+        }
+
+        let mut again = read(&patched);
+        assert!(armor_sites(&again).is_err());
+        patch_armor_any(&mut again);
+        let mut twice = Vec::new();
+        again.serialize(&mut twice).expect("write");
+        assert!(twice == patched);
+    }
 
     #[test]
     fn loot_order_installed_game() {

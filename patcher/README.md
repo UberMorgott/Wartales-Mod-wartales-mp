@@ -154,6 +154,11 @@ checks kept, level dropped). Same op count; drop chance, pity counter,
 NoEquipDrop, ForceDropWeapon, quality and repair stay vanilla. Loot is
 generated on the host.
 
+**Armor drop** (same file, `patch_armor_any`): in the same nine closures the
+`JTrue` after `item.isType(Armor)` that leads to the "a unit can wear it" loop
+becomes a `Nop`, so armor is pushed as a candidate like weapons and trinkets.
+Gear no unit can wear stays an ordinary item (stored, sold, dismantled).
+
 **Champion gear** (same file, `patch_champion_gear`): genLoot skipped the
 worn-gear roll for every NoEquipDrop class. With `x = flags & (IsChampion |
 NoEquipDrop | ArenaChampion)`, the six-op test becomes `x ^ 8 > 16 -> skip`:
