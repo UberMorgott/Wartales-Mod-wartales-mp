@@ -54,7 +54,7 @@ func adopt(p Peer, a loginArgs) {
 	defer sess.mu.Unlock()
 	if a.UID != "" {
 		sess.game = a.UID
-		sess.uid = uid.Mint(a.UID)
+		sess.uid = uid.Mint(mintInput(a.UID))
 		if uid.IsSteam(a.UID) {
 			sess.steam = a.UID // only ever emitted for a lobby on SDR
 		}

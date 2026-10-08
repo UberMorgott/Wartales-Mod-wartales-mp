@@ -89,6 +89,13 @@ func runCmd(args []string) (err error) {
 	rl := relay.New(logger)
 	mapper := nat.NewMapper(*port, logger)
 	defer mapper.Close()
+	endpoint, publicAddr := mapper.Endpoint, mapper.Addr
+	listenHost := "" // every interface: guests come from the internet
+	if ep, ok := testEndpoint(*port, logger); ok {
+		endpoint = ep
+		listenHost = "127.0.0.1" // harness: loopback only, no firewall prompt
+		publicAddr = func() (string, error) { e, err := ep(); return e.Addr, err }
+	}
 
 	// The shim's SDR bridge: its verdict and port live in sdr.status next to
 	// our log. The bridge follows that file for as long as we run, because
@@ -104,9 +111,9 @@ func runCmd(args []string) (err error) {
 		HostPW:     rl.HostPW,
 		SlavePW:    rl.SlavePW,
 		Log:        logger,
-		PublicAddr: mapper.Addr,
+		PublicAddr: publicAddr,
 		Transport:  *transport,
-		Endpoint:   mapper.Endpoint,
+		Endpoint:   endpoint,
 		SDRStatus:  bridge.Status,
 		Bridge:     bridge,
 		LinkKey:    binary.BigEndian.Uint32(key[:]),
@@ -129,12 +136,12 @@ func runCmd(args []string) (err error) {
 	go bridge.Run(ctx)
 
 	errs := make(chan error, 2)
-	go func() { errs <- rl.ListenAndServe(fmt.Sprintf(":%d", *port), ms.ServeLink) }()
+	go func() { errs <- rl.ListenAndServe(net.JoinHostPort(listenHost, strconv.Itoa(*port)), ms.ServeLink) }()
 	go func() { errs <- ms.ListenAndServe() }()
 
 	// Warm the public endpoint up so the first join code is instant.
 	go func() {
-		ep, err := mapper.Endpoint()
+		ep, err := endpoint()
 		switch {
 		case err != nil:
 			logger.Printf("public endpoint unknown: %v", err)
