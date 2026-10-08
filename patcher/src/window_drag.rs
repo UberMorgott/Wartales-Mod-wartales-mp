@@ -264,6 +264,9 @@ struct RsCtx {
     /// The FlowAlign.Left / Bottom singletons (globals).
     fa_left: RefGlobal,
     fa_bottom: RefGlobal,
+    /// FlowAlign.Top and Flow.set_verticalAlign (the scroll area's grid).
+    fa_top: RefGlobal,
+    set_valign: RefFun,
 }
 
 /// The global holding the parameterless construct `idx` of enum `t`: the
@@ -385,6 +388,18 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
         bg_color,
         fa_left: construct(c.ha_t, "Left")?,
         fa_bottom: construct(c.va_t, "Bottom")?,
+        fa_top: construct(c.va_t, "Top")?,
+        set_valign: {
+            let f = proto(code, c.flow_t, "set_verticalAlign")?;
+            want_sig(
+                code,
+                f,
+                "Flow.set_verticalAlign",
+                &[c.flow_t, c.va_t],
+                c.va_t,
+            )?;
+            f
+        },
     })
 }
 
@@ -1374,6 +1389,7 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         r.r(c.rs.inv_t),
         r.r(c.i32_t),
     );
+    let va = r.r(c.va_t);
     let mut a = Asm::new();
     a.jmp(
         Opcode::JFalse {
@@ -1403,6 +1419,22 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
             arg1: nb,
         });
     }
+    // The grid hangs from the top. inventory-content is a horizontal flow;
+    // its children default to valign Bottom (Flow.hx:1337) within a line as
+    // tall as realMinHeight (Flow.hx:1344), so with the minHeight above a
+    // grid taller than the viewport sat bottom-anchored (top rows above the
+    // header, new rows added at the top). Vanilla sets no minHeight: line =
+    // the grid's height, y 0.
+    a.op(Opcode::GetGlobal {
+        dst: va,
+        global: c.rs.fa_top,
+    });
+    a.op(Opcode::Call2 {
+        dst: va,
+        fun: c.rs.set_valign,
+        arg0: ct,
+        arg1: va,
+    });
     a.label("grid");
     a.op(Opcode::Call1 {
         dst: inv,
@@ -4994,6 +5026,9 @@ mod tests {
                 } else if f == c.rs.scroll_reset {
                     log(k, "scrollReset");
                     Some(V::Null)
+                } else if f == c.rs.set_valign {
+                    log(k, "valign");
+                    Some(a[1].clone())
                 } else if f == c.rs.set_min_h || f == c.rs.set_max_h {
                     log(
                         k,
@@ -5739,6 +5774,10 @@ mod tests {
         assert_eq!(cc.len(), 1);
         assert_eq!((cc[0][0].clone(), cc[0][1].clone()), (cont.clone(), inv.clone()));
         assert_eq!(s.c.take("scrollReset"), vec![vec![cont.clone()]]);
+        // The grid hangs from the top of the scroll area (not valign Bottom).
+        let va = s.c.take("valign");
+        assert_eq!(va.len(), 1);
+        assert_eq!(va[0], vec![cont.clone(), s.global(c.rs.fa_top)]);
         // Within the same row: nothing changes.
         mouse(&mut s, 25.0, 690.0);
         s.c.take("setUserData");
