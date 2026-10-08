@@ -1,7 +1,8 @@
 // The start-up status window. Patching the bytecode takes several seconds on
 // the game's main thread before the game has any window of its own; without
 // feedback the player sees nothing happen after pressing Play. This small
-// window says what is going on, shows an indeterminate progress bar and the
+// window says what is going on, shows how many of the co-op patches are
+// applied (a native progress bar fed by wartales_tips_progress) and the
 // elapsed time, and closes by itself as soon as the game's own window is up.
 //
 // It lives on its own thread with its own message loop: the main thread is
@@ -12,7 +13,9 @@
 // is; the game itself is never held up by it.
 #include "shim.h"
 #include "splash.h"
+#include "tips.h"
 
+#include <commctrl.h>
 #include <wchar.h>
 
 #ifndef WMP_VERSION
@@ -20,7 +23,7 @@
 #endif
 
 #define SPLASH_CLASS L"WartalesMpSplash"
-#define SPLASH_W 460
+#define SPLASH_W 520
 #define SPLASH_H 128
 #define TIMER_ID 1
 #define TIMER_MS 40
@@ -35,6 +38,22 @@ static volatile LONG splash_patch_ok = TRUE;
 static DWORD splash_start_tick;
 static DWORD splash_phase_tick;
 static HWND splash_hwnd;
+static HWND splash_bar; // PROGRESS_CLASS child; NULL if comctl32 refused it
+
+// Progress snapshot from the patcher, clamped so the display stays sane.
+typedef struct {
+	uint32_t done, total, skipped;
+} progress;
+
+static progress read_progress(void) {
+	progress p;
+	wartales_tips_progress(&p.done, &p.total, &p.skipped);
+	if (p.done > p.total)
+		p.done = p.total;
+	if (p.skipped > p.done)
+		p.skipped = p.done;
+	return p;
+}
 static HFONT font_title, font_text;
 
 // splash_wanted: only inside Wartales.exe itself.
@@ -67,14 +86,15 @@ static BOOL CALLBACK find_game_window(HWND h, LPARAM found) {
 
 // draw renders the window into dc (WM_PAINT and WM_PRINTCLIENT), double-buffered.
 static void draw(HWND h, HDC dc) {
-	RECT rc, bar, fill;
+	RECT rc;
 	HDC mem;
 	HBITMAP bmp, old_bmp;
-	HBRUSH bg, track, block;
-	wchar_t line[160];
+	HBRUSH bg;
+	wchar_t line[160], skip[40];
 	DWORD now = GetTickCount();
+	unsigned long secs = (unsigned long)((now - splash_start_tick) / 1000);
 	LONG phase = splash_phase;
-	int w, x, block_w;
+	progress p = read_progress();
 
 	GetClientRect(h, &rc);
 	mem = CreateCompatibleDC(dc);
@@ -93,38 +113,64 @@ static void draw(HWND h, HDC dc) {
 
 	SelectObject(mem, font_text);
 	SetTextColor(mem, RGB(220, 220, 215));
-	if (phase == PHASE_PATCHING)
-		swprintf(line, 160, L"Preparing the game: applying the co-op patches... %lu s",
-			(unsigned long)((now - splash_start_tick) / 1000));
+	skip[0] = 0;
+	if (p.skipped > 0)
+		swprintf(skip, 40, L", %u skipped", (unsigned)p.skipped);
+	if (phase == PHASE_PATCHING && p.total == 0)
+		swprintf(line, 160, L"Preparing the game: reading the game code... %lu s", secs);
+	else if (phase == PHASE_PATCHING && p.done < p.total)
+		swprintf(line, 160, L"Applying co-op patches: %u of %u%ls... %lu s",
+			(unsigned)(p.done - p.skipped), (unsigned)p.total, skip, secs);
+	else if (phase == PHASE_PATCHING)
+		swprintf(line, 160, L"Applied %u of %u co-op patches%ls, saving... %lu s",
+			(unsigned)(p.done - p.skipped), (unsigned)p.total, skip, secs);
+	else if (splash_patch_ok)
+		swprintf(line, 160, L"Applied %u of %u co-op patches, starting the game... %lu s",
+			(unsigned)p.total, (unsigned)p.total, secs);
+	else if (p.skipped > 0)
+		swprintf(line, 160, L"%u of %u patches do not fit this game version: starting without them",
+			(unsigned)p.skipped, (unsigned)p.total);
 	else
-		swprintf(line, 160, L"Patches ready, starting the game... %lu s",
-			(unsigned long)((now - splash_start_tick) / 1000));
+		swprintf(line, 160, L"Co-op patches not applied: starting the game without them");
 	TextOutW(mem, 20, 52, line, (int)wcslen(line));
-
-	// Indeterminate progress: a block sweeping across a track.
-	bar.left = 20;
-	bar.right = rc.right - 20;
-	bar.top = 86;
-	bar.bottom = 98;
-	track = CreateSolidBrush(RGB(64, 60, 56));
-	FillRect(mem, &bar, track);
-	DeleteObject(track);
-	w = bar.right - bar.left;
-	block_w = w / 4;
-	x = (int)((now / 6) % (DWORD)(w + block_w)) - block_w;
-	fill = bar;
-	fill.left = bar.left + (x < 0 ? 0 : x);
-	fill.right = bar.left + (x + block_w > w ? w : x + block_w);
-	if (fill.right > fill.left) {
-		block = CreateSolidBrush(phase == PHASE_PATCHING ? RGB(200, 150, 70) : RGB(110, 170, 90));
-		FillRect(mem, &fill, block);
-		DeleteObject(block);
-	}
 
 	BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
 	SelectObject(mem, old_bmp);
 	DeleteObject(bmp);
 	DeleteDC(mem);
+}
+
+// update_bar moves the native bar: passes finished out of all, amber while
+// patching, green once applied, red when a pass did not fit or patching failed.
+static void update_bar(LONG phase) {
+	static uint32_t shown_total = (uint32_t)-1, shown_done = (uint32_t)-1;
+	static COLORREF shown_color = CLR_INVALID;
+	progress p = read_progress();
+	uint32_t total = p.total, done = p.done;
+	COLORREF color = RGB(200, 150, 70);
+	if (splash_bar == NULL)
+		return;
+	if (phase != PHASE_PATCHING) {
+		if (total == 0)
+			total = 1;
+		done = total; // finished either way; the colour tells which way
+		color = splash_patch_ok ? RGB(110, 170, 90) : RGB(200, 80, 60);
+	} else if (p.skipped > 0) {
+		color = RGB(200, 80, 60);
+	}
+	if (total != shown_total) {
+		SendMessageW(splash_bar, PBM_SETRANGE32, 0, (LPARAM)(total == 0 ? 1 : total));
+		shown_total = total;
+		shown_done = (uint32_t)-1;
+	}
+	if (done != shown_done) {
+		SendMessageW(splash_bar, PBM_SETPOS, (WPARAM)done, 0);
+		shown_done = done;
+	}
+	if (color != shown_color) {
+		SendMessageW(splash_bar, PBM_SETBARCOLOR, 0, (LPARAM)color);
+		shown_color = color;
+	}
 }
 
 static LRESULT CALLBACK splash_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -146,8 +192,10 @@ static LRESULT CALLBACK splash_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 				return 0;
 			}
 		}
-		if (IsWindowVisible(h))
+		if (IsWindowVisible(h)) {
+			update_bar(phase);
 			InvalidateRect(h, NULL, FALSE);
+		}
 		return 0;
 	}
 	case WM_ERASEBKGND:
@@ -219,11 +267,26 @@ static DWORD WINAPI splash_main(LPVOID inst) {
 	sx = (GetSystemMetrics(SM_CXSCREEN) - SPLASH_W) / 2;
 	sy = (GetSystemMetrics(SM_CYSCREEN) - SPLASH_H) / 2;
 	splash_hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_APPWINDOW, SPLASH_CLASS,
-		L"Wartales Co-op Fix: starting", WS_POPUP | WS_BORDER,
+		L"Wartales Co-op Fix: starting", WS_POPUP | WS_BORDER | WS_CLIPCHILDREN,
 		sx, sy, SPLASH_W, SPLASH_H, NULL, NULL, (HINSTANCE)inst, NULL);
 	if (splash_hwnd == NULL) {
 		shim_log("splash: CreateWindowExW failed (%lu)", (unsigned long)GetLastError());
 		goto out;
+	}
+	{
+		INITCOMMONCONTROLSEX icc;
+		RECT rc;
+		icc.dwSize = sizeof(icc);
+		icc.dwICC = ICC_PROGRESS_CLASS;
+		InitCommonControlsEx(&icc);
+		GetClientRect(splash_hwnd, &rc);
+		splash_bar = CreateWindowExW(0, PROGRESS_CLASSW, NULL, WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+			20, 86, rc.right - 40, 12, splash_hwnd, NULL, (HINSTANCE)inst, NULL);
+		if (splash_bar != NULL)
+			SendMessageW(splash_bar, PBM_SETBKCOLOR, 0, (LPARAM)RGB(64, 60, 56));
+		else
+			shim_log("splash: progress bar not created (%lu)", (unsigned long)GetLastError());
+		update_bar(PHASE_PATCHING);
 	}
 	SetTimer(splash_hwnd, TIMER_ID, TIMER_MS, NULL);
 	while (GetMessageW(&m, NULL, 0, 0) > 0) {
@@ -231,6 +294,7 @@ static DWORD WINAPI splash_main(LPVOID inst) {
 		DispatchMessageW(&m);
 	}
 	splash_hwnd = NULL;
+	splash_bar = NULL;
 	shim_log("splash: closed after %lu ms", (unsigned long)(GetTickCount() - splash_start_tick));
 
 out:

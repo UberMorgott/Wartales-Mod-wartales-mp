@@ -163,7 +163,7 @@ $stripArgs = if ($Release) { @('-s', '-Wl,--strip-all') } else { @() }
     $stubs $mhsrc $embed $def `
     $tipsLib @tipsLinkLibs `
     "-I$(Join-Path $minhook 'include')" -DNDEBUG @testDefs -include $versionH `
-    -Wall -Wextra -static-libgcc @stripArgs -lkernel32 -lws2_32 -luser32 -lgdi32
+    -Wall -Wextra -static-libgcc @stripArgs -lkernel32 -lws2_32 -luser32 -lgdi32 -lcomctl32
 if ($LASTEXITCODE -ne 0) { throw 'gcc failed for winmm.dll' }
 
 & (Join-Path $PSScriptRoot 'seamcheck.ps1') -Path $out -Expect $(if ($Test) { 'present' } else { 'absent' })

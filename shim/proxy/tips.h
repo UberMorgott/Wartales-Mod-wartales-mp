@@ -24,6 +24,12 @@ int32_t wartales_tips_patch(const uint8_t *image, size_t len, uint8_t **out, siz
 // must be exactly what it returned (p may be NULL).
 void wartales_tips_free(uint8_t *p, size_t len);
 
+// wartales_tips_progress reports a wartales_tips_patch running on another
+// thread: passes finished, passes in all (0 while the image is still being
+// read) and passes that did not match this game build. Approximate, for
+// display only; any pointer may be NULL.
+void wartales_tips_progress(uint32_t *done, uint32_t *total, uint32_t *skipped);
+
 #ifdef __cplusplus
 }
 #endif

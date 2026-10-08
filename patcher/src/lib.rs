@@ -82,6 +82,7 @@ use hlbc::types::{
 };
 use hlbc::Bytecode;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Marker written nowhere in the image; used by callers to name this patch in logs.
 pub const PATCH_NAME: &str = "wartales-tips start-choice item tooltips";
@@ -99,11 +100,54 @@ pub(crate) fn skipped(why: String) {
     SKIPPED.with(|s| s.borrow_mut().push(why));
 }
 
+// Progress of the running `patch_image`, read by the start-up window from
+// another thread (`wartales_tips_progress`). Approximate telemetry only: the
+// outcome is `patch_image`'s result, never these counters.
+static PROGRESS_DONE: AtomicU32 = AtomicU32::new(0);
+static PROGRESS_TOTAL: AtomicU32 = AtomicU32::new(0);
+static PROGRESS_SKIPPED: AtomicU32 = AtomicU32::new(0);
+
+fn skipped_count() -> usize {
+    SKIPPED.with(|s| s.borrow().len())
+}
+
+fn progress_begin(total: u32) {
+    PROGRESS_DONE.store(0, Ordering::Relaxed);
+    PROGRESS_SKIPPED.store(0, Ordering::Relaxed);
+    PROGRESS_TOTAL.store(total, Ordering::Relaxed);
+}
+
+/// One pass finished; it skipped (once, however many parts) if `skipped()`
+/// was called since `before`.
+fn progress_step(before: usize) {
+    if skipped_count() > before {
+        PROGRESS_SKIPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    PROGRESS_DONE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Runs each pass statement in order, counting them for the progress report.
+/// A statement's own `?` still returns from `patch_image`.
+macro_rules! passes {
+    ($($pass:expr;)*) => {
+        progress_begin(
+            <[&str]>::len(&[$(stringify!($pass)),*]) as u32 + cfg!(feature = "harness") as u32,
+        );
+        $(
+            let before = skipped_count();
+            $pass;
+            progress_step(before);
+        )*
+    };
+}
+
 /// Applies every patch to a bytecode image held in memory and returns the new
 /// image; fails when any behaviour-changing pass does not match the image.
 pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     SKIPPED.with(|s| s.borrow_mut().clear());
+    progress_begin(0);
     let mut code = Bytecode::deserialize(&mut Cursor::new(image)).context("read bytecode")?;
+    passes! {
     patch_start_choice_item_tips(&mut code)?;
     patch_start_choice_unit_tips(&mut code)?;
     friendly_fire::patch_enemy_area_friendly_fire(&mut code).context("friendly fire")?;
@@ -171,8 +215,13 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loading_draw::patch_loading_draw(&mut code);
     scroll_hit::patch_scroll_hit(&mut code);
     jit_names::patch_jit_names(&mut code);
+    }
     #[cfg(feature = "harness")]
-    harness::patch_harness(&mut code);
+    {
+        let before = skipped_count();
+        harness::patch_harness(&mut code);
+        progress_step(before);
+    }
     let skipped = SKIPPED.with(|s| std::mem::take(&mut *s.borrow_mut()));
     if !skipped.is_empty() {
         bail!(
@@ -259,6 +308,25 @@ pub unsafe extern "C" fn wartales_tips_patch(
 pub unsafe extern "C" fn wartales_tips_free(p: *mut u8, len: usize) {
     if !p.is_null() {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, len)));
+    }
+}
+
+/// Reports the progress of a `wartales_tips_patch` running on another thread:
+/// passes finished, passes in all (0 while the image is still being read) and
+/// passes that did not match this game build. Any pointer may be NULL.
+///
+/// # Safety
+/// Each non-NULL pointer must be valid for one `u32` write.
+#[no_mangle]
+pub unsafe extern "C" fn wartales_tips_progress(done: *mut u32, total: *mut u32, skipped: *mut u32) {
+    if !done.is_null() {
+        *done = PROGRESS_DONE.load(Ordering::Relaxed);
+    }
+    if !total.is_null() {
+        *total = PROGRESS_TOTAL.load(Ordering::Relaxed);
+    }
+    if !skipped.is_null() {
+        *skipped = PROGRESS_SKIPPED.load(Ordering::Relaxed);
     }
 }
 
