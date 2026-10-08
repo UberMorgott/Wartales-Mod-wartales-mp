@@ -1,8 +1,10 @@
 /wartales-mp.exe
 /dist/
+/dist-test/
 /.serena/
 
 # patcher/ (Rust, wartales-tips)
 /patcher/target/
+/patcher/target-test/
 /patcher/dist/*.exe
 /patcher/dist/*.zip

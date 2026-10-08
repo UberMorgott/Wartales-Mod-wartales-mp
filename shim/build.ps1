@@ -15,7 +15,7 @@
 #   4. gcc links proxy.c (+ sdr/bridge/lobby/splash.c) + stubs + MinHook + embed.o + libwartales_tips.a + .def -> winmm.dll
 # The single file to drop into the game folder is <OutDir>\winmm.dll.
 #
-#   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-PatcherDir <path>] [-Release]
+#   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-PatcherDir <path>] [-Release] [-Test]
 #
 # -Release produces the artifact uploaded to GitHub: symbols are stripped
 # (-ldflags "-s -w" for the exe, -s -Wl,--strip-all for the DLL) and BOTH stages
@@ -30,10 +30,15 @@ param(
     [string]$SystemDll = (Join-Path $env:WINDIR 'System32\winmm.dll'),
     [Alias('TipsRepo')]
     [string]$PatcherDir = (Join-Path $PSScriptRoot '..\patcher'),
-    [switch]$Release
+    [switch]$Release,
+    [switch]$Test
 )
 
 $ErrorActionPreference = 'Stop'
+# -Test: the local co-op harness build (docs/coop-harness-plan.md). Adds the
+# test seam (proxy.c WMP_TEST, Go tag harness, cargo feature harness) and goes
+# to dist-test\ so dist\winmm.dll stays shippable. Never upload a -Test build.
+if ($Test -and -not $PSBoundParameters.ContainsKey('OutDir')) { $OutDir = Join-Path $PSScriptRoot '..\dist-test' }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $minhook = Join-Path $PSScriptRoot 'minhook'
 
@@ -97,12 +102,14 @@ $exe = Join-Path $OutDir 'wartales-mp.exe'
 $goLdflags = if ($Release) { '-s -w -H=windowsgui' } else { '-H=windowsgui' }
 Push-Location $repo
 try {
-    & go build -trimpath -ldflags $goLdflags -o $exe ./cmd/wartales-mp
+    $goTags = if ($Test) { @('-tags', 'harness') } else { @() }
+    & go build -trimpath @goTags -ldflags $goLdflags -o $exe ./cmd/wartales-mp
     if ($LASTEXITCODE -ne 0) { throw 'go build failed' }
 } finally { Pop-Location }
 
 # 2b. Release: pack the exe BEFORE it is wrapped into the object file, so the
 #     copy the shim extracts and runs at %LOCALAPPDATA% is the packed one.
+if (-not $Test) { & (Join-Path $PSScriptRoot 'seamcheck.ps1') -Path $exe -Expect absent }
 if ($Release) { Invoke-Upx $exe }
 
 # 3. Wrap the final exe as a linkable object. objcopy derives the symbol names
@@ -122,10 +129,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $PatcherDir 'Cargo.toml'))) { throw 
 $PatcherDir = (Resolve-Path $PatcherDir).Path
 Push-Location $PatcherDir
 try {
-    & cargo build --release --target x86_64-pc-windows-gnu
+    $cargoTest = if ($Test) { @('--features', 'harness', '--target-dir', 'target-test') } else { @() }
+    & cargo build --release --target x86_64-pc-windows-gnu @cargoTest
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed for wartales-tips' }
 } finally { Pop-Location }
-$tipsLib = Join-Path $PatcherDir 'target\x86_64-pc-windows-gnu\release\libwartales_tips.a'
+$tipsLib = Join-Path $PatcherDir ('{0}\x86_64-pc-windows-gnu\release\libwartales_tips.a' -f $(if ($Test) { 'target-test' } else { 'target' }))
 if (-not (Test-Path -LiteralPath $tipsLib)) { throw "cargo build produced no $tipsLib" }
 $tipsLinkLibs = @('-lntdll', '-luserenv', '-ldbghelp')
 Write-Host "wartales-tips: $tipsLib"
@@ -149,17 +157,21 @@ Set-Content -LiteralPath $versionH -Value ('#define WMP_VERSION L"{0}"' -f $vers
 # symbols for debugging. --strip-all is export-safe: the .def still defines the
 # 180 named exports, so stripping removes only debug/symbol data.
 $stripArgs = if ($Release) { @('-s', '-Wl,--strip-all') } else { @() }
+[string[]]$testDefs = if ($Test) { @('-DWMP_TEST') } else { @() }
 & $gcc -shared -O2 -o $out `
     (Join-Path $PSScriptRoot 'proxy\proxy.c') (Join-Path $PSScriptRoot 'proxy\sdr.c') (Join-Path $PSScriptRoot 'proxy\bridge.c') (Join-Path $PSScriptRoot 'proxy\lobby.c') (Join-Path $PSScriptRoot 'proxy\splash.c') `
     $stubs $mhsrc $embed $def `
     $tipsLib @tipsLinkLibs `
-    "-I$(Join-Path $minhook 'include')" -DNDEBUG -include $versionH `
+    "-I$(Join-Path $minhook 'include')" -DNDEBUG @testDefs -include $versionH `
     -Wall -Wextra -static-libgcc @stripArgs -lkernel32 -lws2_32 -luser32 -lgdi32
 if ($LASTEXITCODE -ne 0) { throw 'gcc failed for winmm.dll' }
+
+& (Join-Path $PSScriptRoot 'seamcheck.ps1') -Path $out -Expect $(if ($Test) { 'present' } else { 'absent' })
 
 # 5. Release: pack the final DLL. This is the artifact uploaded to GitHub.
 if ($Release) { Invoke-Upx $out }
 
 Write-Host "built $out"
+if ($Test) { Write-Host 'TEST build (harness seam): for D:\WartalesTest only, never ship' }
 if ($Release) { Write-Host 'RELEASE build: symbols stripped, UPX-packed (higher AV false-positive risk; see DESIGN.md)' }
 Write-Host "drop this one file into the game folder: $out"

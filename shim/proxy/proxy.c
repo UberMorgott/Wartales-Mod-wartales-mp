@@ -232,9 +232,28 @@ static int is_master_host(const char *host) {
 	return 0;
 }
 
+#ifdef WMP_TEST
+// Local co-op harness seam, compiled only by `build.ps1 -Test` (marker
+// WMP_TEST_SEAM; check.ps1 proves the release dll has none). With
+// WARTALES_MP_TEST_INSTANCE=N (1..9) two games run side by side: each gets
+// its own helper mutex, its own master on 127.0.0.N:60442 and relay port
+// 1425N, so neither collides with the other. 0 = not a harness instance.
+static int test_instance(void) {
+	static int n = -1;
+	wchar_t v[8];
+	if (n < 0) {
+		DWORD len = GetEnvironmentVariableW(L"WARTALES_MP_TEST_INSTANCE", v, 8);
+		n = (len == 1 && v[0] >= L'1' && v[0] <= L'9') ? (int)(v[0] - L'0') : 0;
+	}
+	return n;
+}
+#else
+static int test_instance(void) { return 0; }
+#endif
+
 static int detour_host_resolve(unsigned char *host) {
 	if (host != NULL && is_master_host((const char *)host))
-		return (int)LOOPBACK;
+		return (int)LOOPBACK + (test_instance() > 0 ? (test_instance() - 1) << 24 : 0);
 	if (real_host_resolve == NULL)
 		return -1;
 	return real_host_resolve(host);
@@ -1083,13 +1102,18 @@ static void start_helper(void) {
 	size_t size = (size_t)(_binary_wartales_mp_exe_end - _binary_wartales_mp_exe_start);
 	wchar_t dir[MAX_PATH * 2];
 	wchar_t exe[MAX_PATH * 2];
-	wchar_t cmdline[MAX_PATH * 2 + 4];
+	wchar_t cmdline[MAX_PATH * 2 + 100];
 	STARTUPINFOW si;
 	PROCESS_INFORMATION pi;
 
 	// One helper per session, whoever loads us. The handle is deliberately
 	// never closed: it must outlive this thread to keep the name taken.
-	if (CreateMutexW(NULL, FALSE, L"Local\\wartales-mp-running") == NULL) {
+	wchar_t mutex_name[64] = L"Local\\wartales-mp-running";
+#ifdef WMP_TEST
+	if (test_instance() > 0)
+		_snwprintf(mutex_name, 63, L"Local\\wartales-mp-running-%d", test_instance());
+#endif
+	if (CreateMutexW(NULL, FALSE, mutex_name) == NULL) {
 		shim_log("helper: CreateMutexW failed (%lu)", (unsigned long)GetLastError());
 		return;
 	}
@@ -1119,6 +1143,15 @@ static void start_helper(void) {
 	cmdline[1] = 0;
 	wcscat(cmdline, exe);
 	wcscat(cmdline, L"\"");
+#ifdef WMP_TEST
+	if (test_instance() > 0) {
+		wchar_t args[96];
+		_snwprintf(args, 95, L" run -master 127.0.0.%d:60442 -port 1425%d -transport direct", test_instance(), test_instance());
+		args[95] = 0;
+		wcscat(cmdline, args);
+		shim_log("helper: WMP_TEST_SEAM instance %d:%ls", test_instance(), args);
+	}
+#endif
 
 	ZeroMemory(&si, sizeof(si));
 	si.cb = sizeof(si);

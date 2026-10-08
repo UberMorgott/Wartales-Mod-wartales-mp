@@ -15,7 +15,7 @@
 # from hlpatch.h, then the same wartales-tips library the DLL was linked with
 # (-TipsLib, default: the build output under -PatcherDir, i.e. patcher\).
 #
-#   .\shim\check.ps1 [-OutDir <path>] [-Hlboot <path to hlboot.dat>] [-PatcherDir <path>] [-TipsLib <path to libwartales_tips.a>]
+#   .\shim\check.ps1 [-OutDir <path>] [-Hlboot <path to hlboot.dat>] [-PatcherDir <path>] [-TipsLib <path to libwartales_tips.a>] [-Test]
 
 [CmdletBinding()]
 param(
@@ -23,17 +23,26 @@ param(
     [string]$Hlboot = 'D:\Steam\steamapps\common\Wartales\hlboot.dat',
     [Alias('TipsRepo')]
     [string]$PatcherDir = (Join-Path $PSScriptRoot '..\patcher'),
-    [string]$TipsLib = ''
+    [string]$TipsLib = '',
+    # A build.ps1 -Test output: dist-test\, the harness tips lib, seam required.
+    [switch]$Test
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Test -and -not $PSBoundParameters.ContainsKey('OutDir')) { $OutDir = Join-Path $PSScriptRoot '..\dist-test' }
 $gcc = (Get-Command gcc -ErrorAction SilentlyContinue)?.Source
 if (-not $gcc) { throw 'gcc not found in PATH' }
 $OutDir = (Resolve-Path $OutDir).Path
 $dll = Join-Path $OutDir 'winmm.dll'
 if (-not (Test-Path -LiteralPath $dll)) { throw "missing $dll (run shim\build.ps1 first)" }
 if (-not (Test-Path -LiteralPath $Hlboot)) { throw "missing $Hlboot" }
-if (-not $TipsLib) { $TipsLib = Join-Path $PatcherDir 'target\x86_64-pc-windows-gnu\release\libwartales_tips.a' }
+if (-not $TipsLib) { $TipsLib = Join-Path $PatcherDir ('{0}\x86_64-pc-windows-gnu\release\libwartales_tips.a' -f $(if ($Test) { 'target-test' } else { 'target' })) }
+
+# The release dll and its helper carry no harness test seam (a -Test build must).
+$seam = if ($Test) { 'present' } else { 'absent' }
+& (Join-Path $PSScriptRoot 'seamcheck.ps1') -Path $dll -Expect $seam
+$helperExe = Join-Path $OutDir 'wartales-mp.exe'
+if (Test-Path -LiteralPath $helperExe) { & (Join-Path $PSScriptRoot 'seamcheck.ps1') -Path $helperExe -Expect $seam }
 if (-not (Test-Path -LiteralPath $TipsLib)) { throw "missing $TipsLib (run shim\build.ps1 first, or pass -TipsLib)" }
 $TipsLib = (Resolve-Path $TipsLib).Path
 $tipsLinkLibs = @('-lntdll', '-luserenv', '-ldbghelp')
