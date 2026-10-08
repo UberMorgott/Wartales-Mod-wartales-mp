@@ -245,6 +245,15 @@ struct Ctx {
     obj_visible: RefField,
     obj_abs: (RefField, RefField),
     flow_size: (RefField, RefField),
+    /// GameInventory.inventoryContent; Flow scrollPosY / contentHeight /
+    /// minHeight / verticalAlign; Object.y / children; h2d.Object type.
+    inv_content: (RefField, RefType),
+    flow_scroll: RefField,
+    flow_content_h: RefField,
+    flow_va: (RefField, RefType),
+    obj_y: RefField,
+    obj_children: RefField,
+    obj_t: RefType,
     debrief_win_t: RefType,
     debrief: (RefField, RefType),
     loot: (RefField, RefType),
@@ -654,6 +663,19 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             f(flow_t, "calculatedWidth")?,
             f(flow_t, "calculatedHeight")?,
         ),
+        inv_content: {
+            let ic = field(code, game_inv.1, "inventoryContent")?;
+            if !is_sub(code, ic.1, flow_t) {
+                bail!("GameInventory.inventoryContent is not an h2d.Flow");
+            }
+            ic
+        },
+        flow_scroll: f(flow_t, "scrollPosY")?,
+        flow_content_h: f(flow_t, "contentHeight")?,
+        flow_va: field(code, flow_t, "verticalAlign")?,
+        obj_y: f(obj_t, "y")?,
+        obj_children: typed(code, obj_t, "children", arr_t)?,
+        obj_t,
         debrief_win_t,
         debrief,
         loot: (loot, inv_t),
@@ -1003,6 +1025,9 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let gui = r.r(c.game_ui.1);
     let ginv = r.r(c.game_inv.1);
     let chest = r.r(c.chest_inv.1);
+    let icr = r.r(c.inv_content.1);
+    let ob = r.r(c.obj_t);
+    let va = r.r(c.flow_va.1);
     let dwin = r.r(c.debrief_win_t);
     let dbr = r.r(c.debrief.1);
     let inv = r.r(c.loot.1);
@@ -1724,6 +1749,73 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.label("no_chest");
     w.lit(code, "null");
     w.a.label("chest_end");
+    // the own inventory panel's scroll area: scroll, content / viewport
+    // height, alignment, its children's y (scrollbar / grid)
+    w.lit(code, ",\"invc\":");
+    w.a.fld(gui, g, c.game_ui.0);
+    w.a.if_null(gui, "no_invc");
+    w.a.fld(ginv, gui, c.game_inv.0);
+    w.a.if_null(ginv, "no_invc");
+    w.a.fld(icr, ginv, c.inv_content.0);
+    w.a.if_null(icr, "no_invc");
+    w.lit(code, "{\"scroll\":");
+    w.a.fld(fl, icr, c.flow_scroll);
+    w.val(fl);
+    w.kv(code, "ch", icr, c.flow_content_h, fl);
+    w.kv(code, "h", icr, c.flow_size.1, fl);
+    w.lit(code, ",\"va\":");
+    w.a.fld(va, icr, c.flow_va.0);
+    w.a.if_null(va, "va_null");
+    w.a.op(Opcode::EnumIndex { dst: i, value: va });
+    w.val(i);
+    w.a.go("va_end");
+    w.a.label("va_null");
+    w.lit(code, "null");
+    w.a.label("va_end");
+    w.a.op(Opcode::Label);
+    w.lit(code, ",\"ys\":[");
+    w.a.fld(list, icr, c.obj_children);
+    w.a.if_null(list, "ys_end");
+    w.a.fld(n, list, c.arr_len);
+    w.a.fld(arr, list, c.arr_arr.0);
+    w.a.int(ix, k0);
+    w.a.loop_head("ys_loop");
+    w.a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ys_end",
+    );
+    w.a.int(kk, k0);
+    w.a.jmp(
+        Opcode::JEq {
+            a: ix,
+            b: kk,
+            offset: 0,
+        },
+        "ys_first",
+    );
+    w.lit(code, ",");
+    w.a.label("ys_first");
+    w.a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    w.a.op(Opcode::SafeCast { dst: ob, src: d });
+    w.a.fld(fl, ob, c.obj_y);
+    w.val(fl);
+    w.a.op(Opcode::Incr { dst: ix });
+    w.a.go("ys_loop");
+    w.a.label("ys_end");
+    w.lit(code, "]}");
+    w.a.go("invc_end");
+    w.a.label("no_invc");
+    w.lit(code, "null");
+    w.a.label("invc_end");
+    w.a.op(Opcode::Label);
     // the post-battle loot pool (open Debrief window): Std.string of the stacks
     w.lit(code, ",\"loot\":");
     w.a.op(Opcode::Type {
