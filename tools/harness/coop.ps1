@@ -23,6 +23,7 @@
 #                                          After 'place' the game keeps its launch-size
 #                                          input mapping: click at the launch size.
 #   coop.ps1 drag    -Inst A -X 1 -Y 2 -X2 3 -Y2 4 [-Steps 8] [-Tag t]  press, move, release (shots per step)
+#   coop.ps1 wheel   -Inst A -X 1 -Y 2 [-Delta -1]  mouse wheel notches at a pixel (negative = down)
 #   coop.ps1 shot    [-Inst A,B] [-Tag x] PrintWindow screenshot per window
 #   coop.ps1 place   [-Inst A,B] [-W 852 -H 480]  windows side by side
 #   coop.ps1 close   -Inst B              WM_CLOSE (Alt+F4, soft)
@@ -36,7 +37,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory)]
-    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'drag', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
+    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'drag', 'wheel', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
     [string]$Action,
     [string[]]$Inst = @('A', 'B'),
     [string]$Line = 'dump',
@@ -54,6 +55,7 @@ param(
     [int]$X2 = 0,
     [int]$Y2 = 0,
     [int]$Steps = 8,
+    [int]$Delta = -1,
     [switch]$Keep,
     [string]$Root = 'D:\WartalesTest'
 )
@@ -277,6 +279,27 @@ switch ($Action) {
             [Harness.Win]::mouse_event($(if ($Right) { 0x0010 } else { 0x0004 }), 0, 0, 0, [IntPtr]::Zero) # RIGHT/LEFTUP
             Lower-Window $hw
             Write-Host "${i}: click at client $cx,$cy"
+        }
+    }
+    'wheel' {
+        $run = Run-Dir
+        foreach ($i in $Inst) {
+            $p = Game-Proc $run $i
+            if (-not $p) { Write-Host "$i not running"; continue }
+            $p.Refresh()
+            $hw = $p.MainWindowHandle
+            $r = New-Object Harness.Win+RECT
+            [void][Harness.Win]::GetWindowRect($hw, [ref]$r)
+            if ($X -lt 0 -or $Y -lt 0 -or $X -ge ($r.Right - $r.Left) -or $Y -ge ($r.Bottom - $r.Top)) { Write-Host "${i}: outside the window, skipped"; continue }
+            if (-not (Raise-Window $hw $r)) { Lower-Window $hw; Write-Host "${i}: window not on top, skipped"; continue }
+            [void][Harness.Win]::SetCursorPos($r.Left + $X, $r.Top + $Y)
+            Start-Sleep -Milliseconds 400
+            for ($k = 0; $k -lt [Math]::Abs($Delta); $k++) {
+                [Harness.Win]::mouse_event(0x0800, 0, 0, [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * [Math]::Sign($Delta))), 0), [IntPtr]::Zero) # WHEEL
+                Start-Sleep -Milliseconds 150
+            }
+            Lower-Window $hw
+            Write-Host "${i}: wheel $Delta at $X,$Y"
         }
     }
     'drag' {
