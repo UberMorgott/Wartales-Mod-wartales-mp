@@ -143,6 +143,16 @@ behind every press-and-hold ring, divides its duration by 3 at entry
 1.95 s -> 0.65 s). The gamepad long-press binding duration is cdb data
 (`Const` `Pad_LongPress_Duration`) and is not changed here.
 
+**Skill sync** (`src/skill_sync.rs`, issue #2): a round reset
+(`battle.Unit.resetTurn`) reaches a client through hxbit `networkSync`, whose
+setters never mark the battle UI dirty (`set_skillPersistValues` does, but not
+while the battle is locked), so the client's skill bar kept the previous
+round's availability (Inhalation greyed) until an action redrew it. On a
+client only (`!Game.isAuth`), when the list of `battle.currentUnit` is emptied,
+`set_apSkillPlayed` now calls `battle.setUIDirty()` (a flag; the next
+`Battle.update` redraws the skill bar, as after an action).
+Host and solo are unchanged. Skipped (logged) on mismatch.
+
 **Profession experience** (`src/job_xp.rs`): vanilla already keeps each
 profession's level across job switches (`st.Unit.jobsLevel`, a networked and
 saved `Map<String, Int>`; `_removeTrait` writes `jobsLevel[tid] = t.level`,
