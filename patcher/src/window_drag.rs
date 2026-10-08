@@ -21,7 +21,7 @@
 //        win.frameFlow, Type.getClassName(Type.getClass(win)))`.
 //      - the saved offset of its class is applied (`mpDragRestore`).
 //      - `windowRoot.onAfterReflow = mpWinReflow(this)` (no vanilla code sets
-//        it on a plain h2d.Flow): `mpDragClamp(win)`, then frameFlow gets the
+//        it on a plain h2d.Flow): `mpDragClamp(win, null)`, then frameFlow gets the
 //        window's offsets again (it may be created after init).
 //   P. `GameInventory` constructor (end): `mpDragPanel(chestInventory,
 //      "GameInventory#chest")`, `mpDragPanel(inventory, "GameInventory#inv")`.
@@ -51,20 +51,25 @@
 //   Absolute children count as placed by their flow (moved, clamped) on an
 //       axis with an align: Flow.hx:1779-1806 adds the offsets there (the chest
 //       panel is `position: absolute; align: bottom left; offset-y: -410`).
-//   mpDragClamp(obj)  for an onAfterReflow: a visible, flow-placed `obj`
+//   mpDragClamp(obj, key)  for an onAfterReflow: a visible, flow-placed `obj`
 //       with a non-zero offset in its parent flow is pushed back so at least
 //       KEEP_PX of it stays inside the scene horizontally and its top edge
 //       stays within [0, height - KEEP_PX] (header reachable). Position: parent
 //       absX/absY (local x/y before its first sync) + obj.x/y; width: the
 //       flow's calculatedWidth for it. Covers restore at a smaller resolution
-//       and a window resize.
+//       and a window resize. A panel (key not null) at its `mpWinBase:<key>`
+//       spot (vanilla placement) is left alone; while its parent still has
+//       needReflow set (its onAfterReflow then runs inside the parent's
+//       reflow, before the parent places it: stale x/y) it only sets its own
+//       needReflow, so it reflows (and clamps) on its sync right after; a
+//       clamped panel is saved (pinned). Windows pass a null key.
 //   mpDragPanel(panel, key)  sets `panel.onAfterReflow = panelLate(panel, key)`:
 //       once the panel's dom has no style refresh pending (domkit styles a new
 //       element on the next sync; that first pass writes the CSS offsets), its
 //       offsets are stored as `mpWinBase:<key>` (the double-push reset target;
 //       removed at 0,0), the saved offset is restored, a panel with an
 //       InventoryContent gets the row-resize handle and saved size (see
-//       "row resize") and onAfterReflow becomes `mpDragClamp(panel)` plus
+//       "row resize") and onAfterReflow becomes `mpDragClamp(panel, key)` plus
 //       the rows kept built. A panel with such a base gets every saved offset
 //       pinned as inline dom attributes (offset-x / offset-y): a style refresh
 //       (the chest Element's hover) re-applies the CSS rules, which threw the
@@ -204,6 +209,9 @@ struct Ctx {
     start_capture: RefFun,
     stop_capture: RefFun,
     set_need_reflow: RefFun,
+    /// Flow.needReflow: cleared at the end of reflow (Flow.hx:1856), before
+    /// onAfterReflow; still set while the flow measures (reflows) its children.
+    need_reflow: RefField,
     set_enable_inter: RefFun,
     has_class: RefFun,
     get_class: RefFun,
@@ -499,6 +507,7 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         &[flow_t, bool_t],
         bool_t,
     )?;
+    let need_reflow = typed(code, flow_t, "needReflow", bool_t)?;
     let set_enable_inter = method(code, flow_t, "set_enableInteractive")?.findex;
     want_sig(
         code,
@@ -639,6 +648,7 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         start_capture,
         stop_capture,
         set_need_reflow,
+        need_reflow,
         set_enable_inter,
         has_class,
         get_class,
@@ -802,7 +812,7 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
     let event = add_event(code, c, &g, report, save, rs_move)?;
     let cancel = add_cancel(code, c, &g, report, save)?;
     let begin = add_begin(code, c, &g, report, save, restore_base, event, cancel)?;
-    let clamp = add_clamp(code, c, report)?;
+    let clamp = add_clamp(code, c, &g, report, save)?;
     let (panel_push, cap_t) = add_panel_push(code, c, begin)?;
     let rs = RsFns {
         content: rs_content,
@@ -1884,10 +1894,11 @@ fn add_rs_reflow(
         },
         "out",
     );
-    a.op(Opcode::Call1 {
+    a.op(Opcode::Call2 {
         dst: v,
         fun: clamp,
         arg0: panel,
+        arg1: key,
     });
     a.op(Opcode::Call1 {
         dst: rows,
@@ -2833,12 +2844,38 @@ fn add_begin(
     )
 }
 
-/// `clamp(obj)`: keeps a dragged `obj` (child of a flow) on screen (see the header).
-fn add_clamp(code: &mut Bytecode, c: &Ctx, report: RefFun) -> Result<RefFun> {
+/// `clamp(obj, key)`: keeps a dragged `obj` (child of a flow) on screen (see the header).
+///
+/// With a `key` (panels; null for windows): nothing at the panel's styled spot
+/// (`mpWinBase:<key>`, vanilla placement); while the parent flow is mid-reflow
+/// (its needReflow still set; a panel's onAfterReflow runs inside the parent's
+/// reflow when the parent measures it, Flow.hx:1755, before it places it,
+/// Flow.hx:1804-1806: stale x/y) only the panel's needReflow is set, so it
+/// clamps on its own reflow right after; a clamped spot is saved (and so
+/// pinned over the CSS offset).
+fn add_clamp(
+    code: &mut Bytecode,
+    c: &Ctx,
+    g: &Globals,
+    report: RefFun,
+    save: RefFun,
+) -> Result<RefFun> {
     let k0 = int_const(code, 0);
+    let (k16, kh, km) = (
+        int_const(code, 16),
+        int_const(code, 32768),
+        int_const(code, 65535),
+    );
     let (f0, f_keep) = (float_const(code, 0.0), float_const(code, KEEP_PX));
-    let mut r = Regs(vec![c.flow_t]);
-    let obj = Reg(0);
+    let mut r = Regs(vec![c.flow_t, c.str_t]);
+    let (obj, key) = (Reg(0), Reg(1));
+    let (full, bd, bi, pk, k) = (
+        r.r(c.str_t),
+        r.r(c.dyn_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+    );
     let (v, exc, b, sc, p, fl, ps, raw, d, pr) = (
         r.r(c.void_t),
         r.r(c.dyn_t),
@@ -2891,6 +2928,7 @@ fn add_clamp(code: &mut Bytecode, c: &Ctx, report: RefFun) -> Result<RefFun> {
     fld(&mut a, b, obj, c.visible);
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "out");
     parent_flow(&mut a, c, obj, p, fl);
+    a.jmp(Opcode::JNull { reg: fl, offset: 0 }, "out");
     // Its FlowProperties, read without getProperties (that would force a reflow).
     a.op(Opcode::Call2 {
         dst: idx,
@@ -2953,6 +2991,72 @@ fn add_clamp(code: &mut Bytecode, c: &Ctx, report: RefFun) -> Result<RefFun> {
         "out",
     );
     a.label("go");
+    // A panel at its styled spot is where vanilla puts it: left alone.
+    a.jmp(Opcode::JNull { reg: key, offset: 0 }, "pos");
+    full_key(&mut a, c, g.base, full, key);
+    a.op(Opcode::Null { dst: bd });
+    a.op(Opcode::Call2 {
+        dst: bd,
+        fun: c.get_ud,
+        arg0: full,
+        arg1: bd,
+    });
+    a.jmp(Opcode::JNull { reg: bd, offset: 0 }, "defer");
+    a.op(Opcode::SafeCast { dst: bi, src: bd });
+    a.op(Opcode::Int { dst: k, ptr: kh });
+    a.op(Opcode::Add {
+        dst: pk,
+        a: ox,
+        b: k,
+    });
+    a.op(Opcode::Add {
+        dst: nx,
+        a: oy,
+        b: k,
+    });
+    a.op(Opcode::Int { dst: k, ptr: k16 });
+    a.op(Opcode::Shl {
+        dst: pk,
+        a: pk,
+        b: k,
+    });
+    a.op(Opcode::Int { dst: k, ptr: km });
+    a.op(Opcode::And {
+        dst: nx,
+        a: nx,
+        b: k,
+    });
+    a.op(Opcode::Or {
+        dst: pk,
+        a: pk,
+        b: nx,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: pk,
+            b: bi,
+            offset: 0,
+        },
+        "out",
+    );
+    // A panel whose parent is still to place it (stale x/y): clamped on its
+    // own reflow right after, in the same frame (the parent's sync reflows,
+    // then syncs its children; set_needReflow does not reach the parent).
+    a.label("defer");
+    fld(&mut a, b, fl, c.need_reflow);
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "pos");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: c.set_need_reflow,
+        arg0: obj,
+        arg1: b,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "out");
+    a.label("pos");
     // Origin of the parent: absX/absY once synced, else its local position (windowRoot: 0,0).
     fld(&mut a, b, fl, c.pos_changed);
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "abs");
@@ -3116,8 +3220,23 @@ fn add_clamp(code: &mut Bytecode, c: &Ctx, report: RefFun) -> Result<RefFun> {
         arg0: fl,
         arg1: b,
     });
+    // Kept: a style refresh (the chest's hover) re-applies the CSS offsets.
+    a.jmp(Opcode::JNull { reg: key, offset: 0 }, "out");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: save,
+        arg0: obj,
+        arg1: key,
+    });
     guard_close(&mut a, &gd, report);
-    push_fn(code, vec![c.flow_t], c.void_t, r.0, a.finish(), c.dbg_file)
+    push_fn(
+        code,
+        vec![c.flow_t, c.str_t],
+        c.void_t,
+        r.0,
+        a.finish(),
+        c.dbg_file,
+    )
 }
 
 /// Panel push closure `(capture(panel, key), hxd.Event) -> void` and its capture enum type.
@@ -3793,10 +3912,14 @@ fn add_win_reflow(
         },
         "out",
     );
-    a.op(Opcode::Call1 {
+    // No key: a window has no styled spot to keep nor a pin.
+    let ns = r.r(c.str_t);
+    a.op(Opcode::Null { dst: ns });
+    a.op(Opcode::Call2 {
         dst: v,
         fun: clamp,
         arg0: win,
+        arg1: ns,
     });
     // Title row: pushes on its non-button elements reach the drag. Only for
     // windows that can be dragged (modal): the HUD (GameUI is a ui.Window,
@@ -4687,7 +4810,7 @@ mod tests {
             sig_of(named(N_RESTORE)).0,
             ["h2d.Object", "h2d.Object", "String"]
         );
-        assert_eq!(sig_of(named(N_CLAMP)).0, ["h2d.Flow"]);
+        assert_eq!(sig_of(named(N_CLAMP)).0, ["h2d.Flow", "String"]);
         assert_eq!(sig_of(a.panel).0, ["h2d.Flow", "String"]);
     }
 
@@ -5390,6 +5513,86 @@ mod tests {
         assert!(s.c.take("setAttribute").is_empty());
     }
 
+    /// Issue #4: the chest panel at its styled spot (never dragged) is left
+    /// where vanilla puts it, even when its stale position looks off screen;
+    /// no clamp while the parent flow is mid-reflow (its needReflow still
+    /// set: it places the panel afterwards), the panel's own reflow is asked
+    /// for instead (clamped then, placed); a real clamp is saved and pinned,
+    /// so the hover's style refresh keeps it. Windows (no key) clamp as before.
+    #[test]
+    fn panel_clamp_keeps_vanilla_spot_and_pins() {
+        let Some(image) = game() else { return };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (obj, pr) = scene(&mut s, &c);
+        let (al_h, al_v) = (s.c.enm(0, vec![]), s.c.enm(2, vec![]));
+        s.c.set(&pr, c.is_abs, V::B(true));
+        s.c.set(&pr, c.h_align, al_h);
+        s.c.set(&pr, c.v_align, al_v);
+        s.c.set(&pr, c.off_y, V::I(-410));
+        s.c.set(&pr, c.p_calc_w, V::I(300));
+        s.c.set(&obj, c.visible, V::B(true));
+        let dom = s.c.obj(&[(c.need_style, V::B(false))]);
+        s.c.set(&obj, c.dom, dom);
+        let cap = s.c.enm(0, vec![obj.clone(), V::S("k".into())]);
+        s.run(f.late, vec![cap.clone()]);
+        assert_eq!(s.c.map("ud", "mpWinBase:k"), packed(0, -410));
+        // The parent seen above the screen top (stale, mid-layout values).
+        let fl = s.c.get(&obj, c.parent);
+        s.c.set(&fl, c.abs_x, V::F(0.0));
+        s.c.set(&fl, c.abs_y, V::F(-500.0));
+        s.c.take("setUserData");
+        s.c.take("needReflow");
+
+        // Styled spot: untouched, nothing saved.
+        s.run(f.rs_reflow, vec![cap.clone()]);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-410));
+        assert!(s.c.take("needReflow").is_empty());
+        assert!(s.c.take("setUserData").is_empty());
+
+        // A dragged spot while the parent is mid-reflow: untouched too.
+        s.c.set(&pr, c.off_x, V::I(30));
+        s.c.set(&pr, c.off_y, V::I(-300));
+        s.c.set(&fl, c.need_reflow, V::B(true));
+        s.run(f.rs_reflow, vec![cap.clone()]);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-300));
+        let nr = s.c.take("needReflow");
+        assert_eq!(nr.len(), 1, "the panel reflows again once placed");
+        assert_eq!(nr[0][0], obj);
+        assert!(s.c.take("setUserData").is_empty());
+
+        // Placed (parent reflow done): clamped down to the top edge, saved, pinned.
+        s.c.set(&fl, c.need_reflow, V::B(false));
+        s.run(f.rs_reflow, vec![cap.clone()]);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(150));
+        assert_eq!(s.c.take("needReflow").len(), 1);
+        assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(30, 150));
+        restyle(&mut s, &c, &pr);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(150), "pinned over the CSS offset");
+
+        // A window: clamped whatever its parent's needReflow, never saved.
+        let clamp = find_named(&code, N_CLAMP).unwrap();
+        let (win, wpr) = scene(&mut s, &c);
+        s.c.set(&win, c.visible, V::B(true));
+        s.c.set(&wpr, c.off_y, V::I(-300));
+        s.c.set(&wpr, c.p_calc_w, V::I(300));
+        let wfl = s.c.get(&win, c.parent);
+        for (fd, v) in [
+            (c.abs_x, V::F(0.0)),
+            (c.abs_y, V::F(-500.0)),
+            (c.need_reflow, V::B(true)),
+        ] {
+            s.c.set(&wfl, fd, v);
+        }
+        s.c.take("setUserData");
+        s.run(clamp, vec![win, V::Null]);
+        assert_eq!(s.c.get(&wpr, c.off_y), V::I(150));
+        assert!(s.c.take("setUserData").is_empty());
+    }
+
     /// An inventory panel (scroll area 330 px = 6 rows, grid built for 6)
     /// whose top is at y 500 and 400 px tall on a 1080 px screen: room for 3
     /// more rows below it. Returns (panel, props, content, grid).
@@ -5478,8 +5681,7 @@ mod tests {
         assert_eq!(s.c.get(&inv, c.rs.vis_h), V::I(8));
         assert_eq!(s.c.get(&inv, c.rs.base_h), V::I(8));
         assert_eq!(s.c.take("forceUpdate").len(), 1, "rows built");
-        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(8));
-        // Within the same row: nothing changes.
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(8));        // Within the same row: nothing changes.
         mouse(&mut s, 25.0, 690.0);
         s.c.take("setUserData");
         event(&mut s, &c, &f, c.ev_move);
@@ -5548,8 +5750,7 @@ mod tests {
         assert!(
             s.c.take("maxHeight").is_empty(),
             "reflow never resets the height (no reflow loop)"
-        );
-        s.run(f.rs_reflow, vec![cap2]);
+        );        s.run(f.rs_reflow, vec![cap2]);
         assert!(
             s.c.take("forceUpdate").is_empty(),
             "rows already built: no rebuild"
