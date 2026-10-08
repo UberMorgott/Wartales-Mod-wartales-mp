@@ -28,16 +28,15 @@ import (
 // Peer is whoever issued a command: the local game, or a guest behind a
 // proxy-link.
 type Peer interface {
-	// UserID is the minted Session ('X') id: what a direct-relay lobby emits.
+	// UserID is the minted Session ('X') id: logs and the user/login sid only.
 	UserID() string
 	// SteamID is the real Steam id the player's game reported, or "" when it
 	// reported none (or one that is not well-formed). An SDR lobby emits it.
 	SteamID() string
 	// GameID is the id the player's game calls its own: the "uid" of its
-	// user/login, verbatim. LobbyService.onMessage@54929 drops every lobby
-	// packet whose target is not exactly this string (LobbyService.hx:101),
-	// so a packet addressed to a member id we minted is re-addressed to it
-	// before delivery (see lobbyChat). "" when unknown.
+	// user/login, verbatim, and the id every lobby names it by (idOf):
+	// LobbyService.onMessage@54929 drops every lobby packet whose target is
+	// not exactly this string (LobbyService.hx:101). "" when unknown.
 	GameID() string
 	Name() string
 	Remote() bool

@@ -2,11 +2,11 @@ package master
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/UberMorgott/wartales-mp/internal/nat"
-	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
 // TestReconnectLobbyKeepsGameTransport: the in-game reconnect lobby
@@ -67,8 +67,9 @@ func TestReconnectLobbyKeepsGameTransport(t *testing.T) {
 			}
 			check := func(what, id string, steam bool) {
 				t.Helper()
-				if got := uid.IsSteam(owner(id)); got != steam {
-					t.Fatalf("%s owner %q: Steam-shaped = %v, want %v", what, owner(id), got, steam)
+				// The transport is in the lobby id; members keep their game ids.
+				if got := !strings.HasSuffix(id, DirectLobbyMark); got != steam || owner(id) != hostSteam {
+					t.Fatalf("%s %q owner %q: SDR = %v, want %v", what, id, owner(id), got, steam)
 				}
 			}
 

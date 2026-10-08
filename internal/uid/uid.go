@@ -1,14 +1,10 @@
-// Package uid mints the player ids our master puts on the wire.
+// Package uid mints the Session ids our master hands out (user/login "sid",
+// the proxy-link's own player id) and reads the game's Steam ids.
 //
-// The client refuses to ask the master for a transport when every member of a
-// lobby looks like a Steam account: Lobby.isSteamOnly@24596 returns true when
-// each member id starts with 'S', and Lobby.setupPlatform@24597 then skips
-// instance/get and takes the game's Steam path, bypassing our relay. That
-// switch is the master's to throw: a lobby on the direct relay gets Session
-// ids ('X') for every member, a lobby on SDR gets the players' real Steam ids
-// (which the shim then carries over ISteamNetworkingMessages). An id that
-// merely looks like Steam but is not one is never emitted: the game would
-// derive a bogus SteamID from it.
+// Lobby members are NOT named by minted ids: a lobby renders each member by
+// the id its game calls itself (internal/master idOf), on both transports, so
+// saves and games agree on who a player is. Which transport a lobby uses is
+// carried by its id (master.DirectLobbyMark), not by the shape of member ids.
 package uid
 
 import (

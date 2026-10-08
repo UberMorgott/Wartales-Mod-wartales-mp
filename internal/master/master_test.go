@@ -1105,41 +1105,28 @@ func (w *wsClient) callErr(t *testing.T, cmd string, args any) string {
 	}
 }
 
-// TestEmittedUIDsAreNotSteamShaped guards the trap behind
-// Lobby.isSteamOnly@24596 for a lobby on the DIRECT relay: it returns true
-// when EVERY member id of a lobby starts with 'S', and
-// Lobby.setupPlatform@24597 then never sends instance/get, so the game takes
-// its Steam path and our relay is bypassed. Nothing the master emits for such
-// a lobby may therefore carry a Steam shaped id, whatever the clients report
-// about themselves.
-func TestEmittedUIDsAreNotSteamShaped(t *testing.T) {
+// TestDirectLobbyNamesPlayersByGameIDs: a lobby on the DIRECT relay names
+// every member by the id its own game calls itself (here Steam ids), exactly
+// as an SDR lobby and the players' saves do (LoadMultiGame.isHostIn,
+// LobbyState.userCanJoin compare them). Lobby.isSteamOnly@24596 would then be
+// true and the game would bypass our relay; the lobby id's DirectLobbyMark is
+// what keeps it on instance/get (patcher direct_lobby.rs).
+func TestDirectLobbyNamesPlayersByGameIDs(t *testing.T) {
 	addr := startMaster(t)
-
-	// every id the server put on the wire during this test
-	var emitted []string
-	check := func(what, id string) {
-		t.Helper()
-		if id == "" {
-			t.Fatalf("%s: empty id", what)
-		}
-		if id[0] != 'X' {
-			t.Fatalf("%s = %q, want a Session ('X') id", what, id)
-		}
-		emitted = append(emitted, id)
-	}
+	const hostID, guestID = "S0011223344556677", "S7766554433221100"
 
 	host := dialMaster(t, addr)
 	defer func() { _ = host.c.Close() }()
 	var login struct {
 		SID string `json:"sid"`
 	}
-	raw := host.call(t, "user/login", map[string]any{
-		"name": "Host", "uid": "S0011223344556677", "version": 2,
-	})
+	raw := host.call(t, "user/login", map[string]any{"name": "Host", "uid": hostID, "version": 2})
 	if err := json.Unmarshal(raw, &login); err != nil {
 		t.Fatal(err)
 	}
-	check("user/login sid", login.SID)
+	if !uid.IsSession(login.SID) {
+		t.Fatalf("sid = %q, want a Session id", login.SID)
+	}
 
 	var id string
 	raw = host.call(t, "lobby/create", map[string]any{
@@ -1148,12 +1135,13 @@ func TestEmittedUIDsAreNotSteamShaped(t *testing.T) {
 	if err := json.Unmarshal(raw, &id); err != nil {
 		t.Fatal(err)
 	}
+	if !strings.HasPrefix(id, "L") || !strings.HasSuffix(id, DirectLobbyMark) {
+		t.Fatalf("direct lobby id = %q, want L...%s", id, DirectLobbyMark)
+	}
 
 	guest := dialMaster(t, addr)
 	defer func() { _ = guest.c.Close() }()
-	guest.call(t, "user/session", map[string]any{
-		"name": "Guest", "uid": "S7766554433221100", "sid": login.SID, "version": 2,
-	})
+	guest.call(t, "user/session", map[string]any{"name": "Guest", "uid": guestID, "sid": login.SID, "version": 2})
 
 	var info struct {
 		Owner string `json:"owner"`
@@ -1165,43 +1153,28 @@ func TestEmittedUIDsAreNotSteamShaped(t *testing.T) {
 	if err := json.Unmarshal(raw, &info); err != nil {
 		t.Fatal(err)
 	}
-	if len(info.Users) != 2 {
-		t.Fatalf("lobby/join returned %d users, want 2: %s", len(info.Users), raw)
+	if info.Owner != hostID || len(info.Users) != 2 || info.Users[0].ID != hostID || info.Users[1].ID != guestID {
+		t.Fatalf("lobby/join = %s, want owner %s and members %s, %s", raw, hostID, hostID, guestID)
 	}
-	check("lobby/join owner", info.Owner)
-	for i, u := range info.Users {
-		check("lobby/join users["+strconv.Itoa(i)+"].id", u.ID)
+	join := host.readPush(t, "lobby/join")
+	if !strings.Contains(string(join), `"uid":"`+guestID+`"`) {
+		t.Fatalf("lobby/join push = %s, want uid %s", join, guestID)
 	}
+}
 
-	raw = host.call(t, "lobby/info", map[string]any{"id": id})
-	if err := json.Unmarshal(raw, &info); err != nil {
-		t.Fatal(err)
+// A lobby member that never reported its game id cannot join: any other id
+// would match neither its save nor the LobbyState players.
+func TestJoinWithoutGameIDIsRefused(t *testing.T) {
+	s := quietServer(nil)
+	owner := &session{uid: "Xowner", game: "Sowner", name: "Owner"}
+	l := &lobby{id: "L1D", owner: owner.game, users: []*member{{ID: owner.game, peer: owner}}}
+	s.lobbies.lobbies[l.id] = l
+	old := &remoteInvitePeer{&session{uid: "Xold", name: "Old"}}
+	if _, err := s.lobbyJoin(lobbyArgs{ID: l.id}, old); err == nil || !strings.Contains(err.Error(), "player id") {
+		t.Fatalf("join without a game id = %v, want a refusal", err)
 	}
-	if len(info.Users) != 2 {
-		t.Fatalf("lobby/info returned %d users, want 2: %s", len(info.Users), raw)
-	}
-	check("lobby/info owner", info.Owner)
-	for i, u := range info.Users {
-		check("lobby/info users["+strconv.Itoa(i)+"].id", u.ID)
-	}
-	if info.Users[0].ID == info.Users[1].ID {
-		t.Fatalf("both members share the id %q", info.Users[0].ID)
-	}
-
-	// what the client would compute: isSteamOnly is "every member is 'S'".
-	steamOnly := true
-	for _, u := range info.Users {
-		if !strings.HasPrefix(u.ID, "S") {
-			steamOnly = false
-		}
-	}
-	if steamOnly {
-		t.Fatal("isSteamOnly would be true: the game would bypass the relay")
-	}
-	for _, id := range emitted {
-		if strings.HasPrefix(id, "S") || !uid.IsSession(id) {
-			t.Fatalf("emitted id %q is not a Session id", id)
-		}
+	if len(l.users) != 1 {
+		t.Fatal("the refused peer was added")
 	}
 }
 
@@ -1294,10 +1267,10 @@ func TestSDRLobbyEmitsRealSteamIDs(t *testing.T) {
 	}
 }
 
-// TestSDRLobbyWithoutSteamIDFallsBackToSession: a member that reported no
-// (well-formed) Steam id cannot be named on the Steam path, so it keeps its
-// Session id, which honestly flips the lobby back to instance/get.
-func TestSDRLobbyWithoutSteamIDFallsBackToSession(t *testing.T) {
+// TestSDRLobbyWithoutSteamIDKeepsGameID: a member that reported no
+// (well-formed) Steam id is still named by its game id in an SDR lobby, so its
+// saves and its game agree on who it is; the lobby id carries no direct mark.
+func TestSDRLobbyWithoutSteamIDKeepsGameID(t *testing.T) {
 	addr := startMasterWith(t, lanEndpoint, SDRStatus{})
 
 	host := dialMaster(t, addr)
@@ -1307,6 +1280,9 @@ func TestSDRLobbyWithoutSteamIDFallsBackToSession(t *testing.T) {
 	raw := host.call(t, "lobby/create", map[string]any{"props": map[string]any{"maxPlayers": 4}})
 	if err := json.Unmarshal(raw, &id); err != nil {
 		t.Fatal(err)
+	}
+	if strings.HasSuffix(id, DirectLobbyMark) {
+		t.Fatalf("SDR lobby id = %q carries the direct mark", id)
 	}
 
 	guest := dialMaster(t, addr)
@@ -1321,8 +1297,8 @@ func TestSDRLobbyWithoutSteamIDFallsBackToSession(t *testing.T) {
 	if err := json.Unmarshal(raw, &info); err != nil {
 		t.Fatal(err)
 	}
-	if len(info.Users) != 2 || !uid.IsSteam(info.Users[0].ID) || !uid.IsSession(info.Users[1].ID) {
-		t.Fatalf("lobby/join = %s, want the host's Steam id and a Session id for the guest", raw)
+	if len(info.Users) != 2 || info.Users[0].ID != "S0011223344556677" || info.Users[1].ID != "Snot-a-steam-id" {
+		t.Fatalf("lobby/join = %s, want the host's Steam id and the guest's game id", raw)
 	}
 }
 
@@ -1366,8 +1342,8 @@ func TestLobbyTransport(t *testing.T) {
 	if err := json.Unmarshal(raw, &id); err != nil {
 		t.Fatal(err)
 	}
-	hostUID := uid.Mint("S00")
-	guestUID := uid.Mint("S01")
+	// Members are named by the ids their games call themselves.
+	hostUID, guestUID := "S00", "S01"
 
 	guest := dialMaster(t, addr)
 	defer func() { _ = guest.c.Close() }()
@@ -1389,10 +1365,9 @@ func TestLobbyTransport(t *testing.T) {
 		t.Fatalf("lobby/join push = %s", join)
 	}
 
-	// A guest packet addressed to the lobby owner by the member id the guest
-	// knows. The bytes are a haxe.Serializer enum value the server leaves
-	// alone; only the target is re-addressed to the id the host's game calls
-	// its own ("S00", its user/login uid), or LobbyService.hx:101 drops it.
+	// A guest packet addressed to the lobby owner by its member id, which is
+	// the id the host's game calls its own (LobbyService.hx:101 filters on it):
+	// the server leaves the whole message alone.
 	const packet = `wy26:mpman.net.LobbyMessageDatay6:Packet:2s12:/v8AAQIDBAUGBw==`
 	up := packet + haxeString(hostUID)
 	guest.call(t, "lobby/chat", map[string]any{"id": id, "msg": up})
@@ -1412,12 +1387,12 @@ func TestLobbyTransport(t *testing.T) {
 	if chat.UID != guestUID {
 		t.Fatalf("lobby/chat push uid = %q, want the sender %q", chat.UID, guestUID)
 	}
-	if chat.Msg != packet+haxeString("S00") {
-		t.Fatalf("lobby/chat push msg = %q, want the packet re-addressed to S00", chat.Msg)
+	if chat.Msg != up {
+		t.Fatalf("lobby/chat push msg = %q, want it verbatim", chat.Msg)
 	}
 
-	// ... and the answer the host sends back through its LobbyUserService,
-	// addressed to the guest's member id, arrives addressed to "S01".
+	// ... and the answer the host sends back, addressed to the guest's member
+	// id, arrives verbatim.
 	const answer = `wy26:mpman.net.LobbyMessageDatay6:Packet:2s8:AAECAwQFBgc=`
 	host.call(t, "lobby/chat", map[string]any{"id": id, "msg": answer + haxeString(guestUID)})
 
@@ -1425,7 +1400,7 @@ func TestLobbyTransport(t *testing.T) {
 	if err := json.Unmarshal(got, &chat); err != nil {
 		t.Fatal(err)
 	}
-	if chat.UID != hostUID || chat.Msg != answer+haxeString("S01") {
+	if chat.UID != hostUID || chat.Msg != answer+haxeString(guestUID) {
 		t.Fatalf("lobby/chat push back to the guest = %s", got)
 	}
 
@@ -1487,8 +1462,8 @@ func TestLobbyLifecycle(t *testing.T) {
 	if err := json.Unmarshal(raw, &info); err != nil {
 		t.Fatal(err)
 	}
-	// The owner is the id we minted for "S00", never the Steam id itself.
-	if info.ID != id || info.Owner != uid.Mint("S00") || len(info.Users) != 1 || info.Users[0].Name != "Host" {
+	// The owner is the id the host's game calls itself; the lobby is direct.
+	if info.ID != id || !strings.HasSuffix(id, DirectLobbyMark) || info.Owner != "S00" || len(info.Users) != 1 || info.Users[0].Name != "Host" {
 		t.Fatalf("lobby/info = %s", raw)
 	}
 
@@ -1616,9 +1591,9 @@ func TestRejoinKeepsReplacementPeer(t *testing.T) {
 	for _, full := range []bool{false, true} {
 		t.Run("full="+strconv.FormatBool(full), func(t *testing.T) {
 			s, _ := startMasterOpts(t, nil)
-			old := &session{uid: "S12345678", name: "Guest"}
-			fresh := &session{uid: old.uid, name: old.name}
-			l := &lobby{id: "Lrejoin", owner: old.uid, users: []*member{{ID: old.uid, peer: old}}}
+			old := &session{uid: "X12345678", game: "S12345678", name: "Guest"}
+			fresh := &session{uid: old.uid, game: old.game, name: old.name}
+			l := &lobby{id: "Lrejoin", owner: old.game, users: []*member{{ID: old.game, peer: old}}}
 			if full {
 				limit := 1
 				l.maxPlayers = &limit

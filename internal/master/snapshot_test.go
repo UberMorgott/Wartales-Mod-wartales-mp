@@ -12,9 +12,9 @@ import (
 // that keeps setting data at the same time.
 func TestLobbyInfoIsASnapshot(t *testing.T) {
 	s := quietServer(nil)
-	owner := &session{uid: "Sowner", name: "Owner"}
-	l := &lobby{id: "L1", owner: owner.uid, data: map[string]json.RawMessage{},
-		users: []*member{{ID: owner.uid, peer: owner}}}
+	owner := &session{uid: "Xowner", game: "Sowner", name: "Owner"}
+	l := &lobby{id: "L1", owner: owner.game, data: map[string]json.RawMessage{},
+		users: []*member{{ID: owner.game, peer: owner}}}
 	s.lobbies.lobbies[l.id] = l
 
 	var wg sync.WaitGroup

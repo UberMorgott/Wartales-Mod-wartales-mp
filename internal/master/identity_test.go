@@ -14,11 +14,11 @@ import (
 // it the owner: not by joining, not by owner-only commands, not by chat.
 func TestRemotePeerCannotImpersonateLocalOwner(t *testing.T) {
 	s := quietServer(nil)
-	owner := &session{uid: uid.Mint("owner"), name: "Owner"}
-	l := &lobby{id: "L1", owner: owner.uid, data: map[string]json.RawMessage{},
-		users: []*member{{ID: owner.uid, Name: "Owner", peer: owner}}}
+	owner := &session{uid: uid.Mint("owner"), game: "Sowner", name: "Owner"}
+	l := &lobby{id: "L1", owner: owner.game, data: map[string]json.RawMessage{},
+		users: []*member{{ID: owner.game, Name: "Owner", peer: owner}}}
 	s.lobbies.lobbies[l.id] = l
-	fake := &remoteInvitePeer{&session{uid: owner.uid, name: "Mallory"}}
+	fake := &remoteInvitePeer{&session{uid: owner.uid, game: owner.game, name: "Mallory"}}
 
 	if _, err := s.lobbyJoin(lobbyArgs{ID: l.id}, fake); err == nil {
 		t.Fatal("a remote peer took the local owner's slot")
@@ -29,7 +29,7 @@ func TestRemotePeerCannotImpersonateLocalOwner(t *testing.T) {
 	if err := s.lobbySetData(lobbyArgs{ID: l.id, Data: json.RawMessage(`{"k":"t"}`)}, fake); err == nil {
 		t.Fatal("a remote peer set data as the owner")
 	}
-	if err := s.lobbyTransfer(lobbyArgs{ID: l.id, UID: owner.uid}, fake); err == nil {
+	if err := s.lobbyTransfer(lobbyArgs{ID: l.id, UID: owner.game}, fake); err == nil {
 		t.Fatal("a remote peer transferred the lobby as the owner")
 	}
 	if err := s.lobbySetUserData(lobbyArgs{ID: l.id, Data: json.RawMessage(`"x"`)}, fake); err == nil {
@@ -39,7 +39,7 @@ func TestRemotePeerCannotImpersonateLocalOwner(t *testing.T) {
 		t.Fatal("a remote peer chatted as the owner")
 	}
 	// The local game itself, on another of its sockets, still is the owner.
-	again := &session{uid: owner.uid, name: "Owner"}
+	again := &session{uid: owner.uid, game: owner.game, name: "Owner"}
 	if err := s.lobbySetData(lobbyArgs{ID: l.id, Data: json.RawMessage(`{"k":"t"}`)}, again); err != nil {
 		t.Fatalf("the local game lost its ownership: %v", err)
 	}

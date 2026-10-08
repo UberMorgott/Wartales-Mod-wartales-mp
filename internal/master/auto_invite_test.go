@@ -85,7 +85,7 @@ func TestAutoInviteTransferAndStalePeer(t *testing.T) {
 	host, id := createLobby(t, s, cascadeHostID)
 	invite := lobbyInvite(t, sw)
 	old := s.localSession()
-	guest := &remoteInvitePeer{&session{uid: "Sguest", name: "Guest", steam: "S76561197960265799"}}
+	guest := &remoteInvitePeer{&session{uid: "Xguest", game: "S76561197960265799", name: "Guest", steam: "S76561197960265799"}}
 	// A remote guest creating its own lobby cannot replace our publication.
 	if _, err := s.lobbyCreate(lobbyArgs{}, guest); err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestAutoInviteTransferAndStalePeer(t *testing.T) {
 	if got := lobbyInvite(t, sw); got != invite {
 		t.Fatal("transfer back did not restore local publication")
 	}
-	fresh := &session{uid: old.uid, steam: old.steam, name: old.name}
+	fresh := &session{uid: old.uid, game: old.game, steam: old.steam, name: old.name}
 	s.lobbies.mu.Lock()
 	for _, u := range l.users {
 		if u.peer == old {

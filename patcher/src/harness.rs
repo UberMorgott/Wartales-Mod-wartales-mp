@@ -47,10 +47,8 @@
 // player, built once): both games run on one Steam account and would join as
 // one player ("S" + account id hex). Instance N plays as the Session id
 // "X" + N + id.substr(1) (User.make: userMap knows it), which its master
-// renders as its lobby member id (internal/master/memberid_harness.go), as
-// the vanilla master renders a player's own id. A direct lobby of the shipped
-// helper renders minted ids instead, which a loaded save's lobby cannot match
-// against the game's own ids (docs/coop-harness-plan.md, slice 2 findings).
+// renders as its lobby member id, as it renders every player's own id
+// (internal/master idOf).
 // `host` stamps the save's playerId with this id.
 //
 // Validated before editing; a mismatch skips the pass (logged).

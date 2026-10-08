@@ -457,6 +457,13 @@ never ran and a host whose relay connect failed loaded forever. The cast is now
 `Std.string(e)` (same op count): the error text is logged and the failure path
 runs. Skipped (logged) on mismatch.
 
+**Direct lobby** (`src/direct_lobby.rs`): lobby members are named by their
+games' own ids on both transports (internal/master `idOf`), so a lobby of
+Steam players looks Steam-only to `Lobby.isSteamOnly` (only caller
+`setupPlatform`). A prologue returns false when `mpLobby.id` ends in 'D', the
+mark our master gives every direct-relay lobby (`DirectLobbyMark`): the host
+asks `instance/get` and plays over our relay. Skipped (logged) on mismatch.
+
 **Style guard** (`src/style_guard.rs`): domkit's `Properties.applyStyle` saves
 the static `APPLY_LOOPS`, counts style passes in it and restores it at the end;
 `checkLoop` (run on every node creation, class change and hover) throws

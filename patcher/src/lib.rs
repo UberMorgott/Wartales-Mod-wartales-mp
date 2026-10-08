@@ -30,6 +30,7 @@ mod debrief_cure;
 mod debrief_diag;
 mod debrief_enable;
 mod diag;
+mod direct_lobby;
 mod dialog_recruit;
 mod dlc_untouched;
 mod drop_in;
@@ -195,6 +196,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     window_close::patch_window_close(&mut code);
     stale_lobby::patch_stale_lobby(&mut code);
     log_error_cast::patch_log_error_cast(&mut code);
+    direct_lobby::patch_direct_lobby(&mut code);
     window_drag::patch_window_drag(&mut code);
     take_all::patch_take_all(&mut code);
     tavern_resume::patch_tavern_resume(&mut code);

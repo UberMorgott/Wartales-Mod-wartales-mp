@@ -41,21 +41,21 @@ type lobby struct {
 	transport  Transport // decided once, at creation; fixes how member ids are rendered
 }
 
-// idOf is the id a member is known by inside this lobby. A direct-relay lobby
-// uses the minted Session id; an SDR lobby uses the player's real Steam id,
-// which is what makes Lobby.isSteamOnly true on every game and what the game
-// turns back into the peer's SteamID. A player without a usable Steam id
-// keeps the Session id even in an SDR lobby: that flips the whole lobby back
-// onto instance/get (our direct relay), which is logged at join time rather
-// than hidden behind an id the game could not resolve.
+// idOf is the id a member is known by inside this lobby: the id its own game
+// calls itself (user/login "uid", mpman getUser().id), on either transport, as
+// the vanilla master does. The game compares member ids with its own id and
+// with the player ids in its saves (LoadMultiGame.isHostIn, LobbyState
+// userCanJoin/getPlayer, MPLobby owner checks), so a member id that depends on
+// the transport breaks loaded saves. On SDR the authenticated Steam id is used
+// (the game derives the peer's SteamID from it; for a real player it is the
+// game's own id anyway). The transport itself is carried by the lobby id
+// (newLobbyID), not by the shape of member ids. "" means the peer never said
+// who it is; such a peer cannot create or join a lobby.
 func (l *lobby) idOf(p Peer) string {
 	if l.transport == TransportSDR && p.SteamID() != "" {
 		return p.SteamID()
 	}
-	if id := harnessMemberID(p); id != "" {
-		return id
-	}
-	return p.UserID()
+	return p.GameID()
 }
 
 // heldBy reports whether p speaks for member m. An id alone proves nothing: a
@@ -134,12 +134,22 @@ func (s *store) syncInviteLocked() {
 
 // newLobbyID returns an id whose first character is a valid UserID platform
 // char ('L' = Lobby); the client rejects anything else.
-func newLobbyID() string {
+// DirectLobbyMark ends the id of every lobby on our direct relay. The game
+// reads it (patcher direct_lobby.rs: Lobby.isSteamOnly is false for such a
+// lobby), so a lobby whose members all have Steam ids still asks instance/get
+// and plays over our relay. An SDR lobby id is "L" + lowercase hex only.
+const DirectLobbyMark = "D"
+
+func newLobbyID(t Transport) string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		panic(err)
 	}
-	return "L" + hex.EncodeToString(b[:])
+	id := "L" + hex.EncodeToString(b[:])
+	if t == TransportDirect {
+		id += DirectLobbyMark
+	}
+	return id
 }
 
 func (l *lobby) info() map[string]any {
@@ -341,10 +351,9 @@ func (s *Server) lobbyCommand(cmd string, args json.RawMessage, p Peer) (any, er
 	return nil, wireErrf("Unknown command %s", cmd)
 }
 
-// logHostTransport is the guest's view of the host's verdict: a lobby whose
-// owner id is Steam shaped is on SDR, anything else is on the host's direct
-// relay. The verdict itself travels inside the ids the host's master renders,
-// so both masters agree by construction; this only makes it visible.
+// logHostTransport is the guest's view of the host's verdict, which travels in
+// the lobby id the host's master minted (DirectLobbyMark), so both masters and
+// both games agree by construction; this only makes it visible.
 func (s *Server) logHostTransport(raw json.RawMessage) {
 	var info struct {
 		ID    string `json:"id"`
@@ -353,9 +362,9 @@ func (s *Server) logHostTransport(raw json.RawMessage) {
 	if json.Unmarshal(raw, &info) != nil || info.ID == "" {
 		return
 	}
-	t := TransportDirect
-	if uid.IsSteam(info.Owner) {
-		t = TransportSDR
+	t := TransportSDR
+	if strings.HasSuffix(info.ID, DirectLobbyMark) {
+		t = TransportDirect
 	}
 	s.opt.Log.Printf("master: joined lobby %s; the host's master chose %s (owner id %s)", info.ID, t, info.Owner)
 }
@@ -415,8 +424,12 @@ func (s *Server) lobbyCreate(a lobbyArgs, p Peer) (any, error) {
 		s.opt.Log.Printf("master: lobby creation by %s (%s) REFUSED: %v", p.Name(), p.UserID(), err)
 		return nil, wireErrf("Cannot host: %v", err)
 	}
-	l := &lobby{id: newLobbyID(), data: map[string]json.RawMessage{}, transport: transport}
+	l := &lobby{id: newLobbyID(transport), data: map[string]json.RawMessage{}, transport: transport}
 	l.owner = l.idOf(p)
+	if l.owner == "" {
+		s.opt.Log.Printf("master: lobby creation by %s (%s) REFUSED: the game reported no player id", p.Name(), p.UserID())
+		return nil, wireErrf("Cannot host: the game reported no player id")
+	}
 	if a.Props != nil {
 		if a.Props.Data != nil {
 			l.data = a.Props.Data
@@ -442,7 +455,7 @@ func (s *Server) lobbyCreate(a lobbyArgs, p Peer) (any, error) {
 	s.opt.Log.Printf("master: lobby %s game transport: %s (%s)", l.id, transport, reason)
 	if transport == TransportSDR && p.SteamID() == "" {
 		s.opt.Log.Printf("master: WARNING: lobby %s is on SDR but the host reported no Steam id; "+
-			"the game will ask instance/get and use the direct relay instead", l.id)
+			"its game id %s is used and must be its Steam id for SDR to reach it", l.id, l.owner)
 	}
 	s.opt.Log.Printf("master: lobby %s lobby-phase transport is lobby/chat on this connection "+
 		"(mpman LobbyService, no second socket)", l.id)
@@ -462,8 +475,14 @@ func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 	if l == nil {
 		return nil, wireErrf("Unknown lobby %s", a.ID)
 	}
-	s.lobbies.mu.Lock()
 	id := l.idOf(p)
+	if id == "" {
+		// An old helper's link hello carries no game id; a fallback id would
+		// match no save and no LobbyState player (see idOf).
+		s.opt.Log.Printf("master: %s (%s) cannot join lobby %s: no player id (different wartales-mp version?)", p.Name(), p.UserID(), l.id)
+		return nil, wireErrf("Cannot join: your wartales-mp version does not send a player id; update it")
+	}
+	s.lobbies.mu.Lock()
 	found := false
 	for _, u := range l.users {
 		if u.ID == id {
@@ -492,7 +511,7 @@ func (s *Server) lobbyJoin(a lobbyArgs, p Peer) (any, error) {
 
 	if transport == TransportSDR && p.SteamID() == "" {
 		s.opt.Log.Printf("master: WARNING: %s joined SDR lobby %s without a Steam id (as %s); "+
-			"the lobby is no longer Steam-only and the game will fall back to instance/get (direct relay)",
+			"its game id is used and must be its Steam id for SDR to reach it",
 			p.Name(), l.id, id)
 	}
 	if !found {
@@ -586,15 +605,9 @@ func (s *Server) lobbySetUserData(a lobbyArgs, p Peer) error {
 // which then filters on the target uid embedded in the payload.
 //
 // That filter (LobbyService.onMessage@54929, LobbyService.hx:101) compares the
-// target with getUser().id, the id the game reported in user/login, which is
-// not the member id we render for it in a direct-relay lobby (a minted Session
-// id) or for a member without a Steam id. Both games address packets to the
-// member ids they know from the LobbyInfo and the pushes, so every packet
-// would be dropped as "not for me" on arrival: the guest's Join never reached
-// the host's LobbyUserService and the host never answered. The packet is
-// therefore re-addressed to the recipient's own id before it is delivered;
-// nothing else in "msg" is touched, and every other member still gets it
-// verbatim, as the vanilla server sent it.
+// target with getUser().id, the id the game reported in user/login; member ids
+// are exactly those ids (idOf), so every member gets the packet verbatim, as
+// the vanilla server sent it.
 func (s *Server) lobbyChat(a lobbyArgs, p Peer) error {
 	l := s.lobbies.get(a.ID)
 	if l == nil {
@@ -616,7 +629,7 @@ func (s *Server) lobbyChat(a lobbyArgs, p Peer) error {
 		if u.peer == nil || u.ID == id {
 			continue
 		}
-		to = append(to, delivery{u.peer, retarget(a.Msg, u.ID, u.peer.GameID())})
+		to = append(to, delivery{u.peer, a.Msg})
 	}
 	s.lobbies.mu.Unlock()
 	for _, d := range to {
@@ -624,44 +637,6 @@ func (s *Server) lobbyChat(a lobbyArgs, p Peer) error {
 	}
 	s.lobbies.transport(s.opt.Log, l.id, id, len(a.Msg), len(to))
 	return nil
-}
-
-// retarget rewrites the target uid of a LobbyMessageData.Packet from the
-// member id we rendered to the id that member's game calls its own. msg is the
-// JSON string the sender passed as "msg": haxe.Serializer output whose last
-// value is the target, a 'y' string ("y" + length + ":" + url-encoded text).
-// Anything that does not end in exactly Packet(..., member) - a plain
-// LobbyMessage, a packet for someone else, an unknown format - is returned
-// untouched.
-func retarget(msg json.RawMessage, member, game string) json.RawMessage {
-	if game == "" || game == member || !plainID(game) {
-		return msg
-	}
-	var s string
-	if json.Unmarshal(msg, &s) != nil {
-		return msg
-	}
-	tail := "y" + strconv.Itoa(len(member)) + ":" + member
-	if !strings.HasSuffix(s, tail) || !strings.Contains(s, "LobbyMessageData") {
-		return msg
-	}
-	s = strings.TrimSuffix(s, tail) + "y" + strconv.Itoa(len(game)) + ":" + game
-	out, err := json.Marshal(s)
-	if err != nil {
-		return msg
-	}
-	return out
-}
-
-// plainID reports whether id survives haxe's StringTools.urlEncode unchanged,
-// so it can be spliced into a serialized 'y' string as is.
-func plainID(id string) bool {
-	for _, c := range id {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '-' && c != '_' && c != '.' {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *Server) lobbyTransfer(a lobbyArgs, p Peer) error {
