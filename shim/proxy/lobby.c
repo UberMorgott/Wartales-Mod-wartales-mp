@@ -21,7 +21,6 @@ static struct {
 	void (*leave)(void *, uint64_t);
 	unsigned char (*completed)(void *, uint64_t, unsigned char *);
 	unsigned char (*result)(void *, uint64_t, void *, int, int, unsigned char *);
-	int (*failure_reason)(void *, uint64_t);
 } api;
 static SRWLOCK lock = SRWLOCK_INIT;
 static char desired[33];
@@ -73,7 +72,6 @@ static int bind_api(void) {
 	RESOLVE(leave, "SteamAPI_ISteamMatchmaking_LeaveLobby");
 	RESOLVE(completed, "SteamAPI_ISteamUtils_IsAPICallCompleted");
 	RESOLVE(result, "SteamAPI_ISteamUtils_GetAPICallResult");
-	RESOLVE(failure_reason, "SteamAPI_ISteamUtils_GetAPICallFailureReason");
 #undef RESOLVE
 	bound = 1;
 	return 1;
@@ -110,18 +108,12 @@ void lobby_pump(void) {
 		published = 0;
 	}
 	if (pending) {
-		unsigned char failed = 0, read;
-		int reason;
+		unsigned char failed = 0;
 		lobby_created result = {0};
 		if (!api.completed(utils, pending, &failed))
 			goto done;
-		// Asked before GetAPICallResult releases the call. ESteamAPICallFailure:
-		// -1 none, 0 Steam gone, 1 network failure, 2 invalid handle, 3 mismatched callback.
-		reason = api.failure_reason(utils, pending);
-		read = api.result(utils, pending, &result, sizeof(result), 513, &failed);
-		if (!read || failed || result.result != 1 || !result.lobby) {
-			shim_log("lobby: automatic Steam creation failed (call %llu, %s, I/O %u, EResult %d, failure reason %d)",
-					 (unsigned long long)pending, read ? "result read" : "no result", failed, result.result, reason);
+		if (!api.result(utils, pending, &result, sizeof(result), 513, &failed) || failed || result.result != 1 || !result.lobby) {
+			shim_log("lobby: automatic Steam creation failed (I/O %u, EResult %d)", failed, result.result);
 			retry_later();
 		} else if (pending_generation != generation || !desired[0]) {
 			api.leave(mm, result.lobby);
