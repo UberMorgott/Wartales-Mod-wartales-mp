@@ -249,6 +249,9 @@ struct RsCtx {
     vis_h: RefField,
     base_h: RefField,
     force_update: RefFun,
+    /// InventoryContent.contentChanged (needScroll class) / scrollReset.
+    content_changed: RefFun,
+    scroll_reset: RefFun,
     /// Flow.set_minHeight / set_maxHeight and their Null<Int>.
     set_min_h: RefFun,
     set_max_h: RefFun,
@@ -324,6 +327,22 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
         &[inv_t],
         c.void_t,
     )?;
+    let content_changed = method(code, cont_t, "contentChanged")?.findex;
+    want_sig(
+        code,
+        content_changed,
+        "InventoryContent.contentChanged",
+        &[cont_t, c.obj_t],
+        c.void_t,
+    )?;
+    let scroll_reset = method(code, cont_t, "scrollReset")?.findex;
+    want_sig(
+        code,
+        scroll_reset,
+        "InventoryContent.scrollReset",
+        &[cont_t],
+        c.void_t,
+    )?;
     let set_max_h = proto(code, c.flow_t, "set_maxHeight")?;
     let (sa, nint_t) = sig(code, set_max_h)?;
     if sa != [c.flow_t, nint_t] || !matches!(code.types[nint_t.0], Type::Null(t) if t == c.i32_t) {
@@ -355,6 +374,8 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
         vis_h,
         base_h,
         force_update,
+        content_changed,
+        scroll_reset,
         set_min_h,
         set_max_h,
         nint_t,
@@ -1411,7 +1432,7 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
             b: rows,
             offset: 0,
         },
-        "out",
+        "built",
     );
     a.op(Opcode::SetField {
         obj: inv,
@@ -1422,6 +1443,30 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         dst: v,
         fun: c.rs.force_update,
         arg0: inv,
+    });
+    a.label("built");
+    // A new viewport: vanilla's own update for it. contentChanged sets the
+    // `needScroll` class (scrollbar shown) from the new maxHeight (only
+    // InventoryContent.contentChanged reads it), scrollReset puts the rows
+    // back at the top (a scroll position kept from a taller or shorter
+    // viewport left them scrolled out of sight).
+    a.jmp(
+        Opcode::JFalse {
+            cond: full,
+            offset: 0,
+        },
+        "out",
+    );
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: c.rs.content_changed,
+        arg0: ct,
+        arg1: inv,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: c.rs.scroll_reset,
+        arg0: ct,
     });
     a.label("out");
     a.op(Opcode::Ret { ret: v });
@@ -4943,6 +4988,12 @@ mod tests {
                 } else if f == c.rs.force_update {
                     log(k, "forceUpdate");
                     Some(V::Null)
+                } else if f == c.rs.content_changed {
+                    log(k, "contentChanged");
+                    Some(V::Null)
+                } else if f == c.rs.scroll_reset {
+                    log(k, "scrollReset");
+                    Some(V::Null)
                 } else if f == c.rs.set_min_h || f == c.rs.set_max_h {
                     log(
                         k,
@@ -5681,7 +5732,14 @@ mod tests {
         assert_eq!(s.c.get(&inv, c.rs.vis_h), V::I(8));
         assert_eq!(s.c.get(&inv, c.rs.base_h), V::I(8));
         assert_eq!(s.c.take("forceUpdate").len(), 1, "rows built");
-        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(8));        // Within the same row: nothing changes.
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(8));
+        // The new viewport goes through vanilla: needScroll from the new
+        // maxHeight (after the rows are built), scroll back at the top.
+        let cc = s.c.take("contentChanged");
+        assert_eq!(cc.len(), 1);
+        assert_eq!((cc[0][0].clone(), cc[0][1].clone()), (cont.clone(), inv.clone()));
+        assert_eq!(s.c.take("scrollReset"), vec![vec![cont.clone()]]);
+        // Within the same row: nothing changes.
         mouse(&mut s, 25.0, 690.0);
         s.c.take("setUserData");
         event(&mut s, &c, &f, c.ev_move);
@@ -5734,13 +5792,17 @@ mod tests {
         // rebuilds rows that vanilla dropped (showInventory: 6, scroll: fewer).
         let (p2, _, c2, inv2) = rs_panel(&mut s, &c);
         s.c.set(&inv2, c.rs.vis_h, V::I(1));
+        s.c.take("contentChanged");
+        s.c.take("scrollReset");
         s.run(f.rs_install, vec![p2.clone(), key.clone()]);
         let mh = s.c.take("maxHeight");
         assert_eq!(
             (mh[0][0].clone(), mh[0][1].clone()),
-            (c2, rs_height(MIN_ROWS))
+            (c2.clone(), rs_height(MIN_ROWS))
         );
         assert_eq!(s.c.get(&inv2, c.rs.vis_h), V::I(MIN_ROWS));
+        assert_eq!(s.c.take("contentChanged")[0][0], c2, "restored viewport");
+        assert_eq!(s.c.take("scrollReset").len(), 1);
         s.c.set(&inv2, c.rs.vis_h, V::I(1));
         s.c.take("forceUpdate");
         let cap2 = s.c.enm(0, vec![p2.clone(), key.clone()]);
@@ -5750,7 +5812,12 @@ mod tests {
         assert!(
             s.c.take("maxHeight").is_empty(),
             "reflow never resets the height (no reflow loop)"
-        );        s.run(f.rs_reflow, vec![cap2]);
+        );
+        assert!(
+            s.c.take("contentChanged").is_empty() && s.c.take("scrollReset").is_empty(),
+            "nor marks the content changed or resets the scroll"
+        );
+        s.run(f.rs_reflow, vec![cap2]);
         assert!(
             s.c.take("forceUpdate").is_empty(),
             "rows already built: no rebuild"
