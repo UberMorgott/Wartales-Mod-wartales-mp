@@ -1,6 +1,6 @@
 # Local co-op test harness — feasibility, design, estimate
 
-Status: plan only (2026-10-08). Nothing implemented. Codex reviewed (agrees, with changes folded in below).
+Status: slice 1 implemented (2026-10-08, see section 8). Plan Codex reviewed (agrees, with changes folded in below).
 
 ## 1. Feasibility verdicts (with evidence)
 
@@ -76,3 +76,43 @@ Cheaper first slice (~0.5 k lines, 1 day): shim+helper seam + driver + `console`
 2. Test seam only in a `-Test` build (recommended) vs. env-gated in the shipped dll.
 3. First slice only, or full verb set.
 4. Accept that Steam-invite/SDR and visual items (flicker, chest layout, camera) stay human-checked.
+
+## 8. Slice 1 (implemented)
+
+Test seam, compiled only by `shim\build.ps1 -Test` (output `dist-test\`, `dist\` stays shippable); all of it carries `WMP_TEST_SEAM` and/or reads `WARTALES_MP_TEST_INSTANCE`:
+
+- shim `proxy.c` (`#ifdef WMP_TEST`): mutex `Local\wartales-mp-running-N`, master hosts resolve to `127.0.0.N`, helper started as `run -master 127.0.0.N:60442 -port 1425N -transport direct`.
+- helper (Go tag `harness`): `cmd/wartales-mp/testseam_harness.go` (join codes advertise `127.0.0.1:1425N`, verified, no UPnP/STUN; relay listens on loopback only), `internal/master/uidsalt_harness.go` (`uid.Mint` input salted `#tN`).
+- patcher (cargo feature `harness`): `patcher/src/harness.rs`, see below.
+- `shim\seamcheck.ps1` (run by `build.ps1` and `check.ps1`): markers absent from the release `winmm.dll`, from the helper embedded in it (cut out, UPX-unpacked) and from `wartales-mp.exe`; `-Test` requires them.
+
+Verified: saves and `prefs.sav` are game-folder relative (each copy writes its own `save\udat_*.sav` / `prefs.sav`, the real folder's timestamps stay put). Separate uids, masters and relay ports per instance in the logs.
+
+### Command channel (`harness.rs`)
+
+`harnessTick()` at op 0 of `hxd.App.mainLoop`; off unless `WARTALES_MP_TEST_INSTANCE` is set. Every 6th frame it reads `%LOCALAPPDATA%\wartales-mp\harness\cmd.txt` (`<seq> <verb> [arg]`, written as `cmd.tmp` + rename), deletes it, answers `ack.txt` = `<seq> <result>` and a `harness: ack` line in `shim.log`.
+
+- `console <line>`: `Game.inst.console` with `PREFS.admin` forced true around `resetCommands` + `runCommand` (Battle/Cheats modes need `get_isAdmin() && canCheat()`), restored and the command set rebuilt after, also when the command throws. Result `dispatched` (the console shows errors on its own screen), `nogame` before a game is loaded (the title screen has its own console; not wired).
+- `dump`: `state.json`: game set, mode (`Std.string`), isAuth / isMulti / isCoopGame / connectedToHost / isLoading / hasGameplayStarted / fading, playersReady, host, me, battle current unit (name, owner), army (name, owner, aptitudePoints). Strings go through the game's own `haxe.format.JsonPrinter.print`.
+
+Debug console commands (from the mode constructors; `cargo test --release --features harness --target-dir target-test list_console_commands -- --ignored --nocapture`):
+
+- Public: `admin`. Place: `quit`. Game: `speed show-tuto dump2d dumpscene`.
+- Admin: `logdb autoplay networkLog clearTutos dumpmem live checkLiveObjects memprof gc prof pr sprof debug tonemapping luminance colorBlind trackGpuAlloc gpudump blur`.
+- Battle: `drawGrid nav gen gen-test removeFog win run winr lose ap killFoes searchIssue heal hit moral kill capture madness remove ai aiReasoning objective renfort renfort-anim skill spawnAllSkills spawnAllTraps trap nextRound play-anims captainDuel drawTriggers drawCollider`.
+- Cheats: `scale stats reset item items power setpower wealth gold influence brigands dispose sss sao quadtree terrainTiles lighting envToColor hideOptimized hideUnits genname confession reloadgroupleader reloadallgroupleader interact control collide gennavmesh wireframe lang armySimulator setTavernLevel slReput omniscience skills-master pathlvl rank song counter counters bonus title grim class trait jobs teleport recruit escape prison plague werewolf werewolfCure tavernSpe jobXp traitXp xp respec relation goal goals clearGoals resetrelation status addskill greenscreen seed meteo difficulty logfight sfx playEvent listener trailer-dialog load save tavEvent tavAllEvents tavEventCond tavStopEvent tavEventLog tavSilver tavBurn tavBonus tavLevel tavUnlock tavFactionCount beastHint beastLog beastInfo beastGoto debugGhostPacks notify fiefNeeds fiefAudience fiefEvent fiefMandate fiefPopDisplay fiefPop fiefRelation fiefRegime fiefGoalComplete fiefDebug fiefExportStart fiefExportStop wlab setSanity setFuel export`.
+- World: `noise wanted heretic happiness ap xp tire genteam unit zoo loadteam unlockPits fow fowregion fowOffset bridge notifyMap water campmap time camera discoverRegion travel buildComptoir etp eye battle rouste beast battlemap checkGenBattle aggro brigands-aggro systemic weeklybounty horde debugDir killNearest tp goto enter setting script activity debugactivity battletest battletrap battletrigger autobattle mapbuild nav generateRegionsShapes lightShrink visit-places visit-camp visit-taverns visit-tavern checkBattleTextures visit-battle visit-world tp-places terrainBakeAlbedo checkHunts visit-next-hunt huntBonus hunt log-battle-gen perfBenchmark slAggro slStopAggro e2free e2placeOccupied e2placeDestroyed e2skills sanity sanityData circleHallucination chaos addChaos propaganda burn burnAll extinguish endCrisis lockChaos`.
+
+### Running it
+
+```powershell
+.\shim\build.ps1 -Release -Test; .\shim\check.ps1 -Test          # dist-test\winmm.dll
+.\tools\harness\setup.ps1 -Saves     # D:\WartalesTest\{A,B}: hardlinks + own save\, prefs, test dll (re-run: refreshes the dll)
+.\tools\harness\coop.ps1 start       # run folder D:\WartalesTest\runs\<stamp>\{A,B} = per-instance LOCALAPPDATA
+.\tools\harness\coop.ps1 cmd -Inst A -Line 'dump'      # or 'console <command>'
+.\tools\harness\coop.ps1 shot -Tag x; .\tools\harness\coop.ps1 place
+.\tools\harness\coop.ps1 close -Inst B   # WM_CLOSE;  kill -Inst B = TerminateProcess
+.\tools\harness\coop.ps1 stop; .\tools\harness\coop.ps1 logs -Inst A,B
+```
+
+Open for slice 2: host / join-by-code verbs (menu navigation is still manual; the slice 1 smoke run stopped at the title screen of both instances), title-screen console, chest panel rect in `dump`, windowed-mode prefs per copy (`prefs.sav` carries a salted hash, not edited), game stdout goes to the driver's console.
