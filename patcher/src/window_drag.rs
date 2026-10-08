@@ -23,7 +23,10 @@
 //      - `windowRoot.onAfterReflow = mpWinReflow(this)` (no vanilla code sets
 //        it on a plain h2d.Flow): `mpDragClamp(win, null)`, then frameFlow gets the
 //        window's offsets again (it may be created after init).
-//   P. `GameInventory` constructor (end): `mpDragPanel(chestInventory,
+//   P. `GameInventory` constructor (end): `addChild(chestInventory)` (the chest
+//      panel, created first, becomes the last child: drawn above the inventory
+//      panel, which a row resize or a drag can put under it; absolute, so the
+//      flow layout is the same), `mpDragPanel(chestInventory,
 //      "GameInventory#chest")`, `mpDragPanel(inventory, "GameInventory#inv")`.
 //      (GameInventory's own onAfterReflow is not usable: vanilla showInventory
 //      restores InventoryContent's saved handler onto it.)
@@ -4513,6 +4516,8 @@ struct PanelPlan {
     chest: (RefField, RefType),
     inv: (RefField, RefType),
     void_reg: Reg,
+    /// h2d.Object.addChild (Flow.addChildAt keeps the child's FlowProperties).
+    add_child: RefFun,
 }
 
 fn panel_plan(code: &Bytecode) -> Result<PanelPlan> {
@@ -4582,12 +4587,14 @@ fn panel_plan(code: &Bytecode) -> Result<PanelPlan> {
     if let Some(g) = reflow_setter(code, from_panel, &this_types) {
         bail!("fn@{} sets onAfterReflow of a panel class or field", g.0);
     }
+    let add_child = proto(code, obj_t, "addChild")?;
     Ok(PanelPlan {
         fi,
         ret,
         chest,
         inv,
         void_reg,
+        add_child,
     })
 }
 
@@ -4610,6 +4617,16 @@ fn panel_apply(code: &mut Bytecode, p: &PanelPlan, api: &DragApi, c: &Ctx) {
         f,
         p.ret,
         vec![
+            Opcode::GetThis {
+                dst: e1,
+                field: p.chest.0,
+            },
+            Opcode::Call2 {
+                dst: v,
+                fun: p.add_child,
+                arg0: Reg(0),
+                arg1: e1,
+            },
             Opcode::GetThis {
                 dst: e1,
                 field: p.chest.0,
@@ -4652,7 +4669,7 @@ fn panel_apply(code: &mut Bytecode, p: &PanelPlan, api: &DragApi, c: &Ctx) {
     );
 }
 
-const PANEL_OPS: usize = 6;
+const PANEL_OPS: usize = 8;
 
 /// Every jump offset of op `i` that lands on `from` lands on `to` instead.
 fn retarget(f: &mut Function, i: usize, from: usize, to: usize) {
@@ -4776,20 +4793,22 @@ mod tests {
         check_types(&back, b, end..end + 2);
         check_flow(b);
 
-        // P: six ops in front of the final Ret.
+        // P: eight ops in front of the final Ret.
         let (a, b) = (&orig.functions[pp.fi], &back.functions[pp.fi]);
-        shifted(a, b, pp.ret, 6);
-        check_types(&back, b, pp.ret..pp.ret + 6);
+        shifted(a, b, pp.ret, PANEL_OPS);
+        check_types(&back, b, pp.ret..pp.ret + PANEL_OPS);
         check_flow(b);
-        let calls: Vec<RefFun> = b.ops[pp.ret..pp.ret + 6]
+        let calls: Vec<RefFun> = b.ops[pp.ret..pp.ret + PANEL_OPS]
             .iter()
             .filter_map(|o| match o {
                 Opcode::Call2 { fun, .. } => Some(*fun),
                 _ => None,
             })
             .collect();
-        assert_eq!(calls, [api.panel, api.panel]);
-        let keys: Vec<&str> = b.ops[pp.ret..pp.ret + 6]
+        assert_eq!(calls, [pp.add_child, api.panel, api.panel]);
+        assert!(matches!(b.ops[pp.ret], Opcode::GetThis { field, .. } if field == pp.chest.0));
+        assert!(matches!(b.ops[pp.ret + 1], Opcode::Call2 { arg0: Reg(0), .. }));
+        let keys: Vec<&str> = b.ops[pp.ret..pp.ret + PANEL_OPS]
             .iter()
             .filter_map(|o| match o {
                 Opcode::GetGlobal { global, .. } => crate::job_xp::const_str(&back, *global),
@@ -4901,7 +4920,7 @@ mod tests {
         assert_eq!(format!("{:?}", code.functions[wp.fi].ops), w_before);
         assert_eq!(
             code.functions[pp.fi].ops.len(),
-            orig.functions[pp.fi].ops.len() + 6
+            orig.functions[pp.fi].ops.len() + PANEL_OPS
         );
     }
 
