@@ -32,6 +32,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - A player who leaves during a battle no longer blocks it: the host can play that player's units (also a turn they had already begun) until they come back; the units stay theirs and they take them over again when they rejoin. *(Vanilla bug.)*
 - The host no longer crashes when two lobby creations finish at the same moment (a left lobby's late connect result is ignored).
 - Clients no longer freeze when an enemy summons units and hits them in the same moment (for example the Rat Matriarch's howl spawning rats): the client makes the new units alive before it runs the host's battle messages. *(Vanilla bug.)*
+- A joining player's loading screen no longer flickers while they wait for the host: it is drawn before the game state exists. *(Vanilla bug.)*
 - The join gate no longer deadlocks when a save is loaded while a player is joining.
 - The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.
 - A guest whose host left or crashed is no longer stuck on a black screen (seen after the host left the owned tavern and quit): the mod notices that the host's session is gone, and the game shows its normal disconnect message and returns to the title. A leaving player's own goodbye is now sent before their connection is closed.
@@ -73,7 +74,10 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Popup windows (unit sheet, shops, crafting, ...) and the inventory panels can be dragged by their title row. Positions are kept per window; a double click on the title row puts the window back. Dragging is local only and never clicks the world under the cursor.
 - In co-op a client closes its own window (unit sheet and other windows it opened itself) by clicking outside it, as the host always could; before, that click did nothing on a client.
 - Skill tooltips show the Valor point cost outside battle for every unit, including the new-game screens.
-- In co-op a client's skill bar is up to date at round start (Inhalation and similar skills were greyed out until any action).
+- In co-op a client's skill bar is up to date at round start (Inhalation and similar skills were greyed out until any action), and a client's skills read the current synced skill values (Inhalation's cost no longer used a stale count). *(Vanilla bug.)*
+- The chest panel opens where the game puts it, instead of displaced or snapping back on hover. A resized inventory panel scrolls with its scrollbar again.
+- Clicks only reach the slots a scrolling list shows: a slot scrolled under the chest header no longer takes the click or drag. *(Vanilla bug.)*
+- Battle camera: rotating with the right mouse button while panning with the keyboard no longer speeds the camera up.
 - Tooltip keyword panels ("Poison", "Vigilance", ...) wrap into columns instead of running off the screen, and are not shown twice.
 - A censer that grants Purge (Remastered) shows its tooltip in chests, shops and other inventories again; before, its tooltip failed every frame, which froze the moved item between cells and dropped the FPS.
 - Starting troops larger than the new-game customize screen (it has five spots): instead of crashing ("Missing prefab Camera06"), the extra animals are left off the screen and belong to the host; humans always get a spot. Troops of five or fewer look exactly as before.
