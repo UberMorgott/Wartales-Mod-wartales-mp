@@ -153,6 +153,18 @@ client only (`!Game.isAuth`), when the list of `battle.currentUnit` is emptied,
 `Battle.update` redraws the skill bar, as after an action).
 Host and solo are unchanged. Skipped (logged) on mismatch.
 
+**Skill vars** (`src/skill_vars.rs`, issue #2): `ScriptedSkill.initScript`
+binds `unit.getSkillPersist(id).vars` into the skill script once, and
+`Battle.getOrCreateSkill` caches the skill. On a client, hxbit sync replaces
+`battle.Unit.skillPersistValues` wholesale, so cached scripts kept reading and
+writing an old map's vars (Inhalation's `getCost` used a stale `vars.used`).
+On a client only, `getOrCreateSkill` now rebinds a returned ScriptedSkill whose
+`interp.variables["vars"]` is not the current object (and its
+`ScriptInterp.checkObjUpdate`) to the vars of the existing map entry (a
+missing entry is left alone, never created); skills,
+scripts and the cache are kept. Host and solo are unchanged. Skipped (logged)
+on mismatch.
+
 **Profession experience** (`src/job_xp.rs`): vanilla already keeps each
 profession's level across job switches (`st.Unit.jobsLevel`, a networked and
 saved `Map<String, Int>`; `_removeTrait` writes `jobsLevel[tid] = t.level`,

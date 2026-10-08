@@ -55,6 +55,7 @@ mod ready_start;
 mod returning_units;
 mod skill_cost;
 mod skill_sync;
+mod skill_vars;
 mod stale_lobby;
 mod style_guard;
 mod take_all;
@@ -125,6 +126,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     marker_names::patch_marker_names(&mut code);
     skill_cost::patch_skill_cost(&mut code);
     skill_sync::patch_skill_sync(&mut code);
+    skill_vars::patch_skill_vars(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
     party_inventory::patch_party_inventory(&mut code);
     party_inventory::patch_party_counts(&mut code);
