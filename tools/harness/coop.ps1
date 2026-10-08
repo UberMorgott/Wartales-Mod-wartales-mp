@@ -22,6 +22,7 @@
 #                                          focused first, else nothing is clicked.
 #                                          After 'place' the game keeps its launch-size
 #                                          input mapping: click at the launch size.
+#   coop.ps1 drag    -Inst A -X 1 -Y 2 -X2 3 -Y2 4 [-Steps 8] [-Tag t]  press, move, release (shots per step)
 #   coop.ps1 shot    [-Inst A,B] [-Tag x] PrintWindow screenshot per window
 #   coop.ps1 place   [-Inst A,B] [-W 852 -H 480]  windows side by side
 #   coop.ps1 close   -Inst B              WM_CLOSE (Alt+F4, soft)
@@ -35,7 +36,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory)]
-    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
+    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'drag', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
     [string]$Action,
     [string[]]$Inst = @('A', 'B'),
     [string]$Line = 'dump',
@@ -50,6 +51,9 @@ param(
     [int]$Y = 0,
     [int]$Hold = 300,
     [switch]$Right,
+    [int]$X2 = 0,
+    [int]$Y2 = 0,
+    [int]$Steps = 8,
     [switch]$Keep,
     [string]$Root = 'D:\WartalesTest'
 )
@@ -273,6 +277,39 @@ switch ($Action) {
             [Harness.Win]::mouse_event($(if ($Right) { 0x0010 } else { 0x0004 }), 0, 0, 0, [IntPtr]::Zero) # RIGHT/LEFTUP
             Lower-Window $hw
             Write-Host "${i}: click at client $cx,$cy"
+        }
+    }
+    'drag' {
+        # left press at X,Y, cursor moved to X2,Y2 in -Steps steps (~300 ms each),
+        # release; with -Tag a shot after every step (during the drag)
+        $run = Run-Dir
+        foreach ($i in $Inst) {
+            $p = Game-Proc $run $i
+            if (-not $p) { Write-Host "$i not running"; continue }
+            $p.Refresh()
+            $hw = $p.MainWindowHandle
+            $r = New-Object Harness.Win+RECT
+            [void][Harness.Win]::GetWindowRect($hw, [ref]$r)
+            $w = $r.Right - $r.Left; $hgt = $r.Bottom - $r.Top
+            if ((@($X, $X2) | ? { $_ -lt 0 -or $_ -ge $w }) -or (@($Y, $Y2) | ? { $_ -lt 0 -or $_ -ge $hgt })) { Write-Host "${i}: drag outside the window, skipped"; continue }
+            if (-not (Raise-Window $hw $r)) { Lower-Window $hw; Write-Host "${i}: window not on top, drag skipped"; continue }
+            [void][Harness.Win]::SetCursorPos($r.Left + $X, $r.Top + $Y)
+            Start-Sleep -Milliseconds 400
+            [Harness.Win]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
+            Start-Sleep -Milliseconds 300
+            for ($k = 1; $k -le $Steps; $k++) {
+                [void][Harness.Win]::SetCursorPos($r.Left + $X + [int](($X2 - $X) * $k / $Steps), $r.Top + $Y + [int](($Y2 - $Y) * $k / $Steps))
+                Start-Sleep -Milliseconds 300
+                if ($Tag) {
+                    $bmp = New-Object Drawing.Bitmap $w, $hgt
+                    $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size); $g.Dispose()
+                    $f = Join-Path $run ("{0}-{1}-{2}-step{3}.png" -f $i, (Get-Date -Format 'HHmmss'), $Tag, $k)
+                    $bmp.Save($f, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+                }
+            }
+            [Harness.Win]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+            Lower-Window $hw
+            Write-Host "${i}: drag $X,$Y -> $X2,$Y2 in $Steps steps"
         }
     }
     'shot' {
