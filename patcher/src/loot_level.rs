@@ -362,13 +362,41 @@ struct OrderPlan {
     forced: usize,
 }
 
+/// genLoot's worn-gear loop: the op after `SafeCast units = cast state.allUnits.array`, and `units`.
+fn loop_site(code: &Bytecode, gen: &Function) -> Result<(usize, Reg)> {
+    let (all_units, _) = field(code, obj_type(code, "battle.State")?, "allUnits")?;
+    let is_alive = method(code, obj_type(code, "battle.Unit")?, "isAlive")?.findex;
+    let arr_t = obj_type(code, "hl.types.ArrayObj")?;
+    let ops = &gen.ops;
+    let ty = |r: Reg| gen.regs[r.0 as usize];
+    let mut found = Vec::new();
+    for i in 0..ops.len().saturating_sub(8) {
+        let Opcode::Field { dst: list, field: f, .. } = ops[i] else { continue };
+        if f != all_units {
+            continue;
+        }
+        let Opcode::Field { dst: raw, obj, .. } = ops[i + 5] else { continue };
+        let Opcode::SafeCast { dst: units, src } = ops[i + 6] else { continue };
+        if obj != list || src != raw || ty(units) != arr_t {
+            continue;
+        }
+        if ops[i + 7..(i + 60).min(ops.len())]
+            .iter()
+            .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == is_alive))
+        {
+            found.push((i + 7, units));
+        }
+    }
+    match found[..] {
+        [s] => Ok(s),
+        _ => bail!("genLoot: expected one worn-gear unit loop, found {}", found.len()),
+    }
+}
+
 fn order_plan(code: &Bytecode) -> Result<OrderPlan> {
     let gen = method(code, obj_type(code, "battle.Debrief")?, "genLoot")?;
     let fi = fun_index(code, gen.findex)?;
-    let state_t = obj_type(code, "battle.State")?;
-    let (all_units, _) = field(code, state_t, "allUnits")?;
     let unit_t = obj_type(code, "battle.Unit")?;
-    let is_alive = method(code, unit_t, "isAlive")?.findex;
     let arr_t = obj_type(code, "hl.types.ArrayObj")?;
     let copy = method(code, arr_t, "copy")?.findex;
     let sort = method(code, arr_t, "sort")?.findex;
@@ -402,29 +430,8 @@ fn order_plan(code: &Bytecode) -> Result<OrderPlan> {
         bail!("class props.flags is not null<i32>");
     }
 
+    let (at, units) = loop_site(code, gen)?;
     let ops = &gen.ops;
-    let ty = |r: Reg| gen.regs[r.0 as usize];
-    let mut found = Vec::new();
-    for i in 0..ops.len().saturating_sub(8) {
-        let Opcode::Field { dst: list, field: f, .. } = ops[i] else { continue };
-        if f != all_units {
-            continue;
-        }
-        let Opcode::Field { dst: raw, obj, .. } = ops[i + 5] else { continue };
-        let Opcode::SafeCast { dst: units, src } = ops[i + 6] else { continue };
-        if obj != list || src != raw || ty(units) != arr_t {
-            continue;
-        }
-        if ops[i + 7..(i + 40).min(ops.len())]
-            .iter()
-            .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == is_alive))
-        {
-            found.push((i + 7, units));
-        }
-    }
-    let [(at, units)] = found[..] else {
-        bail!("genLoot: expected one worn-gear unit loop, found {}", found.len());
-    };
     if matches!(ops[at], Opcode::Call1 { fun, .. } if fun == copy) {
         bail!("already applied");
     }
@@ -567,10 +574,295 @@ pub(crate) fn patch_loot_order(code: &mut Bytecode) {
     }
 }
 
+// The extra worn-gear chance scales with the number of dead enemies.
+//
+// After the guaranteed drop, each next dead enemy rolls (genLoot ops 654-700)
+//
+//   p = LootEquipDropProba (0.08) + bonuses + equipLootProba * LootEquipDropProbaProgression (0.03)
+//   if (rand() < p) drop        // equipLootProba++ each roll, -1 on a drop
+//
+// so the expected extra drops grow faster than the enemy count (pity builds
+// up within a battle). Each roll's chance is now multiplied by
+//
+//   lootScale = sqrt(NREF / N),  N = dead enemies of the battle (at least 1)
+//
+// computed once before the worn-gear loop by an appended function that counts
+// the units the loop itself treats as dead enemies (data, not on the player
+// side, not alive, not a captured animal). With NREF 8 the expected items per
+// battle are 1.10 / 1.32 / 1.57 / 1.81 / 2.04 / 2.26 at N = 2 / 4 / 6 / 8 / 10
+// / 12 (vanilla 1.05 / 1.23 / 1.50 / 1.81 / 2.13 / 2.45): about 0.1 extra
+// item per extra enemy at every battle size. The guaranteed drop, the counter
+// and its reset are unchanged.
+
+const NREF: f64 = 8.0;
+
+struct PityPlan {
+    fi: usize,
+    /// Loop entry (lootScale call goes here).
+    at: usize,
+    /// The roll compare `JNotLt rand !< p` (the Mul goes before it).
+    roll_at: usize,
+    p: Reg,
+    debrief_t: RefType,
+    state: (RefField, RefType),
+    all_units: (RefField, RefType),
+    proxy_array: (RefField, RefType),
+    arr_t: RefType,
+    arr_len: RefField,
+    arr_array: (RefField, RefType),
+    unit_t: RefType,
+    data: (RefField, RefType),
+    owner: (RefField, RefType),
+    side: (RefField, RefType),
+    player_side: RefField,
+    is_alive: RefFun,
+    is_animal: RefFun,
+    is_captured: RefFun,
+    sqrt: RefFun,
+    f64_t: RefType,
+    i32_t: RefType,
+    bool_t: RefType,
+    dyn_t: RefType,
+    dbg: (usize, usize),
+}
+
+fn pity_plan(code: &Bytecode) -> Result<PityPlan> {
+    let debrief_t = obj_type(code, "battle.Debrief")?;
+    let gen = method(code, debrief_t, "genLoot")?;
+    let fi = fun_index(code, gen.findex)?;
+    let (at, _) = loop_site(code, gen)?;
+    let state_t = obj_type(code, "battle.State")?;
+    let unit_t = obj_type(code, "battle.Unit")?;
+    let su_t = obj_type(code, "st.Unit")?;
+    let arr_t = obj_type(code, "hl.types.ArrayObj")?;
+    let f64_t = prim_type(code, "f64", |t| matches!(t, Type::F64))?;
+    let i32_t = prim_type(code, "i32", |t| matches!(t, Type::I32))?;
+    let bool_t = prim_type(code, "bool", |t| matches!(t, Type::Bool))?;
+    let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
+    let state = field(code, debrief_t, "state")?;
+    if state.1 != state_t {
+        bail!("Debrief.state is not battle.State");
+    }
+    let all_units = field(code, state_t, "allUnits")?;
+    let proxy_array = field(code, all_units.1, "array")?;
+    let (arr_len, len_t) = field(code, arr_t, "length")?;
+    let arr_array = field(code, arr_t, "array")?;
+    if len_t != i32_t || !matches!(code.types[arr_array.1.0], Type::Array) {
+        bail!("ArrayObj layout");
+    }
+    let data = field(code, unit_t, "data")?;
+    let owner = field(code, unit_t, "owner")?;
+    let side = field(code, owner.1, "side")?;
+    let (player_side, ps_t) = field(code, state_t, "playerSide")?;
+    if data.1 != su_t || ps_t != side.1 {
+        bail!("battle.Unit data / owner.side types");
+    }
+    let is_alive = method(code, unit_t, "isAlive")?.findex;
+    let is_captured = method(code, unit_t, "isCaptured")?.findex;
+    let is_animal = method(code, su_t, "get_isAnimal")?.findex;
+    let sqrt = native(code, "math_sqrt", &[f64_t], f64_t)?;
+
+    // The loop itself skips exactly these units; keep the count in step with it.
+    let loop_ops = &gen.ops[at..(at + 60).min(gen.ops.len())];
+    for f in [is_alive, is_captured, is_animal] {
+        if !loop_ops
+            .iter()
+            .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == f))
+        {
+            bail!("genLoot loop: dead-enemy checks changed");
+        }
+    }
+
+    let ops = &gen.ops;
+    let ty = |r: Reg| gen.regs[r.0 as usize];
+    let rolls: Vec<usize> = (1..ops.len())
+        .filter(|&j| {
+            let Opcode::JNotLt { b, .. } = ops[j] else { return false };
+            matches!(ops[j - 1], Opcode::Add { dst, .. } if dst == b && ty(b) == f64_t)
+                || matches!(ops[j - 1], Opcode::Mul { dst, a, .. } if dst == b && a == b)
+        })
+        .collect();
+    let [roll_at] = rolls[..] else {
+        bail!("genLoot: expected one worn-gear roll, found {}", rolls.len());
+    };
+    let Opcode::JNotLt { b: p, .. } = ops[roll_at] else { unreachable!() };
+    if matches!(ops[roll_at - 1], Opcode::Mul { .. }) {
+        bail!("already applied");
+    }
+    if (0..ops.len()).any(|j| jump_targets(gen, j).contains(&roll_at)) {
+        bail!("genLoot: a jump lands on the roll compare");
+    }
+    let dbg = gen.debug_info.as_ref().map_or((0, 0), |d| d[at]);
+    Ok(PityPlan {
+        fi,
+        at,
+        roll_at,
+        p,
+        debrief_t,
+        state,
+        all_units,
+        proxy_array,
+        arr_t,
+        arr_len,
+        arr_array,
+        unit_t,
+        data,
+        owner,
+        side,
+        player_side,
+        is_alive,
+        is_animal,
+        is_captured,
+        sqrt,
+        f64_t,
+        i32_t,
+        bool_t,
+        dyn_t,
+        dbg,
+    })
+}
+
+fn pity_apply(code: &mut Bytecode, p: PityPlan) -> Result<()> {
+    // lootScale(d: battle.Debrief) -> f64
+    let mut r = asm::Regs(vec![p.debrief_t]);
+    let st = r.r(p.state.1);
+    let list = r.r(p.all_units.1);
+    let raw = r.r(p.proxy_array.1);
+    let arr = r.r(p.arr_t);
+    let (i, len, n, one) = (r.r(p.i32_t), r.r(p.i32_t), r.r(p.i32_t), r.r(p.i32_t));
+    let na = r.r(p.arr_array.1);
+    let dv = r.r(p.dyn_t);
+    let u = r.r(p.unit_t);
+    let su = r.r(p.data.1);
+    let pl = r.r(p.owner.1);
+    let (s1, s2) = (r.r(p.side.1), r.r(p.side.1));
+    let b = r.r(p.bool_t);
+    let (nf, k) = (r.r(p.f64_t), r.r(p.f64_t));
+    let zero_c = int_const(code, 0);
+    let one_c = int_const(code, 1);
+    let nref_c = float_const(code, NREF);
+    let mut a = asm::Asm::new();
+    a.op(Opcode::Int { dst: n, ptr: zero_c });
+    a.op(Opcode::Int { dst: i, ptr: zero_c });
+    a.op(Opcode::Field { dst: st, obj: Reg(0), field: p.state.0 });
+    a.jmp(Opcode::JNull { reg: st, offset: 0 }, "done");
+    a.op(Opcode::Field { dst: list, obj: st, field: p.all_units.0 });
+    a.jmp(Opcode::JNull { reg: list, offset: 0 }, "done");
+    a.op(Opcode::Field { dst: raw, obj: list, field: p.proxy_array.0 });
+    a.op(Opcode::SafeCast { dst: arr, src: raw });
+    a.jmp(Opcode::JNull { reg: arr, offset: 0 }, "done");
+    a.loop_head("loop");
+    a.op(Opcode::Field { dst: len, obj: arr, field: p.arr_len });
+    a.jmp(Opcode::JSGte { a: i, b: len, offset: 0 }, "done");
+    a.op(Opcode::Field { dst: na, obj: arr, field: p.arr_array.0 });
+    a.op(Opcode::GetArray { dst: dv, array: na, index: i });
+    a.op(Opcode::UnsafeCast { dst: u, src: dv });
+    a.op(Opcode::Incr { dst: i });
+    a.jmp(Opcode::JNull { reg: u, offset: 0 }, "loop");
+    a.op(Opcode::Field { dst: su, obj: u, field: p.data.0 });
+    a.jmp(Opcode::JNull { reg: su, offset: 0 }, "loop");
+    a.op(Opcode::Field { dst: pl, obj: u, field: p.owner.0 });
+    a.jmp(Opcode::JNull { reg: pl, offset: 0 }, "loop");
+    a.op(Opcode::Field { dst: s1, obj: pl, field: p.side.0 });
+    a.op(Opcode::Field { dst: s2, obj: st, field: p.player_side });
+    a.jmp(Opcode::JEq { a: s1, b: s2, offset: 0 }, "loop");
+    a.op(Opcode::Call1 { dst: b, fun: p.is_alive, arg0: u });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "loop");
+    a.op(Opcode::Call1 { dst: b, fun: p.is_animal, arg0: su });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "count");
+    a.op(Opcode::Call1 { dst: b, fun: p.is_captured, arg0: u });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "loop");
+    a.label("count");
+    a.op(Opcode::Incr { dst: n });
+    a.jmp(Opcode::JAlways { offset: 0 }, "loop");
+    a.label("done");
+    a.op(Opcode::Int { dst: one, ptr: one_c });
+    a.jmp(Opcode::JSGte { a: n, b: one, offset: 0 }, "calc");
+    a.op(Opcode::Mov { dst: n, src: one });
+    a.label("calc");
+    a.op(Opcode::ToSFloat { dst: nf, src: n });
+    a.op(Opcode::Float { dst: k, ptr: nref_c });
+    a.op(Opcode::SDiv { dst: k, a: k, b: nf });
+    a.op(Opcode::Call1 { dst: k, fun: p.sqrt, arg0: k });
+    a.op(Opcode::Ret { ret: k });
+    let scale_fn = asm::push_fn(code, vec![p.debrief_t], p.f64_t, r.0, a.finish(), p.dbg.0)?;
+
+    let f = &mut code.functions[p.fi];
+    let rs = new_reg(f, p.f64_t);
+    // Roll first (higher index), then the loop entry, so `roll_at` stays valid.
+    insert_ops(f, p.roll_at, vec![Opcode::Mul { dst: p.p, a: p.p, b: rs }]);
+    insert_ops(f, p.at, vec![Opcode::Call1 { dst: rs, fun: scale_fn, arg0: Reg(0) }]);
+    eprintln!(
+        "patched loot pity fn@{}: worn-gear chance x sqrt({NREF} / dead enemies)",
+        f.findex.0
+    );
+    Ok(())
+}
+
+/// Scales the extra worn-gear chance by the battle size, or leaves `code` untouched and logs why.
+pub(crate) fn patch_loot_pity(code: &mut Bytecode) {
+    let p = match pity_plan(code) {
+        Ok(p) => p,
+        Err(e) => return crate::skipped(format!("loot pity skipped: {e:#}")),
+    };
+    let snap = asm::Snap::take(code);
+    if let Err(e) = pity_apply(code, p) {
+        snap.restore(code);
+        crate::skipped(format!("loot pity skipped: {e:#}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::asm::testutil::{game, read};
+
+    #[test]
+    fn loot_pity_installed_game() {
+        use crate::asm::testutil::{check_flow, check_types};
+        let Some(image) = game() else { return };
+        // Alone, and after the order pass (both insert at the loop entry).
+        for with_order in [false, true] {
+            let mut code = read(&image);
+            if with_order {
+                patch_loot_order(&mut code);
+            }
+            let p = pity_plan(&code).expect("plan");
+            let (fi, at, roll_at, pr) = (p.fi, p.at, p.roll_at, p.p);
+            let a = code.functions[fi].clone();
+            let n = code.functions.len();
+            patch_loot_pity(&mut code);
+            let mut patched = Vec::new();
+            code.serialize(&mut patched).expect("write");
+            let back = read(&patched);
+            assert_eq!(back.functions.len(), n + 1);
+            let b = &back.functions[fi];
+            assert_eq!(b.ops.len(), a.ops.len() + 2);
+            assert_eq!(b.regs.len(), a.regs.len() + 1);
+            let rs = Reg(a.regs.len() as u32);
+            let Opcode::Call1 { dst, fun, arg0: Reg(0) } = b.ops[at] else { panic!("scale call") };
+            assert_eq!((dst, fun), (rs, back.functions[n].findex));
+            assert_eq!(format!("{:?}", b.ops[roll_at + 1]), format!("{:?}", Opcode::Mul { dst: pr, a: pr, b: rs }));
+            assert!(matches!(b.ops[roll_at + 2], Opcode::JNotLt { b, .. } if b == pr));
+            check_flow(b);
+            check_types(&back, b, at..at + 1);
+            check_types(&back, b, roll_at + 1..roll_at + 2);
+            let s = &back.functions[n];
+            check_flow(s);
+            check_types(&back, s, 0..s.ops.len());
+
+            let mut again = read(&patched);
+            assert!(pity_plan(&again).is_err());
+            patch_loot_pity(&mut again);
+            let mut twice = Vec::new();
+            again.serialize(&mut twice).expect("write");
+            assert!(twice == patched);
+        }
+        // The scale itself.
+        let scale = |n: f64| (NREF / n.max(1.0)).sqrt();
+        assert!((scale(8.0) - 1.0).abs() < 1e-12 && (scale(2.0) - 2.0).abs() < 1e-12);
+        assert_eq!(scale(0.0), scale(1.0));
+    }
 
     #[test]
     fn armor_any_installed_game() {

@@ -182,6 +182,15 @@ the forced weapon no longer counts as the guaranteed worn-gear drop. The
 per-enemy loot-table rolls run in the new order (independent odds);
 state.allUnits is untouched.
 
+**Loot pity** (same file, `patch_loot_pity`): the extra worn-gear roll's
+chance (`0.08 + bonuses + equipLootProba * 0.03`, ops 654-700) is multiplied
+by `sqrt(8 / N)`, N = dead enemies (at least 1): one `Mul` before the roll's
+`JNotLt`, and one call at the worn-gear loop entry to an appended function
+that counts the units the loop treats as dead enemies (data, not player side,
+not alive, not a captured animal). Expected items per battle at N = 2 / 4 / 6
+/ 8 / 10 / 12: 1.10 / 1.32 / 1.57 / 1.81 / 2.04 / 2.26 (vanilla 1.05 / 1.23
+/ 1.50 / 1.81 / 2.13 / 2.45). Guarantee, counter and reset unchanged.
+
 **Skill sync** (`src/skill_sync.rs`, issue #2): a round reset
 (`battle.Unit.resetTurn`) reaches a client through hxbit `networkSync`, whose
 setters never mark the battle UI dirty (`set_skillPersistValues` does, but not
