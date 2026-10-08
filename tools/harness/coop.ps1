@@ -16,6 +16,7 @@
 #                                          dump every 2 s until the expression on the
 #                                          dump ($s) is true (-TimeoutSec)
 #   coop.ps1 key     -Inst A -Key Escape  WM_KEYDOWN/UP to the window (Escape, Enter, I, ...)
+#   coop.ps1 click   -Inst A -X 1199 -Y 902  left click at a pixel of the 'shot' image
 #   coop.ps1 shot    [-Inst A,B] [-Tag x] PrintWindow screenshot per window
 #   coop.ps1 place   [-Inst A,B] [-W 852 -H 480]  windows side by side
 #   coop.ps1 close   -Inst B              WM_CLOSE (Alt+F4, soft)
@@ -29,7 +30,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory)]
-    [ValidateSet('start', 'cmd', 'wait', 'key', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
+    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
     [string]$Action,
     [string[]]$Inst = @('A', 'B'),
     [string]$Line = 'dump',
@@ -40,6 +41,8 @@ param(
     [int]$TimeoutSec = 120,
     [int]$W = 852,
     [int]$H = 480,
+    [int]$X = 0,
+    [int]$Y = 0,
     [switch]$Keep,
     [string]$Root = 'D:\WartalesTest'
 )
@@ -53,10 +56,20 @@ Add-Type -Namespace Harness -Name Win -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+[DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);
+[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 public struct RECT { public int Left, Top, Right, Bottom; }
+public struct POINT { public int X, Y; }
 '@
 Add-Type -AssemblyName System.Drawing
+# Per-monitor DPI aware: window rects, PrintWindow and the cursor all in physical
+# pixels. Unaware, a 150 % display gave logical rects, so shots were cropped
+# to the top-left two thirds and clicks missed.
+[void][Harness.Win]::SetProcessDpiAwarenessContext([IntPtr]-4)
 
 function Instance-No([string]$i) { return [array]::IndexOf(@('A', 'B', 'C', 'D'), $i.ToUpper()) + 1 }
 
@@ -179,8 +192,10 @@ switch ($Action) {
         $deadline = (Get-Date).AddSeconds($TimeoutSec)
         foreach ($i in $Inst) {
             while ($true) {
-                $s = Send-Cmd $run $i 'dump' | ConvertFrom-Json
-                if (& $cond) { Write-Host "${i}: $Until"; break }
+                # A loading game runs no frames, so a dump may go unanswered: keep polling.
+                $s = $null
+                try { $s = Send-Cmd $run $i 'dump' | ConvertFrom-Json } catch { if ("$_" -notmatch 'no ack') { throw } }
+                if ($s -and (& $cond)) { Write-Host "${i}: $Until"; break }
                 if ((Get-Date) -gt $deadline) { throw "${i}: not '$Until' after $TimeoutSec s" }
                 Start-Sleep -Seconds 2
             }
@@ -199,6 +214,31 @@ switch ($Action) {
             Write-Host "${i}: key $Key"
         }
     }
+    'click' {
+        $run = Run-Dir
+        foreach ($i in $Inst) {
+            $p = Game-Proc $run $i
+            if (-not $p) { Write-Host "$i not running"; continue }
+            $p.Refresh()
+            $hw = $p.MainWindowHandle
+            # -X/-Y are pixels of the 'shot' image (whole window); messages take client coordinates.
+            $r = New-Object Harness.Win+RECT
+            [void][Harness.Win]::GetWindowRect($hw, [ref]$r)
+            $o = New-Object Harness.Win+POINT
+            [void][Harness.Win]::ClientToScreen($hw, [ref]$o)
+            $cx = $X - ($o.X - $r.Left); $cy = $Y - ($o.Y - $r.Top)
+            # A real click (foreground + cursor + button), as a player's; posted
+            # WM_LBUTTON* messages do not reach the game's input.
+            [void][Harness.Win]::SetForegroundWindow($hw)
+            Start-Sleep -Milliseconds 150
+            [void][Harness.Win]::SetCursorPos($o.X + $cx, $o.Y + $cy)
+            Start-Sleep -Milliseconds 120
+            [Harness.Win]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero) # LEFTDOWN
+            Start-Sleep -Milliseconds 80
+            [Harness.Win]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero) # LEFTUP
+            Write-Host "${i}: click at client $cx,$cy"
+        }
+    }
     'shot' {
         $run = Run-Dir
         foreach ($i in $Inst) {
@@ -210,11 +250,14 @@ switch ($Action) {
             [void][Harness.Win]::GetWindowRect($hw, [ref]$r)
             $w = $r.Right - $r.Left; $hgt = $r.Bottom - $r.Top
             if ($w -le 0 -or $hgt -le 0) { Write-Host "$i window has no size"; continue }
+            # Screen capture of the foreground window: PrintWindow returns black
+            # for the world map (and for some UI) on this DX swap chain.
+            [void][Harness.Win]::SetForegroundWindow($hw)
+            Start-Sleep -Milliseconds 400
             $bmp = New-Object Drawing.Bitmap $w, $hgt
             $g = [Drawing.Graphics]::FromImage($bmp)
-            $dc = $g.GetHdc()
-            [void][Harness.Win]::PrintWindow($hw, $dc, 2) # PW_RENDERFULLCONTENT: DirectX content too
-            $g.ReleaseHdc($dc); $g.Dispose()
+            $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
+            $g.Dispose()
             $f = Join-Path $run ("{0}-{1}{2}.png" -f $i, (Get-Date -Format 'HHmmss'), $(if ($Tag) { "-$Tag" } else { '' }))
             $bmp.Save($f, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
             Write-Host "$i screenshot: $f (${w}x$hgt)"
