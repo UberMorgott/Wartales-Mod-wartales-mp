@@ -37,11 +37,25 @@
 //
 // hxbit's NetworkHost.send writes to targetClient alone when it is set (the
 // same mechanism sendMessage(msg, to) uses). The client handles the bytes after
-// the ReadyToStart they follow: gameplayStart enters the battle synchronously
-// (init sets game.battle, afterEnter sets lockAlives), so the replay finds the
-// battle exactly as the vanilla RPCs do after a host save load mid-fight. A host
-// still generating (battleInit false) sends the vanilla RPCs to every connected
-// client itself, the late joiner included.
+// the ReadyToStart they follow: gameplayStart sets game.battle synchronously, so
+// the replay finds the battle as the vanilla RPCs do after a host save load
+// mid-fight. A host still generating (battleInit false) sends the vanilla RPCs
+// to every connected client itself, the late joiner included.
+//
+// Battle.afterEnter, though, runs on the late joiner only after the replay
+// (shim.log: initClients prints `game.lockAlives:false`). It sets
+// `if (!isAuth) game.lockAlives = true`, which only initClients clears, so the
+// lock stayed: the battle plays, then the battle-end doLeaveMode parks in
+// waitAlive (`doLeaveMode lockAlives=true`) until the barrier's 30 s rejoin.
+// So, in Battle.afterEnter on every machine:
+//
+//   if (!isAuth && this.world == null) game.lockAlives = true;
+//
+// On a client only Battle.initClients sets world (synchronously, before it
+// clears the lock; initData's world is auth-only), so world != null means the
+// lock was already cleared. battleInit is no marker: afterGen sets it in a
+// later waitUntil callback. In a vanilla start afterEnter runs before any start
+// RPC (world null): unchanged.
 //
 // Validated before editing; a mismatch skips the pass (logged).
 
@@ -82,6 +96,53 @@ struct Plan {
     at: usize,
     client: Reg,
     dbg_file: usize,
+    /// Battle.afterEnter and the op after its `!isAuth` guard (JTrue past the
+    /// lockAlives set); `skip` = ops from the guard to the set, inclusive.
+    enter_fi: usize,
+    enter_at: usize,
+    enter_skip: i32,
+    battle_world: RefField,
+    world_t: RefType,
+}
+
+/// Battle.afterEnter: `..; if (game.isAuth) jump L; ..; Bool r = true;
+/// SetField game.lockAlives = r; L: ..`. Returns (fn, op after the JTrue,
+/// JTrue..SetField distance).
+fn plan_enter(
+    code: &Bytecode,
+    battle_t: RefType,
+    game_t: RefType,
+    bool_t: RefType,
+) -> Result<(usize, usize, i32)> {
+    let lock = typed(code, game_t, "lockAlives", bool_t)?;
+    let auth = typed(code, game_t, "isAuth", bool_t)?;
+    let f = method(code, battle_t, "afterEnter")?;
+    let fi = fun_index(code, f.findex)?;
+    let sets: Vec<usize> = (0..f.ops.len())
+        .filter(|&i| matches!(f.ops[i], Opcode::SetField { field, .. } if field == lock))
+        .collect();
+    let [k] = sets[..] else {
+        bail!("Battle.afterEnter: {} lockAlives sets, want 1", sets.len());
+    };
+    let guard: Vec<usize> = (0..k)
+        .filter(|&j| matches!(f.ops[j], Opcode::JTrue { .. }) && jump_targets(f, j) == [k + 1])
+        .collect();
+    let [j] = guard[..] else {
+        bail!("Battle.afterEnter: no single guard jumping past the lockAlives set");
+    };
+    let auth_test = j >= 1
+        && matches!((&f.ops[j - 1], &f.ops[j]),
+            (Opcode::Field { dst, field, .. }, Opcode::JTrue { cond, .. })
+                if *field == auth && dst == cond);
+    let set_true = matches!((&f.ops[k - 1], &f.ops[k]),
+        (Opcode::Bool { dst, value: ValBool(true) }, Opcode::SetField { src, .. }) if dst == src);
+    if !auth_test || !set_true {
+        bail!("Battle.afterEnter: unexpected isAuth / lockAlives shape");
+    }
+    if (0..f.ops.len()).any(|i| jump_targets(f, i).contains(&(j + 1))) {
+        bail!("Battle.afterEnter: a jump targets the guard's next op");
+    }
+    Ok((fi, j + 1, (k - j) as i32))
 }
 
 fn plan(code: &Bytecode) -> Result<Plan> {
@@ -203,7 +264,17 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if at >= n || (0..n).any(|i| jump_targets(h, i).contains(&at)) {
         bail!("the message handler: the late-joiner send has an unexpected shape");
     }
+    let (enter_fi, enter_at, enter_skip) = plan_enter(code, battle_t, game_t, bool_t)?;
+    let (battle_world, world_t) = field(code, battle_t, "world")?;
+    if world_t != obj_type(code, "battle.BattleMesh")? {
+        bail!("Battle.world is not a battle.BattleMesh");
+    }
     Ok(Plan {
+        battle_world,
+        world_t,
+        enter_fi,
+        enter_at,
+        enter_skip,
         void_t,
         bool_t,
         dyn_t,
@@ -376,6 +447,27 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
          the battle's start RPCs (battleRejoin fn@{})",
         f.findex.0, p.at, rejoin.0
     );
+    let f = &mut code.functions[p.enter_fi];
+    let w = new_reg(f, p.world_t);
+    insert_ops(
+        f,
+        p.enter_at,
+        vec![
+            Opcode::GetThis {
+                dst: w,
+                field: p.battle_world,
+            },
+            Opcode::JNotNull {
+                reg: w,
+                offset: p.enter_skip,
+            },
+        ],
+    );
+    eprintln!(
+        "patched battle rejoin fn@{} (Battle.afterEnter) op {}: a client whose initClients already \
+         ran (world set) does not set lockAlives again",
+        f.findex.0, p.enter_at
+    );
     Ok(())
 }
 
@@ -391,9 +483,11 @@ pub(crate) fn patch_battle_rejoin(code: &mut Bytecode) {
     };
     let snap = crate::asm::Snap::take(code);
     let saved = code.functions[p.join_fi].clone();
+    let saved_enter = code.functions[p.enter_fi].clone();
     if let Err(e) = apply(code, &p) {
         snap.restore(code);
         code.functions[p.join_fi] = saved;
+        code.functions[p.enter_fi] = saved_enter;
         crate::skipped(format!("battle rejoin skipped: {e:#}"));
     }
 }
@@ -421,8 +515,14 @@ mod tests {
         let nf = orig.functions.len();
         assert_eq!(back.functions.len(), nf + 1);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
-            assert_eq!(same(a, b), i != p.join_fi, "function #{i}");
+            assert_eq!(same(a, b), i != p.join_fi && i != p.enter_fi, "function #{i}");
         }
+        let (a, b) = (&orig.functions[p.enter_fi], &back.functions[p.enter_fi]);
+        shifted(a, b, p.enter_at, 2);
+        check_types(&back, b, p.enter_at..p.enter_at + 2);
+        check_flow(b);
+        // The new guard jumps where the isAuth guard does.
+        assert_eq!(jump_targets(b, p.enter_at + 1), jump_targets(b, p.enter_at - 1));
         let f = &back.functions[nf];
         check_types(&back, f, 0..f.ops.len());
         check_flow(f);
