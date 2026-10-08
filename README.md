@@ -70,6 +70,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do.
 - Switching a unit's profession keeps the experience earned in the old one, and applies at once without the confirm window.
 - Hold-to-confirm rings fill three times faster.
+- Enemies of a higher level than your squad can drop their worn equipment (weapons, armor, trinkets); before, anything above your best unit's level never dropped. Armor still drops only if one of your units' classes can wear it.
 - The title screen shows the installed mod version ("Co-op Fix v…") on its own line above the game version, so players can compare versions before joining.
 - Popup windows (unit sheet, shops, crafting, ...) and the inventory panels can be dragged by their title row. Positions are kept per window; a double click on the title row puts the window back. Dragging is local only and never clicks the world under the cursor.
 - In co-op a client closes its own window (unit sheet and other windows it opened itself) by clicking outside it, as the host always could; before, that click did nothing on a client.

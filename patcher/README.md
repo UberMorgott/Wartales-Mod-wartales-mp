@@ -143,6 +143,17 @@ behind every press-and-hold ring, divides its duration by 3 at entry
 1.95 s -> 0.65 s). The gamepad long-press binding duration is cdb data
 (`Const` `Pad_LongPress_Duration`) and is not changed here.
 
+**Loot level** (`src/loot_level.rs`): `battle.Debrief.genLoot` keeps a dead
+enemy's worn item as a drop candidate through one closure per slot (nine
+copies, Debrief.hx:521-531). Each one skipped an item whose `requireLevel` is
+above `getReferenceLevel(1.0)` (the best unit's level), and for armor called
+`Unit.canEquip`, which checks the unit's level too. The `JSGte` level compare
+becomes a `JAlways` to the same target, and `canEquip` + `JFalse` becomes
+`hasCantEquipReasons` + `JTrue` (armor / helmet kind, animal and item-flag
+checks kept, level dropped). Same op count; drop chance, pity counter,
+NoEquipDrop, ForceDropWeapon, quality and repair stay vanilla. Loot is
+generated on the host.
+
 **Skill sync** (`src/skill_sync.rs`, issue #2): a round reset
 (`battle.Unit.resetTurn`) reaches a client through hxbit `networkSync`, whose
 setters never mark the battle UI dirty (`set_skillPersistValues` does, but not
