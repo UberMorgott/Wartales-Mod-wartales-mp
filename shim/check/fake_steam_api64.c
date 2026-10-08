@@ -377,6 +377,11 @@ EXPORT unsigned char SteamAPI_ISteamUtils_IsAPICallCompleted(void *self, uint64_
 	*failed = 0;
 	return (unsigned char)lobby_complete;
 }
+EXPORT int SteamAPI_ISteamUtils_GetAPICallFailureReason(void *self, uint64_t call) {
+	if (self != &lobby_call || call != lobby_call)
+		lobby_st.bad_abi++;
+	return -1;
+}
 EXPORT unsigned char SteamAPI_ISteamUtils_GetAPICallResult(void *self, uint64_t call, void *data, int size, int expected,
 														   unsigned char *failed) {
 	struct {
