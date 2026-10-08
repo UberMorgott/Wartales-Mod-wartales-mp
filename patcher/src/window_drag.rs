@@ -91,7 +91,7 @@ use super::asm::{push_fn, string_ref, Asm, Regs, Snap};
 use super::diag::static_fn;
 use super::job_xp::str_global;
 use super::*;
-use hlbc::types::{EnumConstruct, RefEnumConstruct, RefGlobal, RefInt, RefString, ValBool};
+use hlbc::types::{EnumConstruct, RefEnumConstruct, RefGlobal, RefString, ValBool};
 
 const HEADER_PX: f64 = 70.0;
 const WIDE: f64 = 0.9;
@@ -109,13 +109,6 @@ pub(crate) const SIZE_PREFIX: &str = "mpWinSize:";
 /// area's height beyond whole rows (vanilla 330 px = 6 rows + 12).
 const ROW_PX: i32 = 53;
 const ROW_PAD: i32 = 12;
-/// An expandable inventory's grid: `rows` shown rows are rows - 1 built ones
-/// plus the empty row vanilla always adds below them (getHeight + 2, the last
-/// one hidden), 54 px slots at the 53 px pitch: rows * ROW_PX + EXP_PAD, the
-/// content's exact height. A taller grid than its viewport had a scroll range
-/// of 42 px (53 - 12 + 1) with nothing to show in it: the top row ended up
-/// half under the header.
-const EXP_PAD: i32 = 1;
 const MIN_ROWS: i32 = 2;
 /// The resize handle: square side and colour (ARGB).
 const HANDLE_PX: f64 = 14.0;
@@ -255,11 +248,6 @@ struct RsCtx {
     get_inv: RefFun,
     vis_h: RefField,
     base_h: RefField,
-    /// `Inventory.inventory: st.Inventory` and its `expandable: Bool`.
-    st_inv_t: RefType,
-    inv_inv: RefField,
-    expandable: RefField,
-    exp_t: RefType,
     force_update: RefFun,
     /// InventoryContent.contentChanged (needScroll class) / scrollReset.
     content_changed: RefFun,
@@ -355,12 +343,6 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
         &[cont_t],
         c.void_t,
     )?;
-    let st_inv_t = obj_type(code, "st.Inventory")?;
-    let inv_inv = typed(code, inv_t, "inventory", st_inv_t)?;
-    let (expandable, exp_t) = field(code, st_inv_t, "expandable")?;
-    if !matches!(code.types[exp_t.0], Type::Bool) {
-        bail!("st.Inventory.expandable is not a Bool");
-    }
     let set_max_h = proto(code, c.flow_t, "set_maxHeight")?;
     let (sa, nint_t) = sig(code, set_max_h)?;
     if sa != [c.flow_t, nint_t] || !matches!(code.types[nint_t.0], Type::Null(t) if t == c.i32_t) {
@@ -391,10 +373,6 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
         get_inv,
         vis_h,
         base_h,
-        st_inv_t,
-        inv_inv,
-        expandable,
-        exp_t,
         force_update,
         content_changed,
         scroll_reset,
@@ -1286,10 +1264,7 @@ fn add_restore(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) 
 // rows, rows = start + round(mouse dy / ROW_PX), clamped to [MIN_ROWS, as
 // many as fit below the panel on screen]: min = max height = rows * ROW_PX +
 // ROW_PAD (Flow.set_minHeight / set_maxHeight; no CSS sets them on
-// inventory-content); for an expandable inventory (st.Inventory.expandable:
-// vanilla always builds one empty row more, Inventory.rebuild / getHeight + 2)
-// rows * ROW_PX + EXP_PAD with rows - 1 built rows, so the content is exactly
-// the viewport. Start rows = round((height - pad) / ROW_PX). Width is untouched. Enough grid rows are built
+// inventory-content). Width is untouched. Enough grid rows are built
 // (Inventory.visibleHeight / baseHeight >= rows, forceUpdate). The three
 // panels (chest, inventory, co-op AllInv) are all bottom-anchored (chest:
 // absolute align bottom; inventory: in the bottom-aligned .windows flow;
@@ -1386,78 +1361,8 @@ fn add_rs_content(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
     )
 }
 
-/// `ex = 1` if content `ct`'s grid shows an expandable inventory, else 0
-/// (`inv` / `si` / `b` scratch; labels exp_* local to the caller's Asm).
-#[allow(clippy::too_many_arguments)]
-fn emit_exp(
-    a: &mut Asm,
-    c: &Ctx,
-    k0: RefInt,
-    k1: RefInt,
-    ct: Reg,
-    inv: Reg,
-    si: Reg,
-    b: Reg,
-    ex: Reg,
-) {
-    a.op(Opcode::Int { dst: ex, ptr: k0 });
-    a.op(Opcode::Call1 {
-        dst: inv,
-        fun: c.rs.get_inv,
-        arg0: ct,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: inv,
-            offset: 0,
-        },
-        "exp_out",
-    );
-    a.op(Opcode::Field {
-        dst: si,
-        obj: inv,
-        field: c.rs.inv_inv,
-    });
-    a.jmp(Opcode::JNull { reg: si, offset: 0 }, "exp_out");
-    a.op(Opcode::Field {
-        dst: b,
-        obj: si,
-        field: c.rs.expandable,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "exp_out");
-    a.op(Opcode::Int { dst: ex, ptr: k1 });
-    a.label("exp_out");
-}
-
-/// `pad = ex ? EXP_PAD : ROW_PAD` (the viewport's height beyond whole rows).
-fn emit_pad(a: &mut Asm, k_pad: RefInt, k_exp: RefInt, ex: Reg, z: Reg, pad: Reg, k0: RefInt) {
-    a.op(Opcode::Int {
-        dst: pad,
-        ptr: k_pad,
-    });
-    a.op(Opcode::Int { dst: z, ptr: k0 });
-    a.jmp(
-        Opcode::JEq {
-            a: ex,
-            b: z,
-            offset: 0,
-        },
-        "pad_out",
-    );
-    a.op(Opcode::Int {
-        dst: pad,
-        ptr: k_exp,
-    });
-    a.label("pad_out");
-}
-
 fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
     let (k_row, k_pad) = (int_const(code, ROW_PX), int_const(code, ROW_PAD));
-    let (k0, k1, k_exp) = (
-        int_const(code, 0),
-        int_const(code, 1),
-        int_const(code, EXP_PAD),
-    );
     let mut r = Regs(vec![c.rs.cont_t, c.i32_t, c.bool_t]);
     let (ct, rows, full) = (Reg(0), Reg(1), Reg(2));
     let (v, k, px, nb, nr, inv, vh) = (
@@ -1469,15 +1374,7 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         r.r(c.rs.inv_t),
         r.r(c.i32_t),
     );
-    let (si, b, ex, z, n) = (
-        r.r(c.rs.st_inv_t),
-        r.r(c.rs.exp_t),
-        r.r(c.i32_t),
-        r.r(c.i32_t),
-        r.r(c.i32_t),
-    );
     let mut a = Asm::new();
-    emit_exp(&mut a, c, k0, k1, ct, inv, si, b, ex);
     a.jmp(
         Opcode::JFalse {
             cond: full,
@@ -1491,7 +1388,7 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         a: rows,
         b: k,
     });
-    emit_pad(&mut a, k_pad, k_exp, ex, z, k, k0);
+    a.op(Opcode::Int { dst: k, ptr: k_pad });
     a.op(Opcode::Add {
         dst: px,
         a: px,
@@ -1519,16 +1416,10 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         },
         "out",
     );
-    // Built rows: the shown ones, less the empty row an expandable grid adds.
-    a.op(Opcode::Sub {
-        dst: n,
-        a: rows,
-        b: ex,
-    });
     a.op(Opcode::SetField {
         obj: inv,
         field: c.rs.base_h,
-        src: n,
+        src: rows,
     });
     a.op(Opcode::Field {
         dst: vh,
@@ -1538,7 +1429,7 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
     a.jmp(
         Opcode::JSGte {
             a: vh,
-            b: n,
+            b: rows,
             offset: 0,
         },
         "built",
@@ -1546,7 +1437,7 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
     a.op(Opcode::SetField {
         obj: inv,
         field: c.rs.vis_h,
-        src: n,
+        src: rows,
     });
     a.op(Opcode::Call1 {
         dst: v,
@@ -1833,13 +1724,7 @@ fn add_rs_push(
     cap_t: RefType,
 ) -> Result<RefFun> {
     let k0 = int_const(code, 0);
-    let (k1, k_pad, k_exp) = (
-        int_const(code, 1),
-        int_const(code, ROW_PAD),
-        int_const(code, EXP_PAD),
-    );
     let (f0, f_row) = (float_const(code, 0.0), float_const(code, ROW_PX as f64));
-    let f_half = float_const(code, 0.5);
     let mut r = Regs(vec![cap_t, c.ev_t]);
     let (cx, e) = (Reg(0), Reg(1));
     let (v, exc, bt, z, panel, key, ct, sc) = (
@@ -1862,13 +1747,6 @@ fn add_rs_push(
         r.r(c.i32_t),
         r.r(c.obj_t),
         r.r(c.bool_t),
-    );
-    let (inv, si_r, eb, ex, pad) = (
-        r.r(c.rs.inv_t),
-        r.r(c.rs.st_inv_t),
-        r.r(c.rs.exp_t),
-        r.r(c.i32_t),
-        r.r(c.i32_t),
     );
     let gd = Guard { exc, v };
     let mut a = Asm::new();
@@ -1914,9 +1792,7 @@ fn add_rs_push(
         arg0: panel,
     });
     a.jmp(Opcode::JNull { reg: sc, offset: 0 }, "out");
-    // Start rows: the viewport's height beyond its pad in whole rows (rounded).
-    emit_exp(&mut a, c, k0, k1, ct, inv, si_r, eb, ex);
-    emit_pad(&mut a, k_pad, k_exp, ex, z, pad, k0);
+    // Start rows: the viewport's height in whole rows.
     a.op(Opcode::Float {
         dst: fr,
         ptr: f_row,
@@ -1926,18 +1802,11 @@ fn add_rs_push(
         obj: ct,
         field: c.rs.calc_h,
     });
-    a.op(Opcode::ToSFloat { dst: t, src: pad });
-    a.op(Opcode::Sub { dst: h, a: h, b: t });
     a.op(Opcode::SDiv {
         dst: h,
         a: h,
         b: fr,
     });
-    a.op(Opcode::Float {
-        dst: t,
-        ptr: f_half,
-    });
-    a.op(Opcode::Add { dst: h, a: h, b: t });
     a.op(Opcode::ToInt { dst: rows, src: h });
     // Max: what fits between the panel's bottom and the screen's (no less than now).
     a.op(Opcode::Field {
@@ -3168,13 +3037,7 @@ fn add_clamp(
     );
     a.label("go");
     // A panel at its styled spot is where vanilla puts it: left alone.
-    a.jmp(
-        Opcode::JNull {
-            reg: key,
-            offset: 0,
-        },
-        "pos",
-    );
+    a.jmp(Opcode::JNull { reg: key, offset: 0 }, "pos");
     full_key(&mut a, c, g.base, full, key);
     a.op(Opcode::Null { dst: bd });
     a.op(Opcode::Call2 {
@@ -3403,13 +3266,7 @@ fn add_clamp(
         arg1: b,
     });
     // Kept: a style refresh (the chest's hover) re-applies the CSS offsets.
-    a.jmp(
-        Opcode::JNull {
-            reg: key,
-            offset: 0,
-        },
-        "out",
-    );
+    a.jmp(Opcode::JNull { reg: key, offset: 0 }, "out");
     a.op(Opcode::Call2 {
         dst: v,
         fun: save,
@@ -5765,11 +5622,7 @@ mod tests {
         assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(30, 150));
         restyle(&mut s, &c, &pr);
         assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
-        assert_eq!(
-            s.c.get(&pr, c.off_y),
-            V::I(150),
-            "pinned over the CSS offset"
-        );
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(150), "pinned over the CSS offset");
 
         // A window: clamped whatever its parent's needReflow, never saved.
         let clamp = find_named(&code, N_CLAMP).unwrap();
@@ -5884,10 +5737,7 @@ mod tests {
         // maxHeight (after the rows are built), scroll back at the top.
         let cc = s.c.take("contentChanged");
         assert_eq!(cc.len(), 1);
-        assert_eq!(
-            (cc[0][0].clone(), cc[0][1].clone()),
-            (cont.clone(), inv.clone())
-        );
+        assert_eq!((cc[0][0].clone(), cc[0][1].clone()), (cont.clone(), inv.clone()));
         assert_eq!(s.c.take("scrollReset"), vec![vec![cont.clone()]]);
         // Within the same row: nothing changes.
         mouse(&mut s, 25.0, 690.0);
@@ -5972,65 +5822,6 @@ mod tests {
             s.c.take("forceUpdate").is_empty(),
             "rows already built: no rebuild"
         );
-    }
-
-    /// An expandable inventory (player inventories: vanilla builds the rows
-    /// plus one empty row below them): the viewport is exactly the shown
-    /// rows (rows * ROW_PX + EXP_PAD, no scroll range left over), one of them
-    /// the empty row, so the grid builds rows - 1; the start rows round the
-    /// viewport less its pad (vanilla 330 px: 6).
-    #[test]
-    fn resize_expandable_fits_its_rows() {
-        let Some(image) = game() else { return };
-        let (code, n) = built(&image);
-        let c = ctx(&code).unwrap();
-        let f = fns(&code, n);
-        let mut s = sim(&code, n, &c);
-        let (panel, pr, cont, inv) = rs_panel(&mut s, &c);
-        for fl in [c.rs.vis_h, c.rs.base_h] {
-            assert_ne!(fl, c.rs.inv_inv, "sim field keys collide");
-        }
-        let si = s.c.obj(&[(c.rs.expandable, V::B(true))]);
-        s.c.set(&inv, c.rs.inv_inv, si);
-        let key = V::S("e".into());
-        s.run(f.rs_install, vec![panel.clone(), key.clone()]);
-        let it = s.c.take("handle")[0][0].clone();
-        let V::Clo(_, cap) = s.c.get(&it, c.on_push) else {
-            panic!("handle onPush")
-        };
-        mouse(&mut s, 20.0, 600.0);
-        let kd = s.c.enm(c.ev_push, vec![]);
-        let e = s.c.obj(&[(c.kind, kd), (c.button, V::I(0))]);
-        s.run(f.rs_push, vec![(*cap).clone(), e]);
-        s.c.take("getProperties");
-        // +80 px: 6 + 2 = 8 shown rows, 7 built.
-        mouse(&mut s, 20.0, 680.0);
-        event(&mut s, &c, &f, c.ev_move);
-        let px = V::I(8 * ROW_PX + EXP_PAD);
-        assert_eq!(s.c.take("maxHeight")[0][1], px);
-        assert_eq!(s.c.take("minHeight")[0][1], px);
-        assert_eq!(s.c.get(&pr, c.off_y), V::I(2 * ROW_PX));
-        assert_eq!(s.c.get(&inv, c.rs.vis_h), V::I(7));
-        assert_eq!(s.c.get(&inv, c.rs.base_h), V::I(7));
-        assert_eq!(s.c.map("ud", "mpWinSize:e"), V::I(8));
-        assert_eq!(s.c.take("scrollReset"), vec![vec![cont.clone()]]);
-        event(&mut s, &c, &f, c.ev_release);
-        // A new push on that viewport starts from the same 8 rows.
-        s.c.set(&cont, c.rs.calc_h, V::F((8 * ROW_PX + EXP_PAD) as f64));
-        let kd = s.c.enm(c.ev_push, vec![]);
-        let e = s.c.obj(&[(c.kind, kd), (c.button, V::I(0))]);
-        s.run(f.rs_push, vec![(*cap).clone(), e]);
-        mouse(&mut s, 20.0, 690.0);
-        event(&mut s, &c, &f, c.ev_move);
-        assert!(s.c.take("maxHeight").is_empty(), "same rows: no change");
-        // Reopened with the saved size: same viewport and rows.
-        let (p2, _, c2, inv2) = rs_panel(&mut s, &c);
-        let si2 = s.c.obj(&[(c.rs.expandable, V::B(true))]);
-        s.c.set(&inv2, c.rs.inv_inv, si2);
-        s.run(f.rs_install, vec![p2, key]);
-        let mh = s.c.take("maxHeight");
-        assert_eq!((mh[0][0].clone(), mh[0][1].clone()), (c2, px));
-        assert_eq!(s.c.get(&inv2, c.rs.vis_h), V::I(7));
     }
 
     /// The chest (CSS offset-y -410, dragged to 30,-300): a resize grows it
