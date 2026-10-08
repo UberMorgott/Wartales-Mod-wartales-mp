@@ -137,3 +137,35 @@ Findings (2026-10-08), fixed on branch `fix/direct-join`:
 Driver notes: `coop.ps1` is per-monitor DPI aware (at 150 % shots were cropped and clicks missed), `shot` is a screen capture of the foregrounded window (PrintWindow is black on the world map), `click -X -Y` (pixels of a shot) is a real cursor click, `wait` keeps polling while a loading game does not ack. A loaded co-op game waits on the host's "Waiting for players" window until its Start button is clicked (vanilla). The join code is stable per host endpoint (`FW00009QNCC` = 127.0.0.1:14251), so a relaunched guest rejoins with it.
 
 Scenario run 2026-10-08 (run `D:\WartalesTest\runs\20261008-224953`): S1 host+join PASS, S2 in-game reload PASS, S3 battle restart (pause backup 0) PASS, S4 client WM_CLOSE + relaunch + rejoin mid-battle PASS (`battle rejoin: the running battle was replayed to a late joiner`), takeover not exercised, S5 skills equal on both (host-owned unit only), S6 debrief loot equal on both PASS, S7/S8 blocked. Fixture limit: the harness save is a converted solo save, so the guest owns no units (takeover, client skills, camp, confession need assigned companions). Open: after the S4 rejoin, battle end left the guest silent at the mode switch (`doLeaveMode lockAlives=true`) until the barrier's 30 s rejoin; camp refused with "companions of player Morgott are too far" (the unit-less guest).
+### Co-op fixture save (2026-10-09)
+
+The converted solo save gives the guest no units. The fixture `D:\WartalesTest\A\save\save006.dat` (backup `D:\WartalesTest\fixtures\coop-save006.dat`) is a co-op save in which the guest (`X2…`) owns Одик and Анян, the host Волколак, Юлик, Лошадь. Made once with:
+
+```powershell
+$c = '.\tools\harness\coop.ps1'
+& $c start; & $c cmd -Inst A -Line 'host save005'      # the converted solo save -> co-op lobby
+& $c cmd -Inst A -Line 'slot'; & $c cmd -Inst B -Line 'join auto'; & $c cmd -Inst A -Line 'start'
+& $c click -Inst A -X 650 -Y 550                        # host's "Waiting for players" Start (launch window size)
+& $c cmd -Inst A -Line 'console win'                    # the save was mid-battle; debrief Continue: click 610,591
+& $c cmd -Inst A -Line 'give 2'                         # vanilla Transfer (swapOwner) of 2 host units to the guest
+& $c cmd -Inst A -Line 'console save'                   # -> save\save006.dat (the converted game's own file)
+```
+
+Using it: restore the backup over `save006.dat` (the game re-saves it), then `start`, `host save006`, `slot`, `join auto`, `start`, click Start (650,550). `host <name>` picks the listed save whose file contains `<name>`; the bare `host` takes the first listed, which is `autosave.dat` once a battle has autosaved. `console battle` starts a fight next to the party, `console killFoes` ends it through real deaths (death drops), `console win` skips death drops (corpses, group tables and worn gear only). In camp `console confession ConfessionFriendlyFire` creates a confession; the talk is a right click on the speaker (`click -Right`).
+
+Driver findings: clicks need ~300 ms hold and ~400 ms hover (`-Hold`, default 300) and window focus (raised topmost + AttachThreadInput); `shot`/`click` refuse when the game window is not on top, so no other app is captured. After `place` the game keeps its launch-size input mapping (clicks miss); keep the launch size for clicks. The guest's `army` is empty on a client; dump `army` lists `GameState.getUnits` (every player's units) with owner ids.
+
+Scenario run 2026-10-09 (runs `D:\WartalesTest\runs\20261008-233800`, `20261008-235752`), fixture above:
+
+| Scenario | Result | Evidence |
+| --- | --- | --- |
+| S4 guest WM_CLOSE on own unit's turn, host takeover, relaunch + rejoin | PASS | host dump: Одик/Анян `connected:false`; host selected Анян with its action bar (`A-235023-s4-guestunit.png`); after `start -Keep` + `join FW00009QNCC` guest dump owns both, `connected:true`; host log `mp: battle rejoin: the running battle was replayed to a late joiner` |
+| Rejoin then battle end (freeze) | FAIL on main, PASS with 71c58e7 | main: guest `doLeaveMode lockAlives=true`, stuck in battle; fix: `doLeaveMode lockAlives=false`, guest on the world map in seconds; normal battle end still `lockAlives:true` at initClients then `false` |
+| S5 guest's own unit at round start | PASS | guest dump currentUnit Анян (X2): Move, CleaveStart, FirstAid ok=true (KnockOut/mount/cart false, same on host) |
+| S6 debrief loot with guest units | PASS | equal on both: `win` -> Corpse, Cloth x2, BowCommonOutlaws1; `killFoes` (1 poacher) -> Corpse, Gold 11, BowCommonOutlaws1 |
+| S7 guest unit confession +1 aptitude | PASS | ConfessionFriendlyFire (speaker Анян, target Одик), guest chose [ПОМОЧЬ]: host log `confession aptitude before ... aptitude=1` / `after ... aptitude=2`; Одик 1 -> 2 in host and guest dumps |
+| S8 chest / inventory panels | see open bugs | camp chest opens on host and guest (dump rect 949,13 331x227); top row under the header in the inventory panels |
+
+Root cause of the freeze (fix 71c58e7): vanilla `Battle.afterEnter` sets `lockAlives = true` on a client and only `Battle.initClients` clears it; for a late joiner the replayed initClients runs before afterEnter, so the lock stayed and `waitAlive` blocked the leave. afterEnter now skips the lock when `world` is already set (initClients ran).
+
+Inventory: each player has their own `BasePlayer.inventory`; the guest's panel was empty because the unit-less guest owned no items (now 3 stacks, host 9). Not a bug.

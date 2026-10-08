@@ -17,6 +17,11 @@
 #                                          dump ($s) is true (-TimeoutSec)
 #   coop.ps1 key     -Inst A -Key Escape  WM_KEYDOWN/UP to the window (Escape, Enter, I, ...)
 #   coop.ps1 click   -Inst A -X 1199 -Y 902  left click at a pixel of the 'shot' image
+#                    [-Right] [-Hold 300]    (camp talk is a right click; shorter holds
+#                                          are often missed); the window is raised and
+#                                          focused first, else nothing is clicked.
+#                                          After 'place' the game keeps its launch-size
+#                                          input mapping: click at the launch size.
 #   coop.ps1 shot    [-Inst A,B] [-Tag x] PrintWindow screenshot per window
 #   coop.ps1 place   [-Inst A,B] [-W 852 -H 480]  windows side by side
 #   coop.ps1 close   -Inst B              WM_CLOSE (Alt+F4, soft)
@@ -43,6 +48,8 @@ param(
     [int]$H = 480,
     [int]$X = 0,
     [int]$Y = 0,
+    [int]$Hold = 300,
+    [switch]$Right,
     [switch]$Keep,
     [string]$Root = 'D:\WartalesTest'
 )
@@ -64,6 +71,10 @@ Add-Type -Namespace Harness -Name Win -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
 [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 public struct RECT { public int Left, Top, Right, Bottom; }
 public struct POINT { public int X, Y; }
 '@
@@ -78,7 +89,13 @@ Add-Type -AssemblyName System.Drawing
 # so a shot or click never lands on another app's window.
 function Raise-Window([IntPtr]$hw, [Harness.Win+RECT]$r) {
     [void][Harness.Win]::SetWindowPos($hw, [IntPtr]-1, 0, 0, 0, 0, 0x43) # TOPMOST, NOMOVE|NOSIZE|SHOWWINDOW
+    # input focus too (the game ignores keys and choice clicks while inactive):
+    # SetForegroundWindow is honoured once attached to the foreground thread
+    $fg = [Harness.Win]::GetWindowThreadProcessId([Harness.Win]::GetForegroundWindow(), [IntPtr]::Zero)
+    $me = [Harness.Win]::GetCurrentThreadId()
+    [void][Harness.Win]::AttachThreadInput($me, $fg, $true)
     [void][Harness.Win]::SetForegroundWindow($hw)
+    [void][Harness.Win]::AttachThreadInput($me, $fg, $false)
     Start-Sleep -Milliseconds 400
     $c = New-Object Harness.Win+POINT
     $c.X = [int](($r.Left + $r.Right) / 2); $c.Y = [int](($r.Top + $r.Bottom) / 2)
@@ -248,10 +265,12 @@ switch ($Action) {
             if ($X -lt 0 -or $Y -lt 0 -or $X -ge ($r.Right - $r.Left) -or $Y -ge ($r.Bottom - $r.Top)) { Write-Host "${i}: $X,$Y is outside the window, click skipped"; continue }
             if (-not (Raise-Window $hw $r)) { Lower-Window $hw; Write-Host "${i}: window not on top, click skipped"; continue }
             [void][Harness.Win]::SetCursorPos($o.X + $cx, $o.Y + $cy)
-            Start-Sleep -Milliseconds 120
-            [Harness.Win]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero) # LEFTDOWN
-            Start-Sleep -Milliseconds 80
-            [Harness.Win]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero) # LEFTUP
+            # the game needs a few frames of hover before the press, else the first
+            # click on a fresh spot only hovers it
+            Start-Sleep -Milliseconds 400
+            [Harness.Win]::mouse_event($(if ($Right) { 0x0008 } else { 0x0002 }), 0, 0, 0, [IntPtr]::Zero) # RIGHT/LEFTDOWN
+            Start-Sleep -Milliseconds $Hold
+            [Harness.Win]::mouse_event($(if ($Right) { 0x0010 } else { 0x0004 }), 0, 0, 0, [IntPtr]::Zero) # RIGHT/LEFTUP
             Lower-Window $hw
             Write-Host "${i}: click at client $cx,$cy"
         }
