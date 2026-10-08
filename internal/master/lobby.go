@@ -52,6 +52,9 @@ func (l *lobby) idOf(p Peer) string {
 	if l.transport == TransportSDR && p.SteamID() != "" {
 		return p.SteamID()
 	}
+	if id := harnessMemberID(p); id != "" {
+		return id
+	}
 	return p.UserID()
 }
 
