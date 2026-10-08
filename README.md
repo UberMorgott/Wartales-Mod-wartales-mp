@@ -27,6 +27,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Fixes the post-battle screen rebuilding itself every frame in co-op when the remedy count and the injured units disagreed.
 - Post-battle loot with a damaged or injured squad: the screen no longer tears itself down and rebuilds every frame while the "repair all" / "cure all" availability changes, which could leave loot items and **Take all** dead (hover sound repeating, clicks lost). The buttons now just turn on and off. *(Vanilla bug.)*
 - A co-op load no longer waits forever for a player who disconnected before they were ready to start, and a reconnecting player is no longer counted twice. *(Vanilla bug.)*
+- Loading a save, restarting a battle or reloading from the pause menu in a co-op game no longer hangs on the loading screen when some players of the save are not in the session: the host keeps the lobby's list of absent players across the reload. *(Vanilla bug.)*
 - Clients no longer freeze when an enemy summons units and hits them in the same moment (for example the Rat Matriarch's howl spawning rats): the client makes the new units alive before it runs the host's battle messages. *(Vanilla bug.)*
 - The join gate no longer deadlocks when a save is loaded while a player is joining.
 - The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.

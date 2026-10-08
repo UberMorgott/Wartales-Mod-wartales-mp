@@ -74,6 +74,14 @@
 //   readySendTo(c): c sent a ReadyToStart that was counted. A client that has
 //     not (a synced player the count leaves out) is not started; its own
 //     ReadyToStart takes the vanilla late-joiner path.
+// A host reload (in-game load, battle restart, backup load: LoadGame.loadGame,
+// Game.loadGame, Pause's load closures) rebuilds options.multi as {hostID,
+// isServer, serverID}: playersRemoved is gone and the count includes the save's
+// absent players, so the reload never starts. readyRemoved(game, uid), from
+// readyTick and from readyMark before the vanilla count, remembers a list the
+// game has, gives it back to a game without one, forgets it with no
+// options.multi (solo), and takes a listed player who sent ReadyToStart off it.
+//
 // No timer of its own: a parked Join is bounded by the barrier's JOIN_CAP
 // (the client is disconnected, and so no longer waited for).
 //
@@ -559,6 +567,8 @@ struct Globals {
     synced: RefGlobal,
     forced: RefGlobal,
     held: RefGlobal,
+    /// The last lobby's options.multi.playersRemoved (never reset).
+    removed: RefGlobal,
 }
 
 /// readyReset(): fresh lists, nothing forced or held.
@@ -1019,7 +1029,119 @@ fn add_fix(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
 
 /// readyMark(game, c): false when c's user was already counted as ready
 /// from this client; readyFix runs first.
-fn add_mark(code: &mut Bytecode, p: &Plan, g: &Globals, fix: RefFun) -> Result<RefFun> {
+/// readyRemoved(game, uid): vanilla's host reloads (in-game load, battle
+/// restart, backup load) rebuild options.multi as {hostID, isServer, serverID}
+/// without playersRemoved, so the ReadyToStart count waits for the save's
+/// absent players forever. A list the game has is remembered; a game without
+/// one gets the remembered one back; no options.multi (solo) forgets it. A
+/// listed `uid` (not null) is taken off: that player is here and is counted.
+fn add_removed(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
+    let mut r = Regs(vec![p.game_t, p.str_t]);
+    let (game, uid) = (Reg(0), Reg(1));
+    let (opt, multi, rem, b, v) = (
+        r.r(p.game_options.1),
+        r.r(p.opt_multi.1),
+        r.r(p.arr_t),
+        r.r(p.bool_t),
+        r.r(p.void_t),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Field {
+        dst: opt,
+        obj: game,
+        field: p.game_options.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: opt,
+            offset: 0,
+        },
+        "forget",
+    );
+    a.op(Opcode::Field {
+        dst: multi,
+        obj: opt,
+        field: p.opt_multi.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: multi,
+            offset: 0,
+        },
+        "forget",
+    );
+    a.op(Opcode::Field {
+        dst: rem,
+        obj: multi,
+        field: p.multi_removed.0,
+    });
+    a.jmp(
+        Opcode::JNotNull {
+            reg: rem,
+            offset: 0,
+        },
+        "keep",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: rem,
+        global: g.removed,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: rem,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::SetField {
+        obj: multi,
+        field: p.multi_removed.0,
+        src: rem,
+    });
+    a.label("keep");
+    a.op(Opcode::SetGlobal {
+        global: g.removed,
+        src: rem,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: uid,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.remove,
+        arg0: rem,
+        arg1: uid,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "end");
+    a.label("forget");
+    a.op(Opcode::Null { dst: rem });
+    a.op(Opcode::SetGlobal {
+        global: g.removed,
+        src: rem,
+    });
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(
+        code,
+        vec![p.game_t, p.str_t],
+        p.void_t,
+        r.0,
+        a.finish(),
+        p.dbg_file,
+    )
+}
+
+fn add_mark(
+    code: &mut Bytecode,
+    p: &Plan,
+    g: &Globals,
+    fix: RefFun,
+    removed: RefFun,
+) -> Result<RefFun> {
     let mut r = Regs(vec![p.game_t, p.nc_t]);
     let c = Reg(1);
     let cls_t = code.globals[p.cwt_cls.0];
@@ -1110,6 +1232,13 @@ fn add_mark(code: &mut Bytecode, p: &Plan, g: &Globals, fix: RefFun) -> Result<R
     });
     a.op(Opcode::Ret { ret: b });
     a.label("push");
+    // Before the vanilla count reads playersRemoved.
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: removed,
+        arg0: Reg(0),
+        arg1: uid,
+    });
     a.op(Opcode::Call2 {
         dst: n,
         fun: p.push,
@@ -1157,6 +1286,7 @@ fn add_tick(
     handler: RefFun,
     fix: RefFun,
     waiting: RefFun,
+    removed: RefFun,
 ) -> Result<RefFun> {
     let i0 = int_const(code, 0);
     let log = str_global(code, p.str_t, LOG_FORCED);
@@ -1296,6 +1426,14 @@ fn add_tick(
     a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
     fld(&mut a, b, game, p.game_reloading);
     a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
+    // 00. Absent players carry over a host reload.
+    a.op(Opcode::Null { dst: uid });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: removed,
+        arg0: game,
+        arg1: uid,
+    });
     fld(&mut a, host, game, p.game_host.0);
     a.jmp(
         Opcode::JNull {
@@ -1585,14 +1723,16 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
         synced: global(p.arr_t),
         forced: global(p.bool_t),
         held: global(p.nc_t),
+        removed: global(p.arr_t),
     };
     let handler = code.functions[p.join_fi].findex;
     // Appended in this order (the tests' `k` indices).
     let fix = add_fix(code, &p, &g)?;
     let reset = add_reset(code, &p, &g)?;
-    let mark = add_mark(code, &p, &g, fix)?;
+    let removed = add_removed(code, &p, &g)?;
+    let mark = add_mark(code, &p, &g, fix, removed)?;
     let waiting = add_waiting(code, &p, &g)?;
-    let tick = add_tick(code, &p, &g, handler, fix, waiting)?;
+    let tick = add_tick(code, &p, &g, handler, fix, waiting, removed)?;
     let hold = add_hold(code, &p, &g, waiting)?;
     let joined = add_joined(code, &p, &g)?;
     let send_to = add_send_to(code, &p, &g)?;
@@ -1719,9 +1859,9 @@ mod tests {
     /// The new functions, in the order `apply` appends them.
     mod k {
         pub(super) const RESET: usize = 1;
-        pub(super) const TICK: usize = 4;
-        pub(super) const JOINED: usize = 6;
-        pub(super) const COUNT: usize = 8;
+        pub(super) const TICK: usize = 5;
+        pub(super) const JOINED: usize = 7;
+        pub(super) const COUNT: usize = 9;
     }
 
     /// Patches a copy of the installed game (skipped when absent): only
@@ -2411,6 +2551,95 @@ mod tests {
         assert_eq!(s.ready_count(), V::I(1));
         s.ready(a);
         assert_eq!(s.events, [Ev::Start, Ev::Send(a)]);
+    }
+
+    /// A host reload (in-game load, battle restart) rebuilds options.multi
+    /// without playersRemoved, so vanilla waits for the absent players of the
+    /// save forever; the lobby's list is given back and A alone starts it.
+    #[test]
+    fn reload_keeps_absent_players() {
+        let Some((orig, code)) = images() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(
+            &code,
+            &p,
+            &["host", "a", "r1", "r2"],
+            Some(orig.functions.len()),
+        );
+        let r = s.removed;
+        s.list(r).push(V::S("r1".into()));
+        s.list(r).push(V::S("r2".into()));
+        s.frame();
+        // The reload: new options.multi {hostID, isServer, serverID}, startServer.
+        let opt = match s.get(s.game, p.game_options.0) {
+            V::R(o) => o,
+            v => panic!("options {v:?}"),
+        };
+        let multi = s.obj();
+        s.set(opt, p.opt_multi.0, V::R(multi));
+        s.set(s.game, p.game_ready, V::I(0));
+        s.call(s.fun(k::RESET), vec![]);
+        s.set(s.game, p.game_ready, V::I(1));
+        // No frame between the reload and A's ReadyToStart.
+        let a = s.connect("a");
+        s.ready(a);
+        assert_eq!(s.get(multi, p.multi_removed.0), V::R(r));
+        assert_eq!(s.events, [Ev::Start, Ev::Send(a)]);
+    }
+
+    /// An absent player who came back (drop-in) before the reload is in the
+    /// remembered list; its ReadyToStart takes it off and it is counted.
+    #[test]
+    fn reload_counts_a_returned_absent_player() {
+        let Some((orig, code)) = images() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(
+            &code,
+            &p,
+            &["host", "a", "r1", "r2"],
+            Some(orig.functions.len()),
+        );
+        let r = s.removed;
+        s.list(r).push(V::S("r1".into()));
+        s.list(r).push(V::S("r2".into()));
+        s.frame();
+        let opt = match s.get(s.game, p.game_options.0) {
+            V::R(o) => o,
+            v => panic!("options {v:?}"),
+        };
+        let multi = s.obj();
+        s.set(opt, p.opt_multi.0, V::R(multi));
+        s.set(s.game, p.game_ready, V::I(0));
+        s.call(s.fun(k::RESET), vec![]);
+        s.set(s.game, p.game_ready, V::I(1));
+        let a = s.connect("a");
+        let c1 = s.connect("r1");
+        s.ready(c1);
+        assert_eq!(s.list(r).clone(), [V::S("r2".into())]);
+        assert!(s.events.is_empty(), "started without A: {:?}", s.events);
+        s.ready(a);
+        assert_eq!(s.events, [Ev::Start, Ev::Send(a), Ev::Send(c1)]);
+    }
+
+    /// A solo game (no options.multi) forgets the remembered list.
+    #[test]
+    fn solo_forgets_absent_players() {
+        let Some((orig, code)) = images() else { return };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, &["host", "a", "r1"], Some(orig.functions.len()));
+        let r = s.removed;
+        s.list(r).push(V::S("r1".into()));
+        s.frame();
+        let opt = match s.get(s.game, p.game_options.0) {
+            V::R(o) => o,
+            v => panic!("options {v:?}"),
+        };
+        s.set(opt, p.opt_multi.0, V::Null);
+        s.frame();
+        let multi = s.obj();
+        s.set(opt, p.opt_multi.0, V::R(multi));
+        s.frame();
+        assert_eq!(s.get(multi, p.multi_removed.0), V::Null);
     }
 
     /// Host + A + B known, J1 + J2 still joining (connected, Join not handled:
