@@ -141,10 +141,154 @@ pub(crate) fn patch_loot_level(code: &mut Bytecode) {
     }
 }
 
+// Champions and bosses can drop their worn gear too.
+//
+// genLoot skips the whole worn-gear roll for a class with the NoEquipDrop flag
+// (Debrief.hx:518):
+//
+//   Int a = 1; Int b = 4; Shl a = a << b; And x = x & a; Int a = 0; JNotEq x != a -> skip
+//
+// cdb unitClass flags: IsChampion bit 3, NoEquipDrop bit 4, ArenaChampion
+// bit 19. The NoEquipDrop classes are the named champions and bosses
+// (humanoids with legendary gear), the arena champions, and creatures:
+// ghosts, The Beast, sea snake, rats / molerats / rat nests and Remastered's
+// workmen. The roll now runs for a NoEquipDrop class that is a champion but
+// not an arena champion. With x = flags & (bit3 | bit4 | bit19) the possible
+// values (every ArenaChampion class is also IsChampion + NoEquipDrop, vanilla
+// and Remastered cdb) map through `x ^ 8` as:
+//
+//   0 (plain) -> 8, 8 (champion) -> 0, 24 (boss) -> 16: roll;
+//   16 (creature) -> 24, arena champion -> 16 + bit19:     skip.
+//
+// So the same six ops become
+//
+//   Int a = MASK; And x = x & a; Int a = 8; Xor x = x ^ a; Int a = 16; JSGt x > a -> skip
+//
+// Arena champions keep the flag: vanilla arena masters give their gear as
+// rewards (A1Arena, E1Arena, IR1Arena prefab dialog gains), so dropping it
+// would duplicate a reward. The IsChampion creatures (H2TheBeast, Ecila,
+// Erymanthe, CrawlerChampion) have no class equipment and roll for nothing,
+// as ordinary animals already do. A boss's unique items are kept out by the
+// item data the candidate closure reads (`disableLoot`). ForceDropWeapon, the
+// drop chance and the pity counter stay vanilla: a boss that already dropped
+// its weapon has used the battle's guaranteed drop, so its worn gear rolls
+// the normal chance.
+
+const CHAMPION_MASK: i32 = (1 << 3) | (1 << 4) | (1 << 19);
+
+/// Function index and index of the `Int a = 1` that starts the NoEquipDrop test in genLoot.
+fn champion_site(code: &Bytecode) -> Result<(usize, usize)> {
+    let gen = method(code, obj_type(code, "battle.Debrief")?, "genLoot")?;
+    let fi = fun_index(code, gen.findex)?;
+    let int = |o: &Opcode| match o {
+        Opcode::Int { dst, ptr } => Some((*dst, code.ints[ptr.0])),
+        _ => None,
+    };
+    let ops = &gen.ops;
+    let mut found = Vec::new();
+    for k in 0..ops.len().saturating_sub(5) {
+        let (Some((a, 1)), Some((b, 4))) = (int(&ops[k]), int(&ops[k + 1])) else {
+            continue;
+        };
+        let Opcode::Shl { dst, a: sa, b: sb } = ops[k + 2] else { continue };
+        let Opcode::And { dst: x, a: xa, b: xb } = ops[k + 3] else { continue };
+        if (dst, sa, sb) != (a, a, b) || xa != x || xb != a {
+            continue;
+        }
+        if int(&ops[k + 4]) == Some((a, 0))
+            && matches!(ops[k + 5], Opcode::JNotEq { a: ja, b: jb, .. } if ja == x && jb == a)
+        {
+            found.push(k);
+        }
+    }
+    match found[..] {
+        [k] => Ok((fi, k)),
+        [] if ops.iter().any(|o| int(o).is_some_and(|(_, v)| v == CHAMPION_MASK)) => {
+            bail!("already applied")
+        }
+        _ => bail!("genLoot: expected one NoEquipDrop test, found {}", found.len()),
+    }
+}
+
+/// Lets champions / bosses (not arena champions) drop worn gear, or leaves `code` untouched and logs why.
+pub(crate) fn patch_champion_gear(code: &mut Bytecode) {
+    let (fi, k) = match champion_site(code) {
+        Ok(s) => s,
+        Err(e) => return crate::skipped(format!("champion gear skipped: {e:#}")),
+    };
+    let mask = int_const(code, CHAMPION_MASK);
+    let eight = int_const(code, 8);
+    let sixteen = int_const(code, 16);
+    let f = &mut code.functions[fi];
+    let Opcode::Int { dst: a, .. } = f.ops[k] else { unreachable!() };
+    let Opcode::And { dst: x, .. } = f.ops[k + 3] else { unreachable!() };
+    let Opcode::JNotEq { offset, .. } = f.ops[k + 5] else { unreachable!() };
+    f.ops.splice(k..k + 6, [
+        Opcode::Int { dst: a, ptr: mask },
+        Opcode::And { dst: x, a: x, b: a },
+        Opcode::Int { dst: a, ptr: eight },
+        Opcode::Xor { dst: x, a: x, b: a },
+        Opcode::Int { dst: a, ptr: sixteen },
+        Opcode::JSGt { a: x, b: a, offset },
+    ]);
+    eprintln!(
+        "patched champion gear fn@{}: champions and bosses can drop worn gear",
+        f.findex.0
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::asm::testutil::{game, read};
+
+    #[test]
+    fn champion_gear_installed_game() {
+        let Some(image) = game() else { return };
+        let orig = read(&image);
+        let (fi, k) = champion_site(&orig).expect("site");
+        let mut code = read(&image);
+        patch_champion_gear(&mut code);
+        let mut patched = Vec::new();
+        code.serialize(&mut patched).expect("write");
+        let back = read(&patched);
+
+        assert_eq!(back.types, orig.types);
+        for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
+            let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
+            assert_eq!(same, i != fi, "function #{i} (fn@{})", a.findex.0);
+        }
+        let (a, b) = (&orig.functions[fi], &back.functions[fi]);
+        assert_eq!(a.ops.len(), b.ops.len());
+        assert_eq!(a.regs, b.regs);
+        for (i, (x, y)) in a.ops.iter().zip(&b.ops).enumerate() {
+            let changed = format!("{x:?}") != format!("{y:?}");
+            assert_eq!(changed, (k..k + 6).contains(&i), "op {i}");
+        }
+        let v = |o: &Opcode| match o {
+            Opcode::Int { ptr, .. } => back.ints[ptr.0],
+            _ => panic!("not Int: {o:?}"),
+        };
+        assert_eq!((v(&b.ops[k]), v(&b.ops[k + 2]), v(&b.ops[k + 4])), (CHAMPION_MASK, 8, 16));
+        let (Opcode::JNotEq { offset: o1, .. }, Opcode::JSGt { offset: o2, .. }) =
+            (&a.ops[k + 5], &b.ops[k + 5])
+        else {
+            panic!("skip jump");
+        };
+        assert_eq!(o1, o2);
+        // The skip decision for every flag combination the cdb has.
+        let skip = |flags: i32| ((flags & CHAMPION_MASK) ^ 8) > 16;
+        let (champ, ned, arena) = (1 << 3, 1 << 4, 1 << 19);
+        assert!(!skip(0) && !skip(champ) && !skip(champ | ned) && !skip(1 << 7));
+        assert!(skip(ned) && skip(ned | champ | arena) && skip(ned | 1 << 13));
+
+        let mut again = read(&patched);
+        assert!(champion_site(&again).is_err());
+        patch_champion_gear(&mut again);
+        let mut twice = Vec::new();
+        again.serialize(&mut twice).expect("write");
+        assert!(twice == patched);
+    }
 
     #[test]
     fn patches_installed_game() {

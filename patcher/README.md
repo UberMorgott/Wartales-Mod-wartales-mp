@@ -154,6 +154,15 @@ checks kept, level dropped). Same op count; drop chance, pity counter,
 NoEquipDrop, ForceDropWeapon, quality and repair stay vanilla. Loot is
 generated on the host.
 
+**Champion gear** (same file, `patch_champion_gear`): genLoot skipped the
+worn-gear roll for every NoEquipDrop class. With `x = flags & (IsChampion |
+NoEquipDrop | ArenaChampion)`, the six-op test becomes `x ^ 8 > 16 -> skip`:
+the roll runs for a NoEquipDrop champion that is not an arena champion
+(named bosses), and creatures (ghosts, rats, The Beast, sea snake, workmen)
+and arena champions keep the flag (vanilla arena masters give that gear as
+dialog rewards). Items with `disableLoot` stay out through the candidate
+closure; ForceDropWeapon, chance and pity counter unchanged.
+
 **Skill sync** (`src/skill_sync.rs`, issue #2): a round reset
 (`battle.Unit.resetTurn`) reaches a client through hxbit `networkSync`, whose
 setters never mark the battle UI dirty (`set_skillPersistValues` does, but not
