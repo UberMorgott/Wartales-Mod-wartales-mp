@@ -219,7 +219,11 @@ fn plan_new_arr(code: &Bytecode, arr_t: RefType) -> Result<NewArr> {
 
 /// The host's message handler: the `(Game, NetworkClient, NetworkMessage) -> Void`
 /// closure that Game.startServer binds as `host.onMessage`.
-fn plan_handler(code: &Bytecode, game_t: RefType, nc_t: RefType) -> Result<(usize, RefType)> {
+pub(crate) fn plan_handler(
+    code: &Bytecode,
+    game_t: RefType,
+    nc_t: RefType,
+) -> Result<(usize, RefType)> {
     let start = method(code, game_t, "startServer")?;
     let mut hits = vec![];
     for op in &start.ops {
