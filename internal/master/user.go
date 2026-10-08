@@ -103,7 +103,7 @@ func (s *Server) userSession(args json.RawMessage, p Peer) (any, error) {
 }
 
 // instanceGet answers SERVER-CONTRACT §2: the serverID decides the transport.
-// "R<host>:<port>" makes the game's host speak RelayP2P and its guests
+// "R<host>:<port>:<pass>" makes the game's host speak RelayP2P and its guests
 // WServer, both against our relay.
 func (s *Server) instanceGet(args json.RawMessage, p Peer) (any, error) {
 	if p.Remote() {
@@ -124,9 +124,15 @@ func (s *Server) instanceGet(args json.RawMessage, p Peer) (any, error) {
 	return s.instanceAnswer(net.JoinHostPort("127.0.0.1", strconv.Itoa(s.opt.RelayPort))), nil
 }
 
+// instanceAnswer: the serverID must carry a password field. The client's
+// RelayP2P parser (UserID.hx:79-87) splits on ':' and pops the password, then
+// the port, unconditionally; "R<host>:<port>" therefore parsed as port <host>
+// and host null, and the host's relay connect failed with "Unresolved host
+// null". The client rebuilds both ids with the serverStartAnswer passwords
+// (@26421), so the field's value here is only a placeholder; hostpw is used.
 func (s *Server) instanceAnswer(addr string) map[string]any {
 	return map[string]any{
-		"serverID": "R" + addr,
+		"serverID": "R" + addr + ":" + s.opt.HostPW,
 		"serverStartAnswer": map[string]any{
 			"hostpw":  s.opt.HostPW,
 			"slavepw": s.opt.SlavePW,

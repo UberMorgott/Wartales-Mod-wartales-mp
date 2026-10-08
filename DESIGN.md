@@ -17,7 +17,7 @@
 3. Транспорт выбирает НЕ игра, а мастер: `Lobby.setupPlatform@24597` → `ServerQuery.query@26420`
    шлёт `instance/get`, читает из ответа `serverID` и `serverStartAnswer.hostpw/.slavepw`.
    Первый символ `serverID` задаёт платформу (`UserID.getPlatform@25195`):
-   `R<host>:<port>[S]` → хост становится RelayP2P(11), клиент — WServer(9).
+   `R<host>:<port>[S]:<pass>` → хост становится RelayP2P(11), клиент — WServer(9).
    Любой другой префикс на этом пути → «Invalid platform».
 4. Relay-протокол: тот же WebSocket, бинарные фреймы, заголовок 3 байта `[type:u8][cid:u16]`,
    `1`=connect, `2`=disconnect, `3`=data; хост входит с ident, начинающимся на `@:`, паролем `hostpw`,
@@ -53,7 +53,7 @@
 
 1. Игра логинится в наш локальный мастер, создаёт лобби — состояние лобби хранится у хоста,
    он авторитетный источник.
-2. `instance/get` → отвечаем `serverID = "R127.0.0.1:<relayPort>"` (без `S`, TLS на relay не нужен)
+2. `instance/get` → отвечаем `serverID = "R127.0.0.1:<relayPort>:<hostpw>"` (без `S`, TLS на relay не нужен; поле пароля обязательно: парсер RelayP2P всегда снимает его последним)
    плюс сгенерированные `hostpw`/`slavepw`. Игра хоста подключается к нашему relay как хост.
 3. `lobby/makeShortCode` → узнаём внешний адрес (UPnP `AddPortMapping` + `GetExternalIPAddress`,
    при неудаче — STUN `stun.l.google.com:19302`), кодируем `ip:port` в короткий код и отдаём игре.

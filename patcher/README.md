@@ -449,6 +449,14 @@ constructor leave the first (`mpLobby = null`) before the first's
 when its lobby was left; the newer lobby's own callback drives the UI.
 Skipped (logged) on mismatch.
 
+**logError cast** (`src/log_error_cast.rs`): `mpman.Api.logError` is the
+game's `String` logger behind a `Dynamic` field; its wrapper closure's
+`SafeCast dyn -> String` threw "Can't cast SysError to String" when mpman
+logged a raw socket error (`RelayHost.connect`'s handler), so `onConnect(null)`
+never ran and a host whose relay connect failed loaded forever. The cast is now
+`Std.string(e)` (same op count): the error text is logged and the failure path
+runs. Skipped (logged) on mismatch.
+
 **Style guard** (`src/style_guard.rs`): domkit's `Properties.applyStyle` saves
 the static `APPLY_LOOPS`, counts style passes in it and restores it at the end;
 `checkLoop` (run on every node creation, class change and hover) throws

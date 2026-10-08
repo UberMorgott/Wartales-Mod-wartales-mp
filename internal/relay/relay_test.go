@@ -2,7 +2,7 @@ package relay
 
 import (
 	"bufio"
-	"crypto/md5" //nolint:gosec // the game's X-Pass is an md5
+	"crypto/sha1" //nolint:gosec // the game's X-Pass is a sha1
 	"encoding/base64"
 	"encoding/hex"
 	"io"
@@ -24,7 +24,7 @@ func handshake(t *testing.T, s *Server, ident, pass string) (c net.Conn, br *buf
 	go func() { defer close(done); s.Serve(srv, nil) }()
 	key := []byte("0123456789abcdef")
 	hash := base64.StdEncoding.EncodeToString(key)
-	sum := md5.Sum([]byte(hex.EncodeToString(key) + pass)) //nolint:gosec // wire protocol
+	sum := sha1.Sum([]byte(hex.EncodeToString(key) + pass)) //nolint:gosec // wire protocol
 	req := "GET / HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + hash +
 		"\r\nX-Ident: " + ident + "\r\nX-Pass: " + hex.EncodeToString(sum[:]) + "\r\n\r\n"
 	if _, err := io.WriteString(cli, req); err != nil {

@@ -46,6 +46,7 @@ mod jit_names;
 mod job_confirm;
 mod job_xp;
 mod loading_draw;
+mod log_error_cast;
 mod loot_level;
 mod loot_all;
 mod marker_names;
@@ -193,6 +194,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     debrief_enable::patch_debrief_enable(&mut code);
     window_close::patch_window_close(&mut code);
     stale_lobby::patch_stale_lobby(&mut code);
+    log_error_cast::patch_log_error_cast(&mut code);
     window_drag::patch_window_drag(&mut code);
     take_all::patch_take_all(&mut code);
     tavern_resume::patch_tavern_resume(&mut code);

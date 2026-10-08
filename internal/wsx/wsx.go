@@ -9,8 +9,7 @@ package wsx
 
 import (
 	"bufio"
-	"crypto/md5"  //nolint:gosec // RFC6455/hixie handshake: X-Pass is an md5, changing it breaks the wire protocol
-	"crypto/sha1" //nolint:gosec // RFC6455 requires sha1 for Sec-WebSocket-Accept
+	"crypto/sha1" //nolint:gosec // RFC6455 Sec-WebSocket-Accept and the game's X-Pass are sha1
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -120,11 +119,9 @@ func Accept(c net.Conn, br *bufio.Reader, auth AuthFunc) (*Conn, error) {
 }
 
 // checkPass reproduces WSConnection.handleRequest: the client sends
-// X-Pass = Md5(hex(base64decode(hash)) + password).
-//
-// The bytecode calls encode@18770 with a single String argument, i.e.
-// haxe.crypto.Md5.encode -> lowercase hex. decomp/mpman/NOTES.txt describes it
-// as base64(Md5(...)) instead, so both spellings are accepted.
+// X-Pass = Sha1.encode(hex(base64decode(hash)) + password), lowercase hex.
+// encode@18770 is haxe.crypto.Sha1.encode (Sha1.hx:27-29: digest + toHex);
+// an md5 here refused every host login with "bad password".
 func checkPass(hash, pass, got string) bool {
 	if got == "" {
 		return false
@@ -133,11 +130,9 @@ func checkPass(hash, pass, got string) bool {
 	if err != nil {
 		return false
 	}
-	//nolint:gosec // md5 is what the game's WSConnection computes for X-Pass
-	sum := md5.Sum([]byte(hex.EncodeToString(key) + pass))
-	return got == hex.EncodeToString(sum[:]) ||
-		got == base64.StdEncoding.EncodeToString(sum[:]) ||
-		got == base64.RawStdEncoding.EncodeToString(sum[:])
+	//nolint:gosec // sha1 is what the game's WSConnection computes for X-Pass
+	sum := sha1.Sum([]byte(hex.EncodeToString(key) + pass))
+	return got == hex.EncodeToString(sum[:])
 }
 
 func readRequest(br *bufio.Reader) (map[string]string, error) {

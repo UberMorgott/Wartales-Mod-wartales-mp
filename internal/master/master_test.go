@@ -1060,7 +1060,8 @@ func TestLoginAndInstanceGet(t *testing.T) {
 	if err := json.Unmarshal(raw, &inst); err != nil {
 		t.Fatal(err)
 	}
-	if inst.ServerID != "R127.0.0.1:14250" {
+	// host:port:pass - the client's RelayP2P parser pops the pass unconditionally.
+	if inst.ServerID != "R127.0.0.1:14250:hpw" {
 		t.Fatalf("serverID = %q", inst.ServerID)
 	}
 	if inst.Answer.HostPW != "hpw" || inst.Answer.SlavePW != "spw" {
