@@ -18,6 +18,7 @@ mod battle_camera;
 mod battle_rejoin;
 mod battle_takeover;
 mod camp_any_unit;
+mod camp_chest;
 mod camp_choice;
 mod camp_talk;
 mod career_plan;
@@ -184,6 +185,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     skill_sync::patch_skill_sync(&mut code);
     skill_vars::patch_skill_vars(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
+    camp_chest::patch_camp_chest(&mut code);
     party_inventory::patch_party_inventory(&mut code);
     party_inventory::patch_party_counts(&mut code);
     party_inventory::patch_party_lists(&mut code);
