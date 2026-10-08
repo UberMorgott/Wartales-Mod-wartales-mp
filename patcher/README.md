@@ -361,6 +361,15 @@ opens for itself). The client's call now gets `if (__host == null) close()` in
 front, as Escape already does (Game.hx:1725-1727); shared windows keep the RPC.
 Skipped (logged) on mismatch.
 
+**Stale lobby** (`src/stale_lobby.rs`): two lobby creations answered in one
+tick (StartChoice's start button has no repeat guard) made the second `Lobby`
+constructor leave the first (`mpLobby = null`) before the first's
+`host.connect` callback ran (Lobby.hx:759-770, one tick later); its
+`onConnected` then crashed the host with Null access `.isLoad`
+(`LobbyState.initAssignments`). The callback now returns right after its trace
+when its lobby was left; the newer lobby's own callback drives the UI.
+Skipped (logged) on mismatch.
+
 **Style guard** (`src/style_guard.rs`): domkit's `Properties.applyStyle` saves
 the static `APPLY_LOOPS`, counts style passes in it and restores it at the end;
 `checkLoop` (run on every node creation, class change and hover) throws

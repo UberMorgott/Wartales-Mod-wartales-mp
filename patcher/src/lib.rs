@@ -53,6 +53,7 @@ mod ping_cell;
 mod ready_start;
 mod returning_units;
 mod skill_cost;
+mod stale_lobby;
 mod style_guard;
 mod take_all;
 mod tavern_resume;
@@ -131,6 +132,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     debrief_diag::patch(&mut code);
     debrief_enable::patch_debrief_enable(&mut code);
     window_close::patch_window_close(&mut code);
+    stale_lobby::patch_stale_lobby(&mut code);
     window_drag::patch_window_drag(&mut code);
     take_all::patch_take_all(&mut code);
     tavern_resume::patch_tavern_resume(&mut code);
