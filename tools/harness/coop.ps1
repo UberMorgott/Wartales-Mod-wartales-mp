@@ -6,11 +6,18 @@
 # so shim.log, wartales-mp.log, the helper exe and the command channel are
 # per instance and land in the run folder by themselves.
 #
-#   coop.ps1 start   [-Inst A,B]          new run folder, launch, wait for windows
+#   coop.ps1 start   [-Inst A,B] [-Keep]  new run folder (-Keep: the current one,
+#                                          e.g. relaunch B), launch, wait for windows;
+#                                          game stdout -> <run>\<i>\console.log
 #   coop.ps1 cmd     -Inst A -Line 'dump' send a harness command, wait for its ack
-#                                          ('console <line>' runs a debug console command)
+#                                          (verbs: docs/coop-harness-plan.md section 8;
+#                                          'join auto' = join with A's lobby code)
+#   coop.ps1 wait    -Inst A -Until '$s.game -and $s.hasGameplayStarted'
+#                                          dump every 2 s until the expression on the
+#                                          dump ($s) is true (-TimeoutSec)
+#   coop.ps1 key     -Inst A -Key Escape  WM_KEYDOWN/UP to the window (Escape, Enter, I, ...)
 #   coop.ps1 shot    [-Inst A,B] [-Tag x] PrintWindow screenshot per window
-#   coop.ps1 place   [-Inst A,B]          windows side by side (1280x720 each)
+#   coop.ps1 place   [-Inst A,B] [-W 852 -H 480]  windows side by side
 #   coop.ps1 close   -Inst B              WM_CLOSE (Alt+F4, soft)
 #   coop.ps1 kill    -Inst B              TerminateProcess (crash)
 #   coop.ps1 stop                          close all harness games (kill after 20 s)
@@ -22,13 +29,18 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory)]
-    [ValidateSet('start', 'cmd', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
+    [ValidateSet('start', 'cmd', 'wait', 'key', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
     [string]$Action,
     [string[]]$Inst = @('A', 'B'),
     [string]$Line = 'dump',
+    [string]$Until = '$true',
+    [string]$Key = 'Escape',
     [string]$Tag = '',
     [int]$Tail = 40,
     [int]$TimeoutSec = 120,
+    [int]$W = 852,
+    [int]$H = 480,
+    [switch]$Keep,
     [string]$Root = 'D:\WartalesTest'
 )
 
@@ -73,27 +85,54 @@ function Game-Proc([string]$run, [string]$i) {
 
 function Mod-Dir([string]$run, [string]$i) { return Join-Path $run "$i\wartales-mp" }
 
+# Sends one harness command line to instance $i, waits for its ack; returns the
+# result word, or the dump JSON (saved as <run>\<i>-dump-<seq>.json) for 'dump'.
+function Send-Cmd([string]$run, [string]$i, [string]$line) {
+    if (-not (Game-Proc $run $i)) { throw "$i is not running" }
+    $h = Join-Path (Mod-Dir $run $i) 'harness'
+    $seq = [string][DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+    $tmp = Join-Path $h 'cmd.tmp'
+    [IO.File]::WriteAllText($tmp, "$seq $line")
+    Move-Item -LiteralPath $tmp -Destination (Join-Path $h 'cmd.txt') -Force
+    $ack = Join-Path $h 'ack.txt'
+    $deadline = (Get-Date).AddSeconds([Math]::Min($TimeoutSec, 30))
+    while ($true) {
+        if (Test-Path -LiteralPath $ack) {
+            $a = (Get-Content -LiteralPath $ack -Raw -ErrorAction SilentlyContinue)
+            if ($a -and $a.StartsWith("$seq ")) { break }
+        }
+        if ((Get-Date) -gt $deadline) { throw "${i}: no ack for '$line' (seq $seq)" }
+        Start-Sleep -Milliseconds 100
+    }
+    $result = $a.Substring($seq.Length + 1).Trim()
+    if ($result -notin 'ok', 'dispatched') { throw "${i}: '$line' failed: $result (see shim.log)" }
+    if ($line -ne 'dump') { return $result }
+    $out = Join-Path $run ("{0}-dump-{1}.json" -f $i, $seq)
+    Copy-Item -LiteralPath (Join-Path $h 'state.json') -Destination $out
+    return (Get-Content -LiteralPath $out -Raw)
+}
+
 switch ($Action) {
     'start' {
-        New-Item -ItemType Directory -Force $runs | Out-Null
-        $run = Join-Path $runs (Get-Date -Format 'yyyyMMdd-HHmmss')
-        New-Item -ItemType Directory -Force $run | Out-Null
-        Set-Content -LiteralPath $current -Value $run -Encoding ascii
-        $st = @{}
+        if ($Keep) { $run = Run-Dir } else {
+            New-Item -ItemType Directory -Force $runs | Out-Null
+            $run = Join-Path $runs (Get-Date -Format 'yyyyMMdd-HHmmss')
+            New-Item -ItemType Directory -Force $run | Out-Null
+            Set-Content -LiteralPath $current -Value $run -Encoding ascii
+        }
+        $st = Run-State $run
         foreach ($i in $Inst) {
+            if (Game-Proc $run $i) { throw "$i is already running" }
             $dir = Join-Path $Root $i
             if (-not (Test-Path -LiteralPath (Join-Path $dir '.wartales-harness'))) { throw "$dir is not a harness copy (run setup.ps1)" }
             $la = Join-Path $run $i
             New-Item -ItemType Directory -Force (Join-Path $la 'wartales-mp\harness') | Out-Null
-            $psi = [Diagnostics.ProcessStartInfo]::new((Join-Path $dir 'Wartales.exe'))
-            $psi.WorkingDirectory = $dir
-            $psi.UseShellExecute = $false
-            $psi.Environment['SteamAppId'] = $AppId
-            $psi.Environment['SteamGameId'] = $AppId
-            $psi.Environment['WARTALES_MP_TEST_INSTANCE'] = [string](Instance-No $i)
-            $psi.Environment['LOCALAPPDATA'] = $la
-            $p = [Diagnostics.Process]::Start($psi)
-            $st[$i] = @{ pid = $p.Id; path = $psi.FileName; start = $p.StartTime.ToUniversalTime().Ticks }
+            # The game's stdout/stderr go to a per-instance file, not this console.
+            $exe = Join-Path $dir 'Wartales.exe'
+            $envs = @{ SteamAppId = $AppId; SteamGameId = $AppId; WARTALES_MP_TEST_INSTANCE = [string](Instance-No $i); LOCALAPPDATA = $la }
+            $p = Start-Process -FilePath $exe -WorkingDirectory $dir -Environment $envs -PassThru -NoNewWindow `
+                -RedirectStandardOutput (Join-Path $la 'console.log') -RedirectStandardError (Join-Path $la 'console.err.log')
+            $st[$i] = @{ pid = $p.Id; path = $exe; start = $p.StartTime.ToUniversalTime().Ticks }
             Write-Host "$i started: pid $($p.Id), instance $(Instance-No $i), LOCALAPPDATA $la"
             $st | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $run 'run.json')
             Start-Sleep -Seconds 5 # let A take its helper ports before B starts
@@ -108,9 +147,11 @@ switch ($Action) {
                 if ((Get-Date) -gt $deadline) { throw "$i has no window after $TimeoutSec s" }
                 Start-Sleep -Milliseconds 500
             }
-            # The harness channel is up once the first frame ran harnessTick.
+            # The harness channel is up once this process's first frame ran
+            # harnessTick (shim.log lines carry the pid; -Keep reuses the log).
             $log = Join-Path (Mod-Dir $run $i) 'shim.log'
-            while (-not ((Test-Path -LiteralPath $log) -and (Select-String -LiteralPath $log -Pattern 'harness: WMP_TEST_SEAM instance' -Quiet))) {
+            $seam = '^\[{0} .*harness: WMP_TEST_SEAM instance' -f $st[$i].pid
+            while (-not ((Test-Path -LiteralPath $log) -and (Select-String -LiteralPath $log -Pattern $seam -Quiet))) {
                 if (-not (Game-Proc $run $i)) { throw "$i exited before its first frame" }
                 if ((Get-Date) -gt $deadline) { throw "${i}: no harness line in $log after $TimeoutSec s" }
                 Start-Sleep -Seconds 1
@@ -122,31 +163,40 @@ switch ($Action) {
     'cmd' {
         $run = Run-Dir
         foreach ($i in $Inst) {
-            if (-not (Game-Proc $run $i)) { throw "$i is not running" }
-            $h = Join-Path (Mod-Dir $run $i) 'harness'
-            $seq = [string][DateTimeOffset]::Now.ToUnixTimeMilliseconds()
-            $tmp = Join-Path $h 'cmd.tmp'
-            [IO.File]::WriteAllText($tmp, "$seq $Line")
-            Move-Item -LiteralPath $tmp -Destination (Join-Path $h 'cmd.txt') -Force
-            $ack = Join-Path $h 'ack.txt'
-            $deadline = (Get-Date).AddSeconds([Math]::Min($TimeoutSec, 30))
+            $l = $Line
+            if ($l -eq 'join auto') {
+                $code = (Send-Cmd $run 'A' 'dump' | ConvertFrom-Json).lobby.code
+                if (-not $code) { throw 'A has no lobby code (host first)' }
+                $l = "join $code"
+            }
+            $r = Send-Cmd $run $i $l
+            if ($l -eq 'dump') { $r } else { Write-Host "${i}: '$l' -> $r" }
+        }
+    }
+    'wait' {
+        $run = Run-Dir
+        $cond = [scriptblock]::Create($Until)
+        $deadline = (Get-Date).AddSeconds($TimeoutSec)
+        foreach ($i in $Inst) {
             while ($true) {
-                if (Test-Path -LiteralPath $ack) {
-                    $a = (Get-Content -LiteralPath $ack -Raw -ErrorAction SilentlyContinue)
-                    if ($a -and $a.StartsWith("$seq ")) { break }
-                }
-                if ((Get-Date) -gt $deadline) { throw "${i}: no ack for '$Line' (seq $seq)" }
-                Start-Sleep -Milliseconds 100
+                $s = Send-Cmd $run $i 'dump' | ConvertFrom-Json
+                if (& $cond) { Write-Host "${i}: $Until"; break }
+                if ((Get-Date) -gt $deadline) { throw "${i}: not '$Until' after $TimeoutSec s" }
+                Start-Sleep -Seconds 2
             }
-            Write-Host "$i ack: $a"
-            $result = $a.Substring($seq.Length + 1).Trim()
-            if ($result -notin 'ok', 'dispatched') { throw "${i}: '$Line' failed: $result (see shim.log)" }
-            if ($Line -like 'dump*') {
-                $state = Join-Path $h 'state.json'
-                $out = Join-Path $run ("{0}-dump-{1}.json" -f $i, $seq)
-                Copy-Item -LiteralPath $state -Destination $out
-                Get-Content -LiteralPath $out -Raw
-            }
+        }
+    }
+    'key' {
+        $run = Run-Dir
+        $vk = switch ($Key) { 'Escape' { 0x1B } 'Enter' { 0x0D } 'Space' { 0x20 } 'Tab' { 0x09 } default { [int][char]$Key.ToUpper() } }
+        foreach ($i in $Inst) {
+            $p = Game-Proc $run $i
+            if (-not $p) { Write-Host "$i not running"; continue }
+            $p.Refresh()
+            [void][Harness.Win]::PostMessageW($p.MainWindowHandle, 0x0100, [IntPtr]$vk, [IntPtr]1) # WM_KEYDOWN
+            Start-Sleep -Milliseconds 80
+            [void][Harness.Win]::PostMessageW($p.MainWindowHandle, 0x0101, [IntPtr]$vk, [IntPtr]0xC0000001L) # WM_KEYUP
+            Write-Host "${i}: key $Key"
         }
     }
     'shot' {
@@ -177,8 +227,8 @@ switch ($Action) {
             $p = Game-Proc $run $i
             if (-not $p) { continue }
             $p.Refresh()
-            [void][Harness.Win]::SetWindowPos($p.MainWindowHandle, [IntPtr]::Zero, $x, 40, 1280, 720, 0x0004) # SWP_NOZORDER
-            $x += 1280
+            [void][Harness.Win]::SetWindowPos($p.MainWindowHandle, [IntPtr]::Zero, $x, 40, $W, $H, 0x0004) # SWP_NOZORDER
+            $x += $W
         }
     }
     'close' {
@@ -224,8 +274,8 @@ switch ($Action) {
     'logs' {
         $run = Run-Dir
         foreach ($i in $Inst) {
-            foreach ($f in 'shim.log', 'wartales-mp.log') {
-                $p = Join-Path (Mod-Dir $run $i) $f
+            foreach ($f in 'wartales-mp\shim.log', 'wartales-mp\wartales-mp.log', 'console.log') {
+                $p = Join-Path (Join-Path $run $i) $f
                 if (Test-Path -LiteralPath $p) { Write-Host "==== $i $f"; Get-Content -LiteralPath $p -Tail $Tail }
             }
         }
