@@ -17,7 +17,7 @@
 #                                          dump ($s) is true (-TimeoutSec)
 #   coop.ps1 key     -Inst A -Key Escape  WM_KEYDOWN/UP to the window (Escape, Enter, I, ...)
 #   coop.ps1 click   -Inst A -X 1199 -Y 902  left click at a pixel of the 'shot' image
-#                    [-Right] [-Hold 300]    (camp talk is a right click; shorter holds
+#                    [-Right] [-Hold 300] [-Double]  (camp talk is a right click; shorter holds
 #                                          are often missed); the window is raised and
 #                                          focused first, else nothing is clicked.
 #                                          After 'place' the game keeps its launch-size
@@ -52,6 +52,7 @@ param(
     [int]$Y = 0,
     [int]$Hold = 300,
     [switch]$Right,
+    [switch]$Double,
     [int]$X2 = 0,
     [int]$Y2 = 0,
     [int]$Steps = 8,
@@ -277,6 +278,13 @@ switch ($Action) {
             [Harness.Win]::mouse_event($(if ($Right) { 0x0008 } else { 0x0002 }), 0, 0, 0, [IntPtr]::Zero) # RIGHT/LEFTDOWN
             Start-Sleep -Milliseconds $Hold
             [Harness.Win]::mouse_event($(if ($Right) { 0x0010 } else { 0x0004 }), 0, 0, 0, [IntPtr]::Zero) # RIGHT/LEFTUP
+            if ($Double) {
+                # second press within the game's double-push window (panel reset: 0.35 s)
+                Start-Sleep -Milliseconds 100
+                [Harness.Win]::mouse_event($(if ($Right) { 0x0008 } else { 0x0002 }), 0, 0, 0, [IntPtr]::Zero)
+                Start-Sleep -Milliseconds 100
+                [Harness.Win]::mouse_event($(if ($Right) { 0x0010 } else { 0x0004 }), 0, 0, 0, [IntPtr]::Zero)
+            }
             Lower-Window $hw
             Write-Host "${i}: click at client $cx,$cy"
         }

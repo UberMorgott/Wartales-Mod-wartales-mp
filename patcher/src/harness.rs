@@ -248,6 +248,8 @@ struct Ctx {
     /// GameInventory.inventoryContent; Flow scrollPosY / contentHeight /
     /// minHeight / verticalAlign; Object.y / children; h2d.Object type.
     inv_content: (RefField, RefType),
+    /// GameInventory.chestContent (same type as inventoryContent).
+    chest_content: RefField,
     flow_scroll: RefField,
     flow_content_h: RefField,
     flow_va: (RefField, RefType),
@@ -669,6 +671,13 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
                 bail!("GameInventory.inventoryContent is not an h2d.Flow");
             }
             ic
+        },
+        chest_content: {
+            let cc = field(code, game_inv.1, "chestContent")?;
+            if cc.1 != field(code, game_inv.1, "inventoryContent")?.1 {
+                bail!("GameInventory.chestContent is not an InventoryContent");
+            }
+            cc.0
         },
         flow_scroll: f(flow_t, "scrollPosY")?,
         flow_content_h: f(flow_t, "contentHeight")?,
@@ -1749,73 +1758,87 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.label("no_chest");
     w.lit(code, "null");
     w.a.label("chest_end");
-    // the own inventory panel's scroll area: scroll, content / viewport
-    // height, alignment, its children's y (scrollbar / grid)
-    w.lit(code, ",\"invc\":");
-    w.a.fld(gui, g, c.game_ui.0);
-    w.a.if_null(gui, "no_invc");
-    w.a.fld(ginv, gui, c.game_inv.0);
-    w.a.if_null(ginv, "no_invc");
-    w.a.fld(icr, ginv, c.inv_content.0);
-    w.a.if_null(icr, "no_invc");
-    w.lit(code, "{\"scroll\":");
-    w.a.fld(fl, icr, c.flow_scroll);
-    w.val(fl);
-    w.kv(code, "ch", icr, c.flow_content_h, fl);
-    w.kv(code, "h", icr, c.flow_size.1, fl);
-    w.lit(code, ",\"va\":");
-    w.a.fld(va, icr, c.flow_va.0);
-    w.a.if_null(va, "va_null");
-    w.a.op(Opcode::EnumIndex { dst: i, value: va });
-    w.val(i);
-    w.a.go("va_end");
-    w.a.label("va_null");
-    w.lit(code, "null");
-    w.a.label("va_end");
-    w.a.op(Opcode::Label);
-    w.lit(code, ",\"ys\":[");
-    w.a.fld(list, icr, c.obj_children);
-    w.a.if_null(list, "ys_end");
-    w.a.fld(n, list, c.arr_len);
-    w.a.fld(arr, list, c.arr_arr.0);
-    w.a.int(ix, k0);
-    w.a.loop_head("ys_loop");
-    w.a.jmp(
-        Opcode::JSGte {
-            a: ix,
-            b: n,
-            offset: 0,
-        },
-        "ys_end",
-    );
-    w.a.int(kk, k0);
-    w.a.jmp(
-        Opcode::JEq {
-            a: ix,
-            b: kk,
-            offset: 0,
-        },
-        "ys_first",
-    );
-    w.lit(code, ",");
-    w.a.label("ys_first");
-    w.a.op(Opcode::GetArray {
-        dst: d,
-        array: arr,
-        index: ix,
-    });
-    w.a.op(Opcode::SafeCast { dst: ob, src: d });
-    w.a.fld(fl, ob, c.obj_y);
-    w.val(fl);
-    w.a.op(Opcode::Incr { dst: ix });
-    w.a.go("ys_loop");
-    w.a.label("ys_end");
-    w.lit(code, "]}");
-    w.a.go("invc_end");
-    w.a.label("no_invc");
-    w.lit(code, "null");
-    w.a.label("invc_end");
-    w.a.op(Opcode::Label);
+    // the own inventory's and the chest's scroll areas: scroll, content /
+    // viewport height, alignment, their children's y (scrollbar / grid)
+    for (key, field) in [
+        (",\"invc\":", c.inv_content.0),
+        (",\"chestc\":", c.chest_content),
+    ] {
+        let (none, vnull, vend, lp, lend, first, end) = (
+            lbl("sa_none", &mut w.n),
+            lbl("sa_vnull", &mut w.n),
+            lbl("sa_vend", &mut w.n),
+            lbl("sa_loop", &mut w.n),
+            lbl("sa_lend", &mut w.n),
+            lbl("sa_first", &mut w.n),
+            lbl("sa_end", &mut w.n),
+        );
+        w.lit(code, key);
+        w.a.fld(gui, g, c.game_ui.0);
+        w.a.if_null(gui, none);
+        w.a.fld(ginv, gui, c.game_inv.0);
+        w.a.if_null(ginv, none);
+        w.a.fld(icr, ginv, field);
+        w.a.if_null(icr, none);
+        w.lit(code, "{\"scroll\":");
+        w.a.fld(fl, icr, c.flow_scroll);
+        w.val(fl);
+        w.kv(code, "ch", icr, c.flow_content_h, fl);
+        w.kv(code, "h", icr, c.flow_size.1, fl);
+        w.lit(code, ",\"va\":");
+        w.a.fld(va, icr, c.flow_va.0);
+        w.a.if_null(va, vnull);
+        w.a.op(Opcode::EnumIndex { dst: i, value: va });
+        w.val(i);
+        w.a.go(vend);
+        w.a.label(vnull);
+        w.lit(code, "null");
+        w.a.label(vend);
+        w.a.op(Opcode::Label);
+        w.lit(code, ",\"ys\":[");
+        w.a.fld(list, icr, c.obj_children);
+        w.a.if_null(list, lend);
+        w.a.fld(n, list, c.arr_len);
+        w.a.fld(arr, list, c.arr_arr.0);
+        w.a.int(ix, k0);
+        w.a.loop_head(lp);
+        w.a.jmp(
+            Opcode::JSGte {
+                a: ix,
+                b: n,
+                offset: 0,
+            },
+            lend,
+        );
+        w.a.int(kk, k0);
+        w.a.jmp(
+            Opcode::JEq {
+                a: ix,
+                b: kk,
+                offset: 0,
+            },
+            first,
+        );
+        w.lit(code, ",");
+        w.a.label(first);
+        w.a.op(Opcode::GetArray {
+            dst: d,
+            array: arr,
+            index: ix,
+        });
+        w.a.op(Opcode::SafeCast { dst: ob, src: d });
+        w.a.fld(fl, ob, c.obj_y);
+        w.val(fl);
+        w.a.op(Opcode::Incr { dst: ix });
+        w.a.go(lp);
+        w.a.label(lend);
+        w.lit(code, "]}");
+        w.a.go(end);
+        w.a.label(none);
+        w.lit(code, "null");
+        w.a.label(end);
+        w.a.op(Opcode::Label);
+    }
     // the post-battle loot pool (open Debrief window): Std.string of the stacks
     w.lit(code, ",\"loot\":");
     w.a.op(Opcode::Type {
