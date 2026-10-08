@@ -117,6 +117,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     hold_speed::patch_hold_speed(&mut code);
     loot_level::patch_loot_level(&mut code);
     loot_level::patch_champion_gear(&mut code);
+    loot_level::patch_loot_order(&mut code);
     job_xp::patch_job_xp(&mut code);
     job_confirm::patch_job_confirm(&mut code);
     barrier::patch_barrier(&mut code);

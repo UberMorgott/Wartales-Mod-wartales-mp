@@ -163,6 +163,20 @@ and arena champions keep the flag (vanilla arena masters give that gear as
 dialog rewards). Items with `disableLoot` stay out through the candidate
 closure; ForceDropWeapon, chance and pity counter unchanged.
 
+**Loot order** (same file, `patch_loot_order`): genLoot's worn-gear loop
+(Debrief.hx:500-544) walked `state.allUnits.array` in array order, so the
+first dead enemy with an eligible item took the guaranteed drop. Three ops
+after the loop's array cast make it walk a sorted copy: `units =
+units.copy(); units.sort(lootCmp)`, with two appended functions, `lootCmp(a,
+b) = lootKey(b) - lootKey(a)` (typed as ArrayObj.sort's comparator) and
+`lootKey(u) = level * 2 + (class IsChampion | IsBoss ? 1 : 0)` (-1 without
+data). haxe.ds.ArraySort is stable, so ties keep array order. The boss now
+nearly always comes first, and vanilla's `firstEquip = false` after a
+ForceDropWeapon drop would then eat the guarantee, so that Mov becomes a Nop:
+the forced weapon no longer counts as the guaranteed worn-gear drop. The
+per-enemy loot-table rolls run in the new order (independent odds);
+state.allUnits is untouched.
+
 **Skill sync** (`src/skill_sync.rs`, issue #2): a round reset
 (`battle.Unit.resetTurn`) reaches a client through hxbit `networkSync`, whose
 setters never mark the battle UI dirty (`set_skillPersistValues` does, but not
