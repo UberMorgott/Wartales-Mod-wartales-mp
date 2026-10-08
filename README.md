@@ -29,6 +29,8 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - A co-op load no longer waits forever for a player who disconnected before they were ready to start, and a reconnecting player is no longer counted twice. *(Vanilla bug.)*
 - Loading a save, restarting a battle or reloading from the pause menu in a co-op game no longer hangs on the loading screen when some players of the save are not in the session: the host keeps the lobby's list of absent players across the reload. *(Vanilla bug.)*
 - A player who reconnects during a battle no longer stays on the loading screen forever: the host replays the battle's start to that player. *(Vanilla bug.)*
+- A player who leaves during a battle no longer blocks it: the host can play that player's units (also a turn they had already begun) until they come back; the units stay theirs and they take them over again when they rejoin. *(Vanilla bug.)*
+- The host no longer crashes when two lobby creations finish at the same moment (a left lobby's late connect result is ignored).
 - Clients no longer freeze when an enemy summons units and hits them in the same moment (for example the Rat Matriarch's howl spawning rats): the client makes the new units alive before it runs the host's battle messages. *(Vanilla bug.)*
 - The join gate no longer deadlocks when a save is loaded while a player is joining.
 - The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.
@@ -38,6 +40,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 ### Co-op play
 
+- Drop-in: a new player can join a running co-op game by code or Steam invite while the party has fewer than 4 players. A newcomer owns no units until someone gives them some (camp, unit sheet, Stats tab, **Transfer**). A player who was absent when the save was loaded gets their own units back when they join (units already given away, dismissed or dead stay as they are; after a host restart use **Transfer**).
 - No more "waiting for the other players" after the world is loaded: the first player's click decides, as holding the button used to. A burst of clicks runs the action once.
 - Leaving a town, the tavern, a place or the owned tavern is never blocked by another player's business: windows and confirms tied to that place are closed, and the shared dialog is ended once no choice is being resolved. Personal windows (unit sheet, inventory) stay open and do not block. Only a running mini-game still holds the leave.
 - Leaving the camp for the world map is no longer silently refused while another player is busy (strategy table, camp chest, banner editor, an unstarted craft): the request stays pending, their camp window is closed the way its X / Escape does (a strategy choice already made stays, nothing half-applied), and everyone switches to the world map together. Started crafts and a modal window open on the host are waited for; a rest still refuses the leave.
@@ -107,6 +110,7 @@ To update, close the game and replace **winmm.dll** with the new version. To uni
 
 ## Known issues
 
+- Joining **by code** needs the host's port to be reachable from the internet (an open / forwarded port or UPnP on the host's router). Joining through a Steam invite or the friends list is not affected.
 - Not yet confirmed in a live co-op session: the guest's exit when the host vanished, any unit in the camp, the other players' inventories, and watching forging, work and mini-games. If one of them misbehaves, send **shim.log** from every player.
 - The post-battle loot fix (dead loot items / **Take all** with a damaged squad) is defensive: it removes the rebuild cause found in the game code but has not yet been confirmed in a live co-op session. If loot still does not react, send **shim.log** from every player (the loot-window diagnostics above are included).
 
