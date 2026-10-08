@@ -12,6 +12,13 @@
 //    the edge-scroll part is skipped when `dragMode == Rotate`
 //    (`Int t = 1; JEq variant, t -> skip`): the mouse reaches the screen edge
 //    while dragging to rotate, which must not pan.
+//    After the switch, `if (... && (isNaN(targetX) || hasDragged))` re-clamps
+//    the target and stores `targetFollowSpeed = CameraSpeedInstant` (meant for
+//    the left-button drag pan). A rotation sets `hasDragged`, so that store
+//    replaced the pan's CameraSpeedSlide every frame and the keyboard pan sped
+//    up as soon as the right button moved. The store is now skipped while
+//    `dragMode == Rotate` (`Int t = 1; JEq variant, t -> past it`); rotating
+//    never moves the target, so the follow speed is the pan's own.
 // 2. `onOverlayEvent` wheel zoom: `targetDistance *= delta > 0 ? 1.25 : 0.8`
 //    becomes 1.15 / 0.87 (finer steps for the wider Remastered zoom range).
 // 3. `initUI` opens the battle at `distance = targetDistance = CameraMaxDistance`.
@@ -38,6 +45,10 @@ struct Pan {
     edge: usize,
     /// Where the edge-scroll part ends (target of the `JFalse` in front of it).
     skip: usize,
+    /// First op of `state.camera.targetFollowSpeed = CameraSpeedInstant` after the switch.
+    fast: usize,
+    /// The op after that store (the `hasDragged` setCameraBounds test).
+    after: usize,
 }
 
 fn drag_switch(code: &Bytecode) -> Result<Pan> {
@@ -120,12 +131,35 @@ fn drag_switch(code: &Bytecode) -> Result<Pan> {
     if !(e < skip && skip < exit) {
         bail!("updateCamera: edge-scroll skip target out of the pan block");
     }
+    // `JTrue PREFS.noHuds -> after` opens the drag clamp block at the switch end;
+    // it closes with `GetGlobal CameraSpeedInstant; Call1 getConst; NullCheck;
+    // Field value; <state.camera> x4; SafeCast; SetField targetFollowSpeed`.
+    let after = match (end..end + 6).find(|&i| matches!(o[i], Opcode::JTrue { .. })) {
+        Some(j) => jump_targets(f, j)[0],
+        None => bail!("updateCamera: no noHuds test at the switch end"),
+    };
+    let fast = after.wrapping_sub(10);
+    let speed_store = after > end + 10
+        && matches!(o[fast], Opcode::GetGlobal { global, .. }
+            if crate::job_xp::const_str(code, global) == Some("CameraSpeedInstant"))
+        && matches!(o[after - 1], Opcode::SetField { obj, field, .. }
+            if field_name(code, f.regs[obj.0 as usize], field) == Some("targetFollowSpeed"))
+        && matches!(o[after], Opcode::GetThis { field, .. }
+            if field_name(code, battle_t, field) == Some("hasDragged"));
+    if !speed_store {
+        bail!("updateCamera: drag block does not end with targetFollowSpeed = CameraSpeedInstant");
+    }
+    if (0..o.len()).any(|i| jump_targets(f, i).contains(&fast)) {
+        bail!("updateCamera: a jump lands on the CameraSpeedInstant store");
+    }
     Ok(Pan {
         fi,
         pan,
         rot_end,
         edge: e + 3,
         skip,
+        fast,
+        after,
     })
 }
 
@@ -137,7 +171,17 @@ fn apply_pan(code: &mut Bytecode, p: &Pan) {
     else {
         unreachable!()
     };
-    // Guard first (it sits after the pan start), then the Label at the pan start.
+    // Highest index first: `if (dragMode == Rotate) skip the CameraSpeedInstant
+    // store` (the dragMode read is the edge test's own three ops).
+    let mut guard: Vec<Opcode> = f.ops[p.edge - 3..p.edge].to_vec();
+    guard.push(Opcode::Int { dst: t, ptr: one });
+    guard.push(Opcode::JEq {
+        a: v,
+        b: t,
+        offset: (p.after - p.fast) as i32,
+    });
+    insert_ops(f, p.fast, guard);
+    // Edge guard (it sits after the pan start), then the Label at the pan start.
     // The JEq lands at edge + 1 and jumps to the shifted skip (skip + 2).
     insert_ops(
         f,
@@ -152,14 +196,14 @@ fn apply_pan(code: &mut Bytecode, p: &Pan) {
         ],
     );
     insert_ops(f, p.pan, vec![Opcode::Label]);
-    let rot_end = p.rot_end + 3;
+    let rot_end = p.rot_end + 3; // the inserts above it: Label + edge guard
     let Opcode::JAlways { offset } = &mut f.ops[rot_end] else {
         unreachable!()
     };
     *offset = p.pan as i32 - rot_end as i32 - 1;
     eprintln!(
-        "patched battle camera fn@{}: keyboard pan while rotating (op {} -> {}), no edge scroll during rotate",
-        f.findex.0, p.rot_end, p.pan
+        "patched battle camera fn@{}: keyboard pan while rotating (op {} -> {}), no edge scroll during rotate, no CameraSpeedInstant during rotate (op {})",
+        f.findex.0, p.rot_end, p.pan, p.fast
     );
 }
 
@@ -519,7 +563,7 @@ mod tests {
         let back = read(&patched);
 
         assert_eq!(back.types, orig.types);
-        let changed = [(p.fi, 3, 0), (wp.0, 0, 0), (op.0, 3, 1)];
+        let changed = [(p.fi, 8, 0), (wp.0, 0, 0), (op.0, 3, 1)];
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             match changed.iter().find(|c| c.0 == i) {
                 Some(&(_, ops, regs)) => {
@@ -544,6 +588,9 @@ mod tests {
         // After the Label (+1): Int at edge + 1, JEq at edge + 2 -> skip (+3).
         assert_eq!(jump_targets(b, p.edge + 2), [p.skip + 3]);
         check_types(&back, b, p.edge + 1..p.edge + 3);
+        // After Label + edge guard (+3): 5 guard ops at fast + 3, JEq -> after (+8).
+        assert_eq!(jump_targets(b, p.fast + 7), [p.after + 8]);
+        check_types(&back, b, p.fast + 3..p.fast + 8);
         let (fi, w) = wp;
         let fl = |i: usize| match back.functions[fi].ops[i] {
             Opcode::Float { ptr, .. } => back.floats[ptr.0],
@@ -592,6 +639,53 @@ mod tests {
             pan_run(&code, &p, none, &[1], 960.0, 540.0),
             Some((1.0, 0.0))
         );
+    }
+
+    /// Runs the patched CameraSpeedInstant store after the switch (from its
+    /// guard) with `dragMode` = `mode` and targetFollowSpeed = 7 (the pan's
+    /// CameraSpeedSlide): returns the targetFollowSpeed left for the follow step.
+    fn follow_speed_run(orig: &Bytecode, code: &Bytecode, p: &Pan, mode: i32) -> f64 {
+        let o = &orig.functions[p.fi].ops;
+        let Opcode::Field { field: value_f, .. } = o[p.fast + 3] else {
+            panic!("const value")
+        };
+        let Opcode::SetField { field: tfs_f, .. } = o[p.after - 1] else {
+            panic!("targetFollowSpeed")
+        };
+        let b = &code.functions[p.fi];
+        let battle_t = obj_type(code, "battle.Battle").unwrap();
+        let (state_f, state_t) = field(code, battle_t, "state").unwrap();
+        let mut s = sim(code);
+        let konst = s.c.obj(&[(value_f, V::F(40.0))]);
+        s.c.put("in", "const", konst);
+        let cam = s.c.obj(&[(tfs_f, V::F(7.0))]);
+        let state = s.c.obj(&[(field(code, state_t, "camera").unwrap().0, cam.clone())]);
+        let drag = s.c.enm(mode, vec![]);
+        let this = s.c.obj(&[
+            (state_f, state),
+            (field(code, battle_t, "dragMode").unwrap().0, drag),
+        ]);
+        let mut r = vec![V::Null; b.regs.len()];
+        r[0] = this;
+        let (start, stop) = (p.fast + 3, p.after + 8);
+        assert_eq!(s.span(b.findex, &mut r, start, &[stop]), stop);
+        f(&s.c.get(&cam, tfs_f))
+    }
+
+    /// Rotating keeps the pan's follow speed; the left-button drag pan and the
+    /// other modes still get CameraSpeedInstant.
+    #[test]
+    fn rotate_keeps_pan_follow_speed() {
+        let Some(image) = game() else { return };
+        let orig = read(&image);
+        let p = drag_switch(&orig).expect("plan");
+        let mut code = read(&image);
+        patch_battle_camera(&mut code);
+        let (none, rotate, pan, drag_unit) = (0, 1, 2, 3);
+        assert_eq!(follow_speed_run(&orig, &code, &p, rotate), 7.0);
+        for mode in [none, pan, drag_unit] {
+            assert_eq!(follow_speed_run(&orig, &code, &p, mode), 40.0, "mode {mode}");
+        }
     }
 
     /// One notch scales the zoom by 1.15 / 0.87, clamped to [min, max].
