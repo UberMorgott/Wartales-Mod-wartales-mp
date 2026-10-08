@@ -1,6 +1,6 @@
 # Local co-op test harness — feasibility, design, estimate
 
-Status: slice 1 implemented (2026-10-08, see section 8). Plan Codex reviewed (agrees, with changes folded in below).
+Status: slices 1 and 2 implemented (2026-10-08, see section 8). Plan Codex reviewed (agrees, with changes folded in below).
 
 ## 1. Feasibility verdicts (with evidence)
 
@@ -82,7 +82,7 @@ Cheaper first slice (~0.5 k lines, 1 day): shim+helper seam + driver + `console`
 Test seam, compiled only by `shim\build.ps1 -Test` (output `dist-test\`, `dist\` stays shippable); all of it carries `WMP_TEST_SEAM` and/or reads `WARTALES_MP_TEST_INSTANCE`:
 
 - shim `proxy.c` (`#ifdef WMP_TEST`): mutex `Local\wartales-mp-running-N`, master hosts resolve to `127.0.0.N`, helper started as `run -master 127.0.0.N:60442 -port 1425N -transport direct`.
-- helper (Go tag `harness`): `cmd/wartales-mp/testseam_harness.go` (join codes advertise `127.0.0.1:1425N`, verified, no UPnP/STUN; relay listens on loopback only), `internal/master/uidsalt_harness.go` (`uid.Mint` input salted `#tN`).
+- helper (Go tag `harness`): `cmd/wartales-mp/testseam_harness.go` (join codes advertise `127.0.0.1:1425N`, verified, no UPnP/STUN; relay listens on loopback only), `internal/master/memberid_harness.go` (with the env set, a direct lobby renders each member by its game's own id, see slice 2).
 - patcher (cargo feature `harness`): `patcher/src/harness.rs`, see below.
 - `shim\seamcheck.ps1` (run by `build.ps1` and `check.ps1`): markers absent from the release `winmm.dll`, from the helper embedded in it (cut out, UPX-unpacked) and from `wartales-mp.exe`; `-Test` requires them.
 
@@ -92,8 +92,8 @@ Verified: saves and `prefs.sav` are game-folder relative (each copy writes its o
 
 `harnessTick()` at op 0 of `hxd.App.mainLoop`; off unless `WARTALES_MP_TEST_INSTANCE` is set. Every 6th frame it reads `%LOCALAPPDATA%\wartales-mp\harness\cmd.txt` (`<seq> <verb> [arg]`, written as `cmd.tmp` + rename), deletes it, answers `ack.txt` = `<seq> <result>` and a `harness: ack` line in `shim.log`.
 
-- `console <line>`: `Game.inst.console` with `PREFS.admin` forced true around `resetCommands` + `runCommand` (Battle/Cheats modes need `get_isAdmin() && canCheat()`), restored and the command set rebuilt after, also when the command throws. Result `dispatched` (the console shows errors on its own screen), `nogame` before a game is loaded (the title screen has its own console; not wired).
-- `dump`: `state.json`: game set, mode (`Std.string`), isAuth / isMulti / isCoopGame / connectedToHost / isLoading / hasGameplayStarted / fading, playersReady, host, me, battle current unit (name, owner), army (name, owner, aptitudePoints). Strings go through the game's own `haxe.format.JsonPrinter.print`.
+- `console <line>`: `Game.inst.console` (else `TitleScreen.inst.console`, both `AppBase.console`) with `PREFS.admin` forced true around `resetCommands` + `runCommand` (Battle/Cheats modes need `get_isAdmin() && canCheat()`), restored and the command set rebuilt after, also when the command throws. Result `dispatched` (the console shows errors on its own screen), `nogame` when neither exists.
+- `dump`: `state.json`: lobby (join `code`, `players`), game set, mode (`Std.string`), isAuth / isMulti / isCoopGame / connectedToHost / isLoading / hasGameplayStarted / fading, playersReady, host, me, battle (isPlayerTurn; current unit name, owner, connected, apSkillPlayed, skills `{id, ok = canUseSkill}`), army (name, owner, connected, aptitudePoints), chest panel (`GameInventory.chestInventory`: visible, absX/Y, calculatedWidth/Height), loot (open `ui.win.Debrief`: `Std.string(debrief.loot.getAllItems())`). Strings go through the game's own `haxe.format.JsonPrinter.print`.
 
 Debug console commands (from the mode constructors; `cargo test --release --features harness --target-dir target-test list_console_commands -- --ignored --nocapture`):
 
@@ -115,4 +115,21 @@ Debug console commands (from the mode constructors; `cargo test --release --feat
 .\tools\harness\coop.ps1 stop; .\tools\harness\coop.ps1 logs -Inst A,B
 ```
 
-Open for slice 2: host / join-by-code verbs (menu navigation is still manual; the slice 1 smoke run stopped at the title screen of both instances), title-screen console, chest panel rect in `dump`, windowed-mode prefs per copy (`prefs.sav` carries a salted hash, not edited), game stdout goes to the driver's console.
+### Slice 2
+
+Verbs (all `harness.rs`, ack `ok` / `nosave` / `nowindow` / `unknown`):
+
+- `host`: newest save via `LoadGame.loadGames` in Pause.doLoad's solo mode (title) or co-op mode (in game), a real `LoadGame` window, save `playerId` stamped with the local player id, then `convertGame()` (solo save) or `loadGame()`: co-op lobby + `LoadMultiGame` on the title screen, the vanilla in-game reload in game.
+- `slot`: `LobbyState.addSlot()` (the lobby's "+"; a loaded save admits a new player only into an opened slot).
+- `join <code>` (driver: `join auto` = A's `lobby.code`): the title screen's join-by-code submit closure (only caller of `Lobby.joinCode`).
+- `start`: `LoadMultiGame.startGame()`; `backup <n>`: `onClick` of the open pause menu's backup button n.
+- Windows are found by runtime type in `TitleScreen.inst.ui`, `Game.globalUI`, `Game.mode` (`harnessFind`).
+- First frame: `Game.PREFS.displayMode = 0` + `GraphicsControl.applyDisplayMode()` (windowed, in memory; no game command-line flag exists, `getSysArg` has no caller).
+- Player ids: both copies share one Steam account, so `harnessUid` (after `makeSteamUser` in `mpman.Api.getUser`) makes instance N play as `User.make("X" + N + id.substr(1))`; the helper renders it as the member id (`memberid_harness.go`).
+
+Driver (`coop.ps1`): `start -Keep` (relaunch into the current run), game stdout/stderr to `<run>\<i>\console.log` (stays empty: the game's prints go through the shim's `hl_sys_print` hook into `shim.log`), `wait -Until '<expr on $s>'` (dump poll, timeout), `key -Key Escape|Enter|I` (WM_KEYDOWN/UP), `place -W -H` (default 852x480). Every wait has a timeout.
+
+Findings (2026-10-08, not fixed here):
+
+1. Direct lobby + loaded co-op save (shipped helper): members are minted Session ids (`X…`), the games compare them with their own `getUser().id` (`S…`): the host denies `Join` (`userCanJoin`: no player with that id, the opened slot already taken by `onJoin`) -> guest `JoinDenied(LobbyFull)`; with a spare slot the guest's `LobbyState.update` throws `Null access .dlcs` and `LoadMultiGame.isHostIn` (a member id == save `playerId`) is false, so the guest leaves ("disconnected"). SDR lobbies (Steam ids) are not affected. The harness seam renders game ids to get past it.
+2. Host start over the direct relay (harness, loaded save, 2 players): `Game.startServer` -> `RelayP2PService.connectTo` -> `Connection.connect` -> `initConnect` throws a `SysError`; nothing reaches the relay (`127.0.0.1:1425N` listening); the error handler (`#55438`, `Api.logError`) throws `Can't cast SysError to String`, so the host sits on the loading screen forever and the guest returns to the title screen. Blocks every in-game scenario on one PC. Next: log the serverID / SysError text (`Connection.LOG`, `networkLog` did not set it).
