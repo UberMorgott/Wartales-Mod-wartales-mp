@@ -15,6 +15,14 @@
 // calls it where its multi branch has the camp (before `getTool("Chest")`).
 // addTool replicates the tool to the clients; once it exists, hasTool returns.
 //
+// A chest tool that appears after the inventory panel was built (added here
+// on the host, or replicated to a client after the load) never got its grid:
+// update only rebuilds a grid showing another inventory, and the chest grid
+// is made only by tryInitChestInventory (showInventory, toggleChestInventory),
+// so the restored-open chest panel showed as an empty 71x57 title box until
+// toggled twice. update's `chestTool != null` branch now starts with
+// `tryInitChestInventory()` (vanilla; a no-op once the grid exists).
+//
 // Validated before editing; a mismatch skips the pass (logged).
 
 use super::*;
@@ -29,6 +37,9 @@ struct Plan {
     /// update's op index and camp register for the call.
     at: usize,
     camp: Reg,
+    /// update's first op of the `chestTool != null` branch, tryInitChestInventory.
+    init_at: usize,
+    try_init: RefFun,
 }
 
 fn plan(code: &Bytecode) -> Result<Plan> {
@@ -85,11 +96,35 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     if (0..upd.ops.len()).any(|i| jump_targets(upd, i).contains(&at)) {
         bail!("GameInventory.update: a jump targets op {at}");
     }
+    // getTool -> tool; `if (tool != null)` (JNull) -> its body.
+    let g = at - 1
+        + upd.ops[at - 1..]
+            .iter()
+            .position(
+                |op| matches!(op, Opcode::Call3 { fun, .. } if fname(code, *fun) == "getTool"),
+            )
+            .context("GameInventory.update: no getTool")?;
+    let Some(Opcode::Call3 { dst: tool, .. }) = upd.ops.get(g) else {
+        unreachable!()
+    };
+    if !matches!(upd.ops.get(g + 1), Some(Opcode::JNull { reg, .. }) if reg == tool) {
+        bail!("GameInventory.update: no chestTool null test after getTool");
+    }
+    let init_at = g + 2;
+    let try_init = method(code, gi_t, "tryInitChestInventory")?.findex;
+    if upd.regs[0] != gi_t {
+        bail!("GameInventory.update: reg0 is not this");
+    }
+    if (0..upd.ops.len()).any(|i| jump_targets(upd, i).contains(&init_at)) {
+        bail!("GameInventory.update: a jump targets op {init_at}");
+    }
     Ok(Plan {
         enter_fi: fun_index(code, enter.findex)?,
         upd_fi: fun_index(code, upd.findex)?,
         at,
         camp: *camp,
+        init_at,
+        try_init,
     })
 }
 
@@ -127,6 +162,16 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
     });
     let upd = &mut code.functions[p.upd_fi];
     let v = new_reg(upd, void_t);
+    // The later insertion first: p.at stays valid.
+    insert_ops(
+        upd,
+        p.init_at,
+        vec![Opcode::Call1 {
+            dst: v,
+            fun: p.try_init,
+            arg0: Reg(0),
+        }],
+    );
     insert_ops(
         upd,
         p.at,
@@ -137,7 +182,7 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
         }],
     );
     eprintln!(
-        "patched camp chest fn@{}: a co-op host's camp always has the shared chest",
+        "patched camp chest fn@{}: a co-op host's camp always has the shared chest, a late chest gets its grid",
         upd.findex.0
     );
     Ok(())
@@ -171,10 +216,24 @@ mod tests {
         check_types(&back, f, 0..f.ops.len());
         check_flow(f);
         let (a, b) = (&orig.functions[fi], &back.functions[fi]);
-        assert_eq!(b.ops.len(), a.ops.len() + 1);
+        assert_eq!(b.ops.len(), a.ops.len() + 2);
         assert!(
             matches!(b.ops[at], Opcode::Call1 { fun, arg0, .. } if fun == f.findex && arg0 == p.camp)
         );
+        // tryInitChestInventory(this) first in the chestTool != null branch,
+        // which the null test still skips.
+        let ti = p.init_at + 1;
+        assert!(matches!(b.ops[ti], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == p.try_init));
+        assert!(matches!(b.ops[ti - 1], Opcode::JNull { .. }));
+        assert_eq!(
+            jump_targets(&a, p.init_at - 1),
+            jump_targets(&b, ti - 1)
+                .iter()
+                .map(|t| t - 2)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(&b.ops[ti + 1], Opcode::GetThis { .. }));
+        check_flow(b);
         let e = &orig.functions[p.enter_fi];
         assert_eq!(
             format!("{:?}", &f.ops[4..22]),
