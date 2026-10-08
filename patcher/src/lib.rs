@@ -16,6 +16,7 @@ mod asm;
 mod barrier;
 mod battle_camera;
 mod battle_rejoin;
+mod battle_takeover;
 mod camp_any_unit;
 mod camp_choice;
 mod camp_talk;
@@ -114,6 +115,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     barrier::patch_barrier(&mut code);
     ready_start::patch_ready_start(&mut code);
     battle_rejoin::patch_battle_rejoin(&mut code);
+    battle_takeover::patch_battle_takeover(&mut code);
     drop_in::patch_drop_in(&mut code);
     returning_units::patch_returning_units(&mut code);
     diag::patch_diag(&mut code);

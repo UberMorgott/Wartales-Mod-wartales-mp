@@ -422,6 +422,18 @@ game state is dropped, never used. Items stay with the host. Logs:
 <uid>: <n>`. After a host restart the map is empty; the vanilla Transfer button
 still works. Shapes are validated; a mismatch skips the pass (logged).
 
+**Battle takeover** (`src/battle_takeover.rs`): a player who left during a
+battle kept their units, and vanilla only marks them `connected = false`
+(`BasePlayer.checkConnection`); the battle gate `st.Unit.isControllable`
+(Unit.hx:2024, `isOwnedBy(game.me)`) let nobody play them, so a turn the absent
+player had begun (`battle.State.startedPlaying`) blocked the battle for good.
+On the host only (`game.isAuth`), during a battle, a unit whose owner is not
+connected is now controllable (`isControllable` op 0, like vanilla Pit's
+`coopIgnoreOwners`), and `Mount.canPlayMount` (Mount.hx:179) counts a rider of
+such a player as the host's. Ownership never changes: when the player rejoins,
+`connected` is set again and the units are theirs. No new function, no log
+line. Shapes are validated; a mismatch skips the pass (logged).
+
 **Camp: any unit** (`src/camp_any_unit.rs`): in co-op camp only a unit's
 owner could drag it, assign it to a camp tool or move it between camp and
 reserve: four client-side UI gates call `st.Unit.isControllable()`, which
