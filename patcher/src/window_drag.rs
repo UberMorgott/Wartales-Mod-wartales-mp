@@ -252,8 +252,7 @@ struct RsCtx {
     /// InventoryContent.contentChanged (needScroll class) / scrollReset.
     content_changed: RefFun,
     scroll_reset: RefFun,
-    /// Flow.set_minHeight / set_maxHeight and their Null<Int>.
-    set_min_h: RefFun,
+    /// Flow.set_maxHeight and its Null<Int>.
     set_max_h: RefFun,
     nint_t: RefType,
     calc_h: RefField,
@@ -348,14 +347,6 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
     if sa != [c.flow_t, nint_t] || !matches!(code.types[nint_t.0], Type::Null(t) if t == c.i32_t) {
         bail!("Flow.set_maxHeight: unexpected signature");
     }
-    let set_min_h = proto(code, c.flow_t, "set_minHeight")?;
-    want_sig(
-        code,
-        set_min_h,
-        "Flow.set_minHeight",
-        &[c.flow_t, nint_t],
-        nint_t,
-    )?;
     let calc_h = typed(code, c.flow_t, "calculatedHeight", c.f64_t)?;
     let inter_ctor = method(code, c.inter_t, "__constructor__")?.findex;
     let (ia, ir) = sig(code, inter_ctor)?;
@@ -376,7 +367,6 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
         force_update,
         content_changed,
         scroll_reset,
-        set_min_h,
         set_max_h,
         nint_t,
         calc_h,
@@ -1262,8 +1252,8 @@ fn add_restore(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) 
 // Its push starts the shared drag capture in resize mode (`g.rs_on`): a move
 // sets the panel's InventoryContent (the scroll area) to `rows` whole grid
 // rows, rows = start + round(mouse dy / ROW_PX), clamped to [MIN_ROWS, as
-// many as fit below the panel on screen]: min = max height = rows * ROW_PX +
-// ROW_PAD (Flow.set_minHeight / set_maxHeight; no CSS sets them on
+// many as fit below the panel on screen]: max height = rows * ROW_PX +
+// ROW_PAD (Flow.set_maxHeight only; no CSS sets it on
 // inventory-content). Width is untouched. Enough grid rows are built
 // (Inventory.visibleHeight / baseHeight >= rows, forceUpdate). The three
 // panels (chest, inventory, co-op AllInv) are all bottom-anchored (chest:
@@ -1395,14 +1385,16 @@ fn add_rs_apply(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
         b: k,
     });
     a.op(Opcode::ToDyn { dst: nb, src: px });
-    for fun in [c.rs.set_min_h, c.rs.set_max_h] {
-        a.op(Opcode::Call2 {
-            dst: nr,
-            fun,
-            arg0: ct,
-            arg1: nb,
-        });
-    }
+    // maxHeight only, as vanilla: a minHeight on this horizontal,
+    // single-line flow is its line height (Flow.hx:1344), so the line, and
+    // the content, were exactly the viewport (no scroll range) and the grid
+    // sat valign Bottom in it (rows above the header, unreachable).
+    a.op(Opcode::Call2 {
+        dst: nr,
+        fun: c.rs.set_max_h,
+        arg0: ct,
+        arg1: nb,
+    });
     a.label("grid");
     a.op(Opcode::Call1 {
         dst: inv,
@@ -4994,15 +4986,8 @@ mod tests {
                 } else if f == c.rs.scroll_reset {
                     log(k, "scrollReset");
                     Some(V::Null)
-                } else if f == c.rs.set_min_h || f == c.rs.set_max_h {
-                    log(
-                        k,
-                        if f == c.rs.set_min_h {
-                            "minHeight"
-                        } else {
-                            "maxHeight"
-                        },
-                    );
+                } else if f == c.rs.set_max_h {
+                    log(k, "maxHeight");
                     Some(a[1].clone())
                 } else if f == c.set_need_reflow {
                     log(k, "needReflow");
@@ -5726,7 +5711,7 @@ mod tests {
         assert_eq!(mh.len(), 1);
         assert_eq!(mh[0][0], cont);
         assert_eq!(mh[0][1], rs_height(8));
-        assert_eq!(s.c.take("minHeight")[0][1], rs_height(8));
+        assert!(s.c.take("minHeight").is_empty(), "no minHeight (line height)");
         assert_eq!(s.c.get(&pr, c.off_y), V::I(2 * ROW_PX));
         assert_eq!(s.c.get(&pr, c.off_x), V::I(0), "width / x unchanged");
         assert_eq!(s.c.get(&inv, c.rs.vis_h), V::I(8));
