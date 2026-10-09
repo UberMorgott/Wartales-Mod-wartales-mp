@@ -40,6 +40,12 @@
 //                       button, PlayersPanel.transfer, calls) of the last n army
 //                       units it owns (army[0] kept) to the first other player
 //                       of state.players; ack "noplayer" without one.
+//       camtrace <n>    for the next n frames (every frame, before the 6-frame
+//                       gate) `harnessCam()` prints "harness: cam <camera>
+//                       <dragMode>": Std.string of battle.state.camera (x, y,
+//                       targetX/Y, followSpeed, targetFollowSpeed, ...).
+//       ud <key>        Storage.setUserData(key, null): drops one user-data
+//                       key (a panel's saved spot or size).
 //     dir+"ack.txt" = "<seq> ok|dispatched|unknown|nogame|nosave|nowindow|noplayer", and
 //     a shim.log line.
 //   An exception: "harness: error <exc>" and ack "<seq> error".
@@ -227,6 +233,15 @@ struct Ctx {
     battle_t: RefType,
     battle_cur: RefField,
     battle_player_turn: RefField,
+    /// Battle.state (battle.State), its `camera` (anonymous: x, y, targetX,
+    /// targetY, followSpeed, targetFollowSpeed, ...), Battle.dragMode.
+    battle_state: (RefField, RefType),
+    state_camera: (RefField, RefType),
+    battle_drag: (RefField, RefType),
+    /// GameUI.worldButtonsBar: the HUD bottom bar.
+    ui_bar: (RefField, RefType),
+    /// mpman.Storage.setUserData (the `ud` verb clears one key).
+    set_ud: RefFun,
     state_t: RefType,
     army: RefField,
     /// GameState.players (hxbit proxy), Unit.swapOwner (the vanilla Transfer
@@ -647,6 +662,30 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         battle_t,
         battle_cur: typed(code, battle_t, "currentUnit", bunit_t)?,
         battle_player_turn: typed(code, battle_t, "isPlayerTurn", bool_t)?,
+        battle_state: {
+            let bs = field(code, battle_t, "state")?;
+            if s(code, obj(code, bs.1)?.name) != "battle.State" {
+                bail!("Battle.state is not a battle.State");
+            }
+            bs
+        },
+        state_camera: {
+            let bs_t = field(code, battle_t, "state")?.1;
+            let cam = field(code, bs_t, "camera")?;
+            if !matches!(code.types[cam.1 .0], Type::Virtual { .. }) {
+                bail!("battle.State.camera is not a virtual");
+            }
+            cam
+        },
+        battle_drag: {
+            let dm = field(code, battle_t, "dragMode")?;
+            if !matches!(code.types[dm.1 .0], Type::Enum { .. }) {
+                bail!("Battle.dragMode is not an enum");
+            }
+            dm
+        },
+        ui_bar: field(code, game_ui.1, "worldButtonsBar")?,
+        set_ud: sfn("mpman.$Storage", "setUserData", &[str_t, dyn_t], void_t)?,
         state_t,
         army: typed(code, state_t, "army", arr_t)?,
         state_players: typed(code, state_t, "players", proxy_t)?,
@@ -920,6 +959,58 @@ impl J<'_> {
     }
 }
 
+/// `harnessCam()`: one "harness: cam <camera> <dragMode>" line for the battle
+/// camera (Std.string of battle.state.camera: x, y, targetX/Y, followSpeed,
+/// targetFollowSpeed, ...); nothing outside a battle; never throws.
+fn build_cam(code: &mut Bytecode, c: &Ctx) -> Result<RefFun> {
+    let s_cam = str_global(code, c.str_t, "harness: cam ");
+    let s_sp = str_global(code, c.str_t, " ");
+    let mut r = Regs(vec![]);
+    let (void, exc, d, s, s2) = (
+        r.r(c.void_t),
+        r.r(c.dyn_t),
+        r.r(c.dyn_t),
+        r.r(c.str_t),
+        r.r(c.str_t),
+    );
+    let (gcls, g, battle, bst, cam, drg) = (
+        r.r(c.game_cls_t),
+        r.r(c.game_t),
+        r.r(c.battle_t),
+        r.r(c.battle_state.1),
+        r.r(c.state_camera.1),
+        r.r(c.battle_drag.1),
+    );
+    let mut a = Asm::new();
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "catch");
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "out");
+    a.fld(battle, g, c.g.battle);
+    a.if_null(battle, "out");
+    a.fld(bst, battle, c.battle_state.0);
+    a.if_null(bst, "out");
+    a.fld(cam, bst, c.state_camera.0);
+    a.gg(s, s_cam);
+    a.op(Opcode::Mov { dst: d, src: cam });
+    a.call(s2, c.std_string, &[d]);
+    a.call(s, c.add, &[s, s2]);
+    a.gg(s2, s_sp);
+    a.call(s, c.add, &[s, s2]);
+    a.fld(drg, battle, c.battle_drag.0);
+    a.op(Opcode::Mov { dst: d, src: drg });
+    a.call(s2, c.std_string, &[d]);
+    a.call(s, c.add, &[s, s2]);
+    a.op(Opcode::Mov { dst: d, src: s });
+    a.call(void, c.println, &[d]);
+    a.label("out");
+    a.op(Opcode::EndTrap { exc });
+    a.op(Opcode::Ret { ret: void });
+    a.label("catch");
+    a.op(Opcode::Ret { ret: void });
+    push_fn(code, vec![], c.void_t, r.0, a.finish(), c.dbg)
+}
+
 fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let st_g = add_global(code, c.i32_t);
     let tick_g = add_global(code, c.i32_t);
@@ -929,15 +1020,20 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let admin_g = add_global(code, c.bool_t);
     let pending_g = add_global(code, c.bool_t);
     let console_g = add_global(code, c.console.1);
+    // frames left to trace the battle camera (`camtrace <n>`)
+    let cam_g = add_global(code, c.i32_t);
+    let cam_fn = build_cam(code, c)?;
     let k = |code: &mut Bytecode, v: i32| int_const(code, v);
-    let (k0, k1, k2, k5, k6, k7, k8) = (
+    let (k0, k1, k2, k3, k5, k6, k7, k8, k9) = (
         k(code, 0),
         k(code, 1),
         k(code, 2),
+        k(code, 3),
         k(code, 5),
         k(code, 6),
         k(code, 7),
         k(code, 8),
+        k(code, 9),
     );
     let mut gs = |v: &'static str| str_global(code, c.str_t, v);
     let s_inst = gs("WARTALES_MP_TEST_INSTANCE");
@@ -957,6 +1053,8 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_backup = gs("backup ");
     let s_give = gs("give ");
     let s_noplayer = gs("noplayer");
+    let s_camtrace = gs("camtrace ");
+    let s_ud = gs("ud ");
     let s_hostlog = gs("harness: host save ");
     let s_ok = gs("ok");
     let s_dispatched = gs("dispatched");
@@ -1040,6 +1138,10 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let dwin = r.r(c.debrief_win_t);
     let dbr = r.r(c.debrief.1);
     let inv = r.r(c.loot.1);
+    let bst = r.r(c.battle_state.1);
+    let cam = r.r(c.state_camera.1);
+    let drg = r.r(c.battle_drag.1);
+    let hbar = r.r(c.ui_bar.1);
 
     let mut a = Asm::new();
     // --- state machine, outside the trap
@@ -1098,6 +1200,26 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.setf(gprefs, c.display_mode, kk);
     a.call(void, c.apply_display, &[]);
     a.label("on");
+    // `camtrace <n>`: one shim.log line per frame for n frames, the battle
+    // camera as Std.string (x, y, targetX/Y, followSpeed, targetFollowSpeed,
+    // ...) and dragMode, under its own trap.
+    a.gg(i, cam_g);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JSLte {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "cam_end",
+    );
+    a.op(Opcode::Decr { dst: i });
+    a.op(Opcode::SetGlobal {
+        global: cam_g,
+        src: i,
+    });
+    a.call(void, cam_fn, &[]);
+    a.label("cam_end");
     a.gg(i, tick_g);
     a.op(Opcode::Incr { dst: i });
     a.op(Opcode::SetGlobal {
@@ -1543,6 +1665,29 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("ack");
     a.label("not_give");
 
+    // verb: camtrace <n>  (trace the battle camera for the next n frames)
+    verb(&mut a, s_camtrace, "not_camtrace", Some(k9));
+    a.gg(res, s_unknown);
+    a.call(ni, c.parse_int, &[s]);
+    a.if_null(ni, "ack");
+    a.op(Opcode::SafeCast { dst: cnt, src: ni });
+    a.op(Opcode::Null { dst: ni });
+    a.op(Opcode::SetGlobal {
+        global: cam_g,
+        src: cnt,
+    });
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_camtrace");
+
+    // verb: ud <key>  (removes one key of the user data, e.g. a panel's saved size)
+    verb(&mut a, s_ud, "not_ud", Some(k3));
+    a.op(Opcode::Null { dst: d });
+    a.call(void, c.set_ud, &[s, d]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_ud");
+
     // verb: dump
     verb(&mut a, s_dump, "ack", None);
     a.gg(j, s_open);
@@ -1623,6 +1768,17 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.lit(code, "{\"isPlayerTurn\":");
     w.a.fld(b, battle, c.battle_player_turn);
     w.val(b);
+    // the camera (Std.string of battle.state.camera) and the mouse drag mode
+    w.lit(code, ",\"camera\":");
+    w.a.op(Opcode::Null { dst: cam });
+    w.a.fld(bst, battle, c.battle_state.0);
+    w.a.if_null(bst, "cam_q");
+    w.a.fld(cam, bst, c.state_camera.0);
+    w.a.label("cam_q");
+    w.obj_q(cam);
+    w.lit(code, ",\"dragMode\":");
+    w.a.fld(drg, battle, c.battle_drag.0);
+    w.obj_q(drg);
     w.lit(code, ",\"currentUnit\":");
     w.a.fld(bu, battle, c.battle_cur);
     w.a.if_null(bu, "no_cur");
@@ -1758,6 +1914,21 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.label("no_chest");
     w.lit(code, "null");
     w.a.label("chest_end");
+    // the HUD bottom bar (a panel resize stops above it): visible, top
+    w.lit(code, ",\"hudbar\":");
+    w.a.fld(gui, g, c.game_ui.0);
+    w.a.if_null(gui, "no_bar");
+    w.a.fld(hbar, gui, c.ui_bar.0);
+    w.a.if_null(hbar, "no_bar");
+    w.lit(code, "{\"visible\":");
+    w.a.fld(b, hbar, c.obj_visible);
+    w.val(b);
+    w.kv(code, "y", hbar, c.obj_abs.1, fl);
+    w.lit(code, "}");
+    w.a.go("bar_end");
+    w.a.label("no_bar");
+    w.lit(code, "null");
+    w.a.label("bar_end");
     // the own inventory's and the chest's scroll areas: scroll, content /
     // viewport height, alignment, their children's y (scrollbar / grid)
     for (key, field) in [
@@ -2043,12 +2214,16 @@ mod tests {
         patch_harness(&mut code);
         let back = read(&write(&code));
         let n = back.functions.len();
-        let [uid, find, tick] = [n - 3, n - 2, n - 1].map(|i| &back.functions[i]);
-        for f in [uid, find, tick] {
+        let [uid, find, cam, tick] = [n - 4, n - 3, n - 2, n - 1].map(|i| &back.functions[i]);
+        for (f, traps) in [(uid, 0), (find, 0), (cam, 1), (tick, 2)] {
             check_flow(f);
             check_types(&back, f, 0..f.ops.len());
-            assert_eq!(traps_ok(f), if f.findex == tick.findex { 2 } else { 0 });
+            assert_eq!(traps_ok(f), traps);
         }
+        assert!(tick
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::Call0 { fun, .. } if *fun == cam.findex)));
         let (a, b) = (&orig.functions[ml], &back.functions[ml]);
         assert!(matches!(b.ops[0], Opcode::Call0 { fun, .. } if fun == tick.findex));
         crate::asm::testutil::shifted(a, b, 0, 1);

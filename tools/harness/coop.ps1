@@ -16,13 +16,15 @@
 #                                          dump every 2 s until the expression on the
 #                                          dump ($s) is true (-TimeoutSec)
 #   coop.ps1 key     -Inst A -Key Escape  WM_KEYDOWN/UP to the window (Escape, Enter, I, ...)
+#                    [-Hold 700]           held that long, window focused first (camera pan)
 #   coop.ps1 click   -Inst A -X 1199 -Y 902  left click at a pixel of the 'shot' image
 #                    [-Right] [-Hold 300] [-Double]  (camp talk is a right click; shorter holds
 #                                          are often missed); the window is raised and
 #                                          focused first, else nothing is clicked.
 #                                          After 'place' the game keeps its launch-size
 #                                          input mapping: click at the launch size.
-#   coop.ps1 drag    -Inst A -X 1 -Y 2 -X2 3 -Y2 4 [-Steps 8] [-Tag t]  press, move, release (shots per step)
+#   coop.ps1 drag    -Inst A -X 1 -Y 2 -X2 3 -Y2 4 [-Steps 8] [-StepMs 300] [-Tag t]  press, move, release (shots per step)
+#                    [-Right] [-HoldKey W [-KeyAt 0] [-Lead 1000]]  right button; a key held during it
 #   coop.ps1 wheel   -Inst A -X 1 -Y 2 [-Delta -1]  mouse wheel notches at a pixel (negative = down)
 #   coop.ps1 shot    [-Inst A,B] [-Tag x] PrintWindow screenshot per window
 #   coop.ps1 place   [-Inst A,B] [-W 852 -H 480]  windows side by side
@@ -57,6 +59,10 @@ param(
     [int]$Y2 = 0,
     [int]$Steps = 8,
     [int]$Delta = -1,
+    [ValidateRange(0, 10000)][int]$StepMs = 300,
+    [string]$HoldKey = '',
+    [int]$KeyAt = 0,
+    [ValidateRange(0, 10000)][int]$Lead = 1000,
     [switch]$Keep,
     [string]$Root = 'D:\WartalesTest'
 )
@@ -248,9 +254,17 @@ switch ($Action) {
             $p = Game-Proc $run $i
             if (-not $p) { Write-Host "$i not running"; continue }
             $p.Refresh()
+            # -Hold <ms>: a held key (camera pan) needs the window focused
+            $held = $PSBoundParameters.ContainsKey('Hold')
+            if ($held) {
+                $r = New-Object Harness.Win+RECT
+                [void][Harness.Win]::GetWindowRect($p.MainWindowHandle, [ref]$r)
+                if (-not (Raise-Window $p.MainWindowHandle $r)) { Lower-Window $p.MainWindowHandle; Write-Host "${i}: window not on top, key skipped"; continue }
+            }
             [void][Harness.Win]::PostMessageW($p.MainWindowHandle, 0x0100, [IntPtr]$vk, [IntPtr]1) # WM_KEYDOWN
-            Start-Sleep -Milliseconds 80
+            Start-Sleep -Milliseconds $(if ($held) { $Hold } else { 80 })
             [void][Harness.Win]::PostMessageW($p.MainWindowHandle, 0x0101, [IntPtr]$vk, [IntPtr]0xC0000001L) # WM_KEYUP
+            if ($held) { Lower-Window $p.MainWindowHandle }
             Write-Host "${i}: key $Key"
         }
     }
@@ -311,8 +325,10 @@ switch ($Action) {
         }
     }
     'drag' {
-        # left press at X,Y, cursor moved to X2,Y2 in -Steps steps (~300 ms each),
-        # release; with -Tag a shot after every step (during the drag)
+        # left (-Right: right) press at X,Y, cursor moved to X2,Y2 in -Steps steps
+        # (-StepMs each), release; with -Tag a shot after every step (during the drag).
+        # -HoldKey W: that key is held down (WM_KEYDOWN) from step -KeyAt (0 = -Lead ms
+        # before the press) until after the release (WM_KEYUP).
         $run = Run-Dir
         foreach ($i in $Inst) {
             $p = Game-Proc $run $i
@@ -326,20 +342,32 @@ switch ($Action) {
             if (-not (Raise-Window $hw $r)) { Lower-Window $hw; Write-Host "${i}: window not on top, drag skipped"; continue }
             [void][Harness.Win]::SetCursorPos($r.Left + $X, $r.Top + $Y)
             Start-Sleep -Milliseconds 400
-            [Harness.Win]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
-            Start-Sleep -Milliseconds 300
-            for ($k = 1; $k -le $Steps; $k++) {
-                [void][Harness.Win]::SetCursorPos($r.Left + $X + [int](($X2 - $X) * $k / $Steps), $r.Top + $Y + [int](($Y2 - $Y) * $k / $Steps))
-                Start-Sleep -Milliseconds 300
-                if ($Tag) {
-                    $bmp = New-Object Drawing.Bitmap $w, $hgt
-                    $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size); $g.Dispose()
-                    $f = Join-Path $run ("{0}-{1}-{2}-step{3}.png" -f $i, (Get-Date -Format 'HHmmss'), $Tag, $k)
-                    $bmp.Save($f, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+            $vk = if ($HoldKey) { [int][char]$HoldKey.ToUpper() } else { 0 }
+            $keyDown = { [void][Harness.Win]::PostMessageW($hw, 0x0100, [IntPtr]$vk, [IntPtr]1); Write-Host "${i}: key $HoldKey down" }
+            try {
+                if ($vk -and $KeyAt -le 0) { & $keyDown; Start-Sleep -Milliseconds $Lead }
+                [Harness.Win]::mouse_event($(if ($Right) { 0x0008 } else { 0x0002 }), 0, 0, 0, [IntPtr]::Zero) # RIGHT/LEFTDOWN
+                Start-Sleep -Milliseconds $StepMs
+                for ($k = 1; $k -le $Steps; $k++) {
+                    if ($vk -and $KeyAt -eq $k) { & $keyDown }
+                    [void][Harness.Win]::SetCursorPos($r.Left + $X + [int](($X2 - $X) * $k / $Steps), $r.Top + $Y + [int](($Y2 - $Y) * $k / $Steps))
+                    Start-Sleep -Milliseconds $StepMs
+                    if ($Tag) {
+                        $bmp = New-Object Drawing.Bitmap $w, $hgt
+                        $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size); $g.Dispose()
+                        $f = Join-Path $run ("{0}-{1}-{2}-step{3}.png" -f $i, (Get-Date -Format 'HHmmss'), $Tag, $k)
+                        $bmp.Save($f, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+                    }
                 }
+            } finally {
+                [Harness.Win]::mouse_event($(if ($Right) { 0x0010 } else { 0x0004 }), 0, 0, 0, [IntPtr]::Zero) # RIGHT/LEFTUP
+                if ($vk) {
+                    Start-Sleep -Milliseconds $Lead
+                    [void][Harness.Win]::PostMessageW($hw, 0x0101, [IntPtr]$vk, [IntPtr]0xC0000001L) # WM_KEYUP
+                    Write-Host "${i}: key $HoldKey up"
+                }
+                Lower-Window $hw
             }
-            [Harness.Win]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
-            Lower-Window $hw
             Write-Host "${i}: drag $X,$Y -> $X2,$Y2 in $Steps steps"
         }
     }
