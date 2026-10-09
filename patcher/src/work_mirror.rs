@@ -18,23 +18,37 @@
 // bow / arrows / target scene of its own with shot sounds and no worker anim.
 // So the mirror plays UnitAction's work anim ("Attack", read from click) per
 // click or shot, the idle at the end.
+// The bard's song (activity Sing, ui.win.SingAction) is coop (`props.coop`),
+// but its window never reaches a client spectator: there `netSharing(true)`
+// registers the client's own SingAction, whose networkAllow(Ownership) is
+// true for its unit's owner only, so hxbit throws "Can't register
+// ui.win.SingAction without ownership" (shim.log, a client watching the host
+// sing) out of the window closure, and the spectator sees no song (vanilla
+// startSing / stopSing RPCs would play "Sing" / "SingIdle"). So the Sing
+// is mirrored too, despite being replicated: SingAction.startSong (the
+// bard's machine only: it runs once the chosen song's delay is over) sends
+// start and hit (kind 2); the hit plays the song's anim ("Sing", read from
+// startSong) looped, the end (_cancel, as above) the idle.
 //
 // The events ride the ping RPC like the forge mirror (mirror.rs), with their
 // own sentinel x = -1000000064, y = hxbit uid of the activity element (place)
 // or of the unit (camp), z = code + (camp << 2) + (kind << 3); code 0 start,
-// 1 hit, 2 end; kind 0 UnitAction, 1 Archery:
+// 1 hit, 2 end; kind 0 UnitAction, 1 Archery, 2 Sing:
 //   sender, `workSend(game, act, code, kind)`, co-op only (`ctrl.__host`),
-//   never for a replicated (coop) activity (coop_spectate.rs shows those),
-//   under a trap; start remembers the activity in `workAct`, end forgets it:
+//   never for a replicated (coop) activity (coop_spectate.rs shows those)
+//   except kind 2, under a trap; start remembers the activity in `workAct`,
+//   end forgets it:
 //     UnitAction.init / Archery.init entry           -> start
 //     UnitAction.click / Archery.setWorldPosOnShoot entry -> hit
+//     SingAction.startSong entry                      -> start, hit
 //     Activity._cancel__impl entry (`workEnd`): this == workAct -> end
 //       (every activity end, success or cancel, runs _cancel)
 //   receiver, ping__impl entry `if (workRecv(this, x, y, z, player)) return;`:
 //     false unless x is this sentinel; skipped for the sender itself; worker
 //     = mirrorWorker(game, y, camp); start: remember its current anim as that
 //     worker's idle (`workIdleOf`, per worker, see mirror.rs); hit: the work
-//     anim once, onEnd -> workIdle (that idle looped); end: the idle looped,
+//     anim once, onEnd -> workIdle (that idle looped), kind 2 the song's
+//     anim looped; end: the idle looped,
 //     the worker's entry forgotten.
 // shim.log: `mp: work send <code> <kind> <camp> <uid>` on the player's
 // machine, `mp: work recv <code> <kind> <camp> <stage>` on the others (stage 3
@@ -53,6 +67,8 @@ use hlbc::types::{RefGlobal, ValBool};
 /// as f32, see forge_mirror.rs `SENTINEL`) and not the forge's.
 pub(crate) const SENTINEL: f64 = -1_000_000_064.0;
 const RECV_TAG: &str = "mp: work recv";
+/// The kind of the bard's song (SingAction).
+const KIND_SING: i32 = 2;
 
 pub(crate) struct Plan {
     pub(crate) b: Base,
@@ -61,9 +77,14 @@ pub(crate) struct Plan {
     pub(crate) ar_act: RefField,
     pub(crate) w_game: RefField,
     pub(crate) a_game: RefField,
+    pub(crate) sg_act: RefField,
     pub(crate) work_g: RefGlobal,
+    /// The bard's singing anim ("Sing"), looped while the song plays.
+    pub(crate) sing_g: RefGlobal,
     /// UnitAction.init, UnitAction.click, Archery.init, Archery.setWorldPosOnShoot.
     pub(crate) sites: [usize; 4],
+    /// SingAction.startSong: start and hit of kind 2.
+    pub(crate) sing_site: usize,
     pub(crate) cancel_fi: usize,
     dbg_file: usize,
 }
@@ -83,17 +104,19 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     let c = mirror::camp(code, &b)?;
     let ua_t = obj_type(code, "ui.win.UnitAction")?;
     let ar_t = obj_type(code, "ui.win.Archery")?;
+    let sg_t = obj_type(code, "ui.win.SingAction")?;
     let win_t = obj_type(code, "ui.Window")?;
-    for t in [ua_t, ar_t] {
+    for t in [ua_t, ar_t, sg_t] {
         if !is_sub(code, t, win_t) {
             bail!("type {} is not a ui.Window", t.0);
         }
     }
     let ua_act = typed(code, ua_t, "activity", b.act_t)?;
     let ar_act = typed(code, ar_t, "activity", b.act_t)?;
+    let sg_act = typed(code, sg_t, "activity", b.act_t)?;
     let w_game = typed(code, win_t, "game", b.game_t)?;
-    // the same Window.game slot on both window classes
-    for t in [ua_t, ar_t] {
+    // the same Window.game slot on the three window classes
+    for t in [ua_t, ar_t, sg_t] {
         if typed(code, t, "game", b.game_t)? != w_game {
             bail!("Window.game moved on type {}", t.0);
         }
@@ -112,31 +135,10 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         m(ar_t, "setWorldPosOnShoot")?,
     ];
     // UnitAction.click: activity.unitView.play("<work anim>", ...)
-    let click = &code.functions[sites[1]];
-    let plays: Vec<RefGlobal> = click
-        .ops
-        .iter()
-        .enumerate()
-        .filter_map(|(i, o)| match o {
-            Opcode::CallMethod { field, args, .. } if *field == b.play_pi && args.len() == 4 => {
-                match writer(click, args[1], i) {
-                    Some(Opcode::GetGlobal { global, .. })
-                        if const_str(code, *global).is_some() =>
-                    {
-                        Some(*global)
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        })
-        .collect();
-    let [work_g] = plays[..] else {
-        bail!(
-            "UnitAction.click: {} literal work anims, want 1",
-            plays.len()
-        );
-    };
+    let work_g = literal_anim(code, &b, sites[1], "UnitAction.click")?;
+    // SingAction.startSong: activity.unitView.play("<sing anim>", {loop: true}, ...)
+    let sing_site = m(sg_t, "startSong")?;
+    let sing_g = literal_anim(code, &b, sing_site, "SingAction.startSong")?;
     let cancel = method(code, b.act_t, "_cancel__impl")?;
     if fun_args(code, cancel) != [b.act_t] {
         bail!("unexpected Activity._cancel__impl signature");
@@ -151,12 +153,42 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         c,
         ua_act,
         ar_act,
+        sg_act,
         w_game,
         a_game,
         work_g,
+        sing_g,
         sites,
+        sing_site,
         dbg_file: debug_file(code, "src/ui/win/UnitAction.hx")?,
     })
+}
+
+/// The literal anim of the only `play(<literal>, ...)` in function `fi`.
+fn literal_anim(code: &Bytecode, b: &Base, fi: usize, what: &str) -> Result<RefGlobal> {
+    let f = &code.functions[fi];
+    let plays: Vec<RefGlobal> = f
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| match o {
+            Opcode::CallMethod { field, args, .. } if *field == b.play_pi && args.len() == 4 => {
+                match writer(f, args[1], i) {
+                    Some(Opcode::GetGlobal { global, .. })
+                        if const_str(code, *global).is_some() =>
+                    {
+                        Some(*global)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    let [g] = plays[..] else {
+        bail!("{what}: {} literal anims, want 1", plays.len());
+    };
+    Ok(g)
 }
 
 struct G {
@@ -245,13 +277,24 @@ fn add_send(code: &mut Bytecode, p: &Plan, g: &G) -> Result<RefFun> {
     get(&mut a, ctrl, game, p.g_ctrl);
     // solo: no network, nothing to mirror
     get(&mut a, host, ctrl, p.c_host);
-    // a replicated (coop) activity: the others run its window themselves
+    // a replicated (coop) activity: the others run its window themselves;
+    // not the Sing (kind 2): the spectators' SingAction never gets registered
+    int(&mut a, code, k, KIND_SING);
+    a.jmp(
+        Opcode::JEq {
+            a: kind,
+            b: k,
+            offset: 0,
+        },
+        "shared",
+    );
     a.op(Opcode::Field {
         dst: ah,
         obj: act,
         field: p.a_host,
     });
     a.jmp(Opcode::JNotNull { reg: ah, offset: 0 }, "untrap");
+    a.label("shared");
     get(&mut a, mode, game, p.g_mode);
     a.op(Opcode::GetGlobal {
         dst: cls,
@@ -602,11 +645,29 @@ fn add_recv(
         arg0: e,
         arg1: k,
     });
+    int(&mut a, code, k, KIND_SING);
+    a.jmp(
+        Opcode::JEq {
+            a: kind,
+            b: k,
+            offset: 0,
+        },
+        "sing",
+    );
     a.op(Opcode::GetGlobal {
         dst: anim,
         global: p.work_g,
     });
     emit_play_once(&mut a, &mut r, code, p, e, anim, cur, idle);
+    int(&mut a, code, stage, 4);
+    a.jmp(Opcode::JAlways { offset: 0 }, "untrap");
+    // the song: its anim looped until the end event brings the idle back
+    a.label("sing");
+    a.op(Opcode::GetGlobal {
+        dst: anim,
+        global: p.sing_g,
+    });
+    emit_idle_now(&mut a, &mut r, code, p, e, anim, idle);
     int(&mut a, code, stage, 4);
     a.jmp(Opcode::JAlways { offset: 0 }, "untrap");
     a.label("nothit");
@@ -718,6 +779,53 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 5]> {
             ],
         );
     }
+    // SingAction.startSong (the bard's machine only): workSend(this.game,
+    // this.activity, 0, 2); workSend(this.game, this.activity, 1, 2)
+    {
+        let kd_ptr = int_const(code, KIND_SING);
+        let codes = [int_const(code, 0), int_const(code, 1)];
+        let f = &mut code.functions[p.sing_site];
+        let mut ops = Vec::new();
+        for c_ptr in codes {
+            let mut nr = |t: RefType| {
+                f.regs.push(t);
+                Reg((f.regs.len() - 1) as u32)
+            };
+            let (gm, ac, c, kd, v) = (
+                nr(p.game_t),
+                nr(p.act_t),
+                nr(p.i32_),
+                nr(p.i32_),
+                nr(p.void_),
+            );
+            ops.extend([
+                Opcode::Field {
+                    dst: gm,
+                    obj: Reg(0),
+                    field: p.w_game,
+                },
+                Opcode::Field {
+                    dst: ac,
+                    obj: Reg(0),
+                    field: p.sg_act,
+                },
+                Opcode::Int { dst: c, ptr: c_ptr },
+                Opcode::Int {
+                    dst: kd,
+                    ptr: kd_ptr,
+                },
+                Opcode::Call4 {
+                    dst: v,
+                    fun: send,
+                    arg0: gm,
+                    arg1: ac,
+                    arg2: c,
+                    arg3: kd,
+                },
+            ]);
+        }
+        insert_ops(f, 0, ops);
+    }
     // Activity._cancel__impl: workEnd(this)
     {
         let f = &mut code.functions[p.cancel_fi];
@@ -734,7 +842,8 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 5]> {
         );
     }
     eprintln!(
-        "patched work mirror: UnitAction init / click and Archery init / shot send start / hit, \
+        "patched work mirror: UnitAction init / click, Archery init / shot and SingAction \
+         startSong send start / hit, \
          Activity._cancel__impl the end, over the ping RPC (workSend fn@{}, workEnd fn@{}); \
          ping__impl plays them on the other players' worker in a place or the camp (workRecv \
          fn@{}, mirrorWorker fn@{}, workIdle fn@{})",
@@ -770,6 +879,7 @@ mod tests {
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         assert_eq!(const_str(&orig, p.work_g), Some("Attack"));
+        assert_eq!(const_str(&orig, p.sing_g), Some("Sing"));
         let mut code = read(&image);
         patch_work_mirror(&mut code);
         let patched = write(&code);
@@ -777,7 +887,7 @@ mod tests {
         let n = orig.functions.len();
         assert_eq!(back.functions.len(), n + 6);
         let mut sites = p.sites.to_vec();
-        sites.extend([p.cancel_fi, p.impl_fi, p.dispose_fi]);
+        sites.extend([p.sing_site, p.cancel_fi, p.impl_fi, p.dispose_fi]);
         for i in 0..n {
             assert_eq!(
                 !same(&orig.functions[i], &back.functions[i]),
@@ -822,6 +932,37 @@ mod tests {
                 (val(&b.ops[2], arg2), val(&b.ops[3], arg3)),
                 [(0, 0), (1, 0), (0, 1), (1, 1)][k]
             );
+        }
+        // SingAction.startSong: start then hit, kind 2, from this.activity
+        {
+            let (a, b) = (&orig.functions[p.sing_site], &back.functions[p.sing_site]);
+            let mut want = a.clone();
+            want.regs = b.regs.clone();
+            shifted(&want, b, 0, 10);
+            check_types(&back, b, 0..b.ops.len());
+            check_flow(b);
+            for (j, c) in [0, 1].into_iter().enumerate() {
+                let o = &b.ops[j * 5..j * 5 + 5];
+                let Opcode::Call4 {
+                    fun,
+                    arg1,
+                    arg2,
+                    arg3,
+                    ..
+                } = o[4]
+                else {
+                    panic!("sing call {j}")
+                };
+                assert_eq!(fun, send);
+                assert!(
+                    matches!(o[1], Opcode::Field { dst, obj: Reg(0), field } if dst == arg1 && field == p.sg_act)
+                );
+                let val = |op: &Opcode, r: Reg| match op {
+                    Opcode::Int { dst, ptr } if *dst == r => back.ints[ptr.0],
+                    o => panic!("{o:?}"),
+                };
+                assert_eq!((val(&o[2], arg2), val(&o[3], arg3)), (c, KIND_SING));
+            }
         }
         for (fi, k, callee) in [(p.cancel_fi, 1, end), (p.impl_fi, 3, recv)] {
             let (a, b) = (&orig.functions[fi], &back.functions[fi]);
@@ -1159,6 +1300,13 @@ mod tests {
         s.c.set(&w.act, p.a_host, h);
         s.run(send, vec![w.game.clone(), w.act.clone(), V::I(0), V::I(0)]);
         assert!(s.c.log.is_empty());
+        // ... except the bard's song: coop, still sent
+        s.run(send, vec![w.game.clone(), w.act.clone(), V::I(1), V::I(2)]);
+        assert_eq!(
+            ping(&mut s)[0][1..4],
+            [V::F(SENTINEL), V::F(9.0), z(1, 1, 2)]
+        );
+        s.c.log.clear();
         s.c.set(&w.act, p.a_host, V::Null);
         s.c.set(&w.ctrl, p.c_host, V::Null);
         s.run(send, vec![w.game.clone(), w.act.clone(), V::I(0), V::I(0)]);
@@ -1227,6 +1375,27 @@ mod tests {
             assert_eq!(s.c.key_get(&pl[2], "dloop"), V::B(true));
         }
         assert_eq!(s.c.take("println"), vec![vec![st("mp: work recv 2 1 0 5")]]);
+
+        // the bard's song (kind 2): "Sing" looped from the hit, the idle at the end
+        s.c.set(&w.parked, p.e_anim, st("IdlePose"));
+        ev(&mut s, SENTINEL, 77.0, z(0, 0, 2), &w.other);
+        ev(&mut s, SENTINEL, 77.0, z(1, 0, 2), &w.other);
+        let plays = s.c.take("play");
+        assert_eq!(plays.len(), 1);
+        assert_eq!(plays[0][..2], [w.parked.clone(), st("Sing")]);
+        assert_eq!(s.c.key_get(&plays[0][2], "dloop"), V::B(true));
+        s.c.set(&w.parked, p.e_anim, st("Sing"));
+        ev(&mut s, SENTINEL, 77.0, z(2, 0, 2), &w.other);
+        let plays = s.c.take("play");
+        assert_eq!(plays[0][..2], [w.parked.clone(), st("IdlePose")]);
+        assert_eq!(
+            s.c.take("println"),
+            vec![
+                vec![st("mp: work recv 0 2 0 3")],
+                vec![st("mp: work recv 1 2 0 4")],
+                vec![st("mp: work recv 2 2 0 5")]
+            ]
+        );
 
         // camp: the unit's entry entity (not the first entry)
         s.c.key_set(&w.mode, "pv".into(), V::B(false));
