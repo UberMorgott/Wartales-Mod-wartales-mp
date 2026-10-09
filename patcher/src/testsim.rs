@@ -267,6 +267,10 @@ impl<'a> Sim<'a> {
                     let i = num(&r[rr(index)]);
                     r[rr(dst)] = self.c.key_get(&r[rr(array)], &format!("i{i}"));
                 }
+                Opcode::SetArray { array, index, src } => {
+                    let (a, i, v) = (r[rr(array)].clone(), num(&r[rr(index)]), r[rr(src)].clone());
+                    self.c.key_set(&a, format!("i{i}"), v);
+                }
                 Opcode::EnumIndex { dst, value } => {
                     r[rr(dst)] = self.c.key_get(&r[rr(value)], "idx")
                 }
@@ -391,6 +395,12 @@ impl<'a> Sim<'a> {
                         _ => x > y,
                     };
                     if t {
+                        next = jump(*offset)
+                    }
+                }
+                // Unsigned compare: an array bounds check (index < length).
+                Opcode::JULt { a, b, offset } => {
+                    if (num(&r[rr(a)]) as u32) < (num(&r[rr(b)]) as u32) {
                         next = jump(*offset)
                     }
                 }

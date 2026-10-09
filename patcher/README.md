@@ -151,6 +151,12 @@ else "Manual". Display only, so it never stacks. `LoadGame.getFileName`'s
 player branch returns "" so the row does not show it twice (admin / beta
 keep the raw file name).
 
+**Save order** (`src/save_order.rs`): `LoadGame.loadGames` (every load / save
+/ co-op list) sorts saves by `header.irlTime`, newest first, but then puts
+the autosave on top (`autosaves.concat(games)`), even when it is older. One
+op after that concat re-runs the same vanilla sort with the same comparator,
+so the whole list is newest first.
+
 **Loot level** (`src/loot_level.rs`): `battle.Debrief.genLoot` keeps a dead
 enemy's worn item as a drop candidate through one closure per slot (nine
 copies, Debrief.hx:521-531). Each one skipped an item whose `requireLevel` is

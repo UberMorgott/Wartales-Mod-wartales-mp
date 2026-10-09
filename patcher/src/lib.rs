@@ -62,6 +62,7 @@ mod ping_cell;
 mod ready_start;
 mod returning_units;
 mod save_kind;
+mod save_order;
 mod scroll_hit;
 mod skill_cost;
 mod skill_sync;
@@ -224,6 +225,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loading_draw::patch_loading_draw(&mut code);
     scroll_hit::patch_scroll_hit(&mut code);
     save_kind::patch_save_kind(&mut code);
+    save_order::patch_save_order(&mut code);
     jit_names::patch_jit_names(&mut code);
     }
     #[cfg(feature = "harness")]
