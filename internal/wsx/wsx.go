@@ -39,8 +39,8 @@ const MaxFrame = 64 << 20
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-// HandshakeTimeout bounds the upgrade request of a peer that has not
-// authenticated yet; the game sends its request at once.
+// HandshakeTimeout is the Accept timeout for publicly reachable listeners: it
+// bounds the upgrade request of a peer that has not authenticated yet.
 const HandshakeTimeout = 10 * time.Second
 
 // maxRequest bounds the upgrade request; the game's is a few hundred bytes.
@@ -71,12 +71,13 @@ const sendBudget = 2 * (MaxFrame + 10)
 // connection. br must be the reader the caller has been peeking with, or nil.
 //
 // The peer is not authenticated yet, so the request must arrive whole within
-// HandshakeTimeout and maxRequest bytes.
-func Accept(c net.Conn, br *bufio.Reader, auth AuthFunc) (*Conn, error) {
+// timeout (on a TLS conn it also covers the lazy TLS handshake) and maxRequest
+// bytes.
+func Accept(c net.Conn, br *bufio.Reader, timeout time.Duration, auth AuthFunc) (*Conn, error) {
 	if br == nil {
 		br = bufio.NewReader(c)
 	}
-	if err := c.SetDeadline(time.Now().Add(HandshakeTimeout)); err != nil {
+	if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
 	}
 	headers, err := readRequest(br)

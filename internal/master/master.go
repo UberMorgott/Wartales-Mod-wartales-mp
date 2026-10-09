@@ -244,6 +244,10 @@ type session struct {
 // every reply and sends a handful at most, so this is never reached.
 const queueDepth = 64
 
+// handshakeTimeout bounds the game's TLS handshake + websocket upgrade on the
+// loopback listener; well above the game's own ~20 s connect timeout.
+const handshakeTimeout = 60 * time.Second
+
 func (p *session) UserID() string  { return p.uid }
 func (p *session) SteamID() string { return p.steam }
 func (p *session) GameID() string  { return p.game }
@@ -280,7 +284,8 @@ func (s *Server) serve(c net.Conn) {
 	}()
 	peer := c.RemoteAddr().String()
 	s.opt.Log.Printf("master: accepted TLS connection from %s", peer)
-	ws, err := wsx.Accept(c, nil, func(string) (string, bool) {
+	// Loopback only: a slow PC needs ~10 s for the game's TLS handshake + upgrade (#5).
+	ws, err := wsx.Accept(c, nil, handshakeTimeout, func(string) (string, bool) {
 		// The game authenticates with a password obfuscated inside the
 		// bytecode; we cannot check it, and we do not need to.
 		return "", true

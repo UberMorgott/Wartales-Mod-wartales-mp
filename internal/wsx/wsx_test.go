@@ -16,7 +16,7 @@ func accept(t *testing.T, req string) error {
 	srv, cli := net.Pipe()
 	defer func() { _ = srv.Close(); _ = cli.Close() }()
 	go func() { _, _ = io.WriteString(cli, req) }()
-	_, err := Accept(srv, nil, nil)
+	_, err := Accept(srv, nil, HandshakeTimeout, nil)
 	return err
 }
 
@@ -47,7 +47,7 @@ func upgrade(t *testing.T) (*Conn, net.Conn, *bufio.Reader) {
 		err error
 	}
 	res := make(chan result, 1)
-	go func() { c, err := Accept(srv, nil, nil); res <- result{c, err} }()
+	go func() { c, err := Accept(srv, nil, HandshakeTimeout, nil); res <- result{c, err} }()
 	br := bufio.NewReader(cli)
 	for {
 		line, err := br.ReadString('\n')
@@ -121,5 +121,28 @@ func TestAcceptTimesOut(t *testing.T) {
 	}
 	if took := time.Since(start); took < HandshakeTimeout || took > HandshakeTimeout+5*time.Second {
 		t.Fatalf("gave up after %v, want %v", took, HandshakeTimeout)
+	}
+}
+
+// The deadline follows the timeout passed in: a request that takes 300 ms is
+// dropped under a 100 ms timeout and accepted under a 5 s one (#5).
+func TestAcceptUsesGivenTimeout(t *testing.T) {
+	t.Parallel()
+	slow := func(timeout time.Duration) error {
+		srv, cli := net.Pipe()
+		defer func() { _ = srv.Close(); _ = cli.Close() }()
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			_, _ = io.WriteString(cli, "GET / HTTP/1.1\r\nSec-WebSocket-Key: a2V5\r\n\r\n")
+			_, _ = io.Copy(io.Discard, cli) // take the 101 response
+		}()
+		_, err := Accept(srv, nil, timeout, nil)
+		return err
+	}
+	if err := slow(100 * time.Millisecond); err == nil {
+		t.Fatal("a slow request beat a 100 ms timeout")
+	}
+	if err := slow(5 * time.Second); err != nil {
+		t.Fatalf("a slow request failed under a 5 s timeout: %v", err)
 	}
 }

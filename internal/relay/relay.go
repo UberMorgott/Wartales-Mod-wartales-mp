@@ -147,7 +147,7 @@ func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
 func (s *Server) Serve(c net.Conn, br *bufio.Reader) {
 	defer func() { _ = c.Close() }() // connection is finished either way
 
-	ws, err := wsx.Accept(c, br, func(ident string) (string, bool) {
+	ws, err := wsx.Accept(c, br, wsx.HandshakeTimeout, func(ident string) (string, bool) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		// RelayServer.onClient: the first '@' connection becomes the host.
