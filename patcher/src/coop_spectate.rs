@@ -38,7 +38,14 @@
 //     chooseUnit full-screen Interactive (added on every client) removed.
 //     The rest of _start (start cost on the host, GC entry, trait level) runs.
 //   onReady closure: showTutorial(..., cb) -> spectTut: a spectator gets no
-//     tutorial, cb runs at once.
+//     tutorial; cb (the window closure) runs at once on the host and not at
+//     all on a client spectator: the mini-game windows are built for the
+//     host and the acting player only. On a client spectator their
+//     constructor / netSharing threw out of _start (before spectPost, so the
+//     camera and input stayed locked): GatherAction `Can't register ...
+//     without ownership` (networkAllow(Ownership) needs player == me),
+//     FishingAction `keepOnGathered on a not allowed object`, LockPick
+//     `Null access .pinNumber` (lockData is set on the host only).
 //   window closure: setWindow(win) -> spectWin: a spectator's window is made
 //     invisible (windowRoot and the window: no draw, no Interactive events,
 //     not the mode's current window) but stays in the windows list, updated
@@ -94,6 +101,7 @@ pub(crate) struct Plan {
     i_id: RefField,
     u_owner: RefField,
     g_me: RefField,
+    g_auth: RefField,
     g_mode: RefField,
     g_gui: RefField,
     g_ui: RefField,
@@ -191,6 +199,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     }
     let u_owner = typed(code, unit_t, "owner", player_t)?;
     let g_me = typed(code, game_t, "me", player_t)?;
+    let g_auth = typed(code, game_t, "isAuth", bool_)?;
     let g_mode = typed(code, game_t, "mode", mode_t)?;
     let g_gui = typed(code, game_t, "globalUI", gui_t)?;
     let g_ui = typed(code, game_t, "ui", ui_t)?;
@@ -446,6 +455,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         i_id,
         u_owner,
         g_me,
+        g_auth,
         g_mode,
         g_gui,
         g_ui,
@@ -903,11 +913,15 @@ fn add_post(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     )
 }
 
-/// `spectTut(ui, id, opts, cb, act) -> Bool`: a spectator gets no tutorial (false), cb runs at once.
+/// `spectTut(ui, id, opts, cb, act) -> Bool`: a spectator gets no tutorial
+/// (false); cb (the window closure) runs at once on the host only. A client
+/// spectator never builds the mini-game window: its constructor / netSharing
+/// are owner- or host-only (GatherAction register, FishingAction
+/// keepOnGathered, LockPick lockData) and threw out of `_start`.
 fn add_tut(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
     let args = vec![p.ui_t, p.str_t, p.tut_t, p.cb_t, p.act_t];
     let mut r = Regs(args.clone());
-    let (b, v) = (r.r(p.bool_), r.r(p.void_));
+    let (b, v, game) = (r.r(p.bool_), r.r(p.void_), r.r(p.game_t));
     let mut a = Asm::new();
     a.op(Opcode::Call1 {
         dst: b,
@@ -915,12 +929,31 @@ fn add_tut(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
         arg0: Reg(4),
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "vanilla");
+    a.op(Opcode::Field {
+        dst: game,
+        obj: Reg(4),
+        field: p.a_game,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: game,
+            offset: 0,
+        },
+        "none",
+    );
+    a.op(Opcode::Field {
+        dst: b,
+        obj: game,
+        field: p.g_auth,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "none");
     a.op(Opcode::CallClosure {
         dst: v,
         fun: Reg(3),
         args: vec![],
     });
     // no tutorial shown
+    a.label("none");
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(false),
@@ -1659,6 +1692,16 @@ mod tests {
         assert_eq!(s.run(tut, args(&cb)), V::B(false));
         assert!(s.c.take("showTutorial").is_empty());
         assert!(s.c.take("addHelpIcon").is_empty());
+        // the window closure (probe: logs addHelpIcon): never on a client
+        // spectator, at once on the host
+        let probe = V::Clo(p.add_help, Box::new(w.act.clone()));
+        assert_eq!(s.run(tut, args(&probe)), V::B(false));
+        assert!(s.c.take("addHelpIcon").is_empty());
+        s.c.set(&w.game, p.g_auth, V::B(true));
+        assert_eq!(s.run(tut, args(&probe)), V::B(false));
+        assert_eq!(s.c.take("addHelpIcon"), vec![vec![w.act.clone()]]);
+        assert!(s.c.take("showTutorial").is_empty());
+        s.c.set(&w.game, p.g_auth, V::B(false));
         s.run(help, vec![w.act.clone()]);
         assert!(s.c.take("addHelpIcon").is_empty());
         // end fade with coop = true: not replicated (the others watch from their camera)
