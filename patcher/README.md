@@ -142,6 +142,14 @@ behind every press-and-hold ring, divides its duration by 3 at entry
 (NPC/entity trigger 0.45 s -> 0.15 s, gamepad place exit and skill-bar arrow
 1.95 s -> 0.65 s). The gamepad long-press binding duration is cdb data
 (`Const` `Pad_LongPress_Duration`) and is not changed here.
+**Save kind** (`src/save_kind.rs`): vanilla names every save of a campaign
+`header.gameName`, so auto, quick and manual saves look alike in the load
+list. `LoadGame.getSaveName` (row title, detail panel, save-over / delete
+confirms) now appends the kind from the file name: `autosave.dat` ->
+`Texts.ui.autosave`, `quicksave.dat` -> `Texts.ui.quicksave` (localized),
+else "Manual". Display only, so it never stacks. `LoadGame.getFileName`'s
+player branch returns "" so the row does not show it twice (admin / beta
+keep the raw file name).
 
 **Loot level** (`src/loot_level.rs`): `battle.Debrief.genLoot` keeps a dead
 enemy's worn item as a drop candidate through one closure per slot (nine

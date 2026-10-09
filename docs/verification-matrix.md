@@ -80,6 +80,7 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | title_version | PASS | R6 `B-*-jflk1.png`: "Co-op Fix v0.2.8" on the title screen |
 | loading_draw (#3) | PASS | R6 bursts at ~0.4 s: S2 reload (54 frames) and rejoin (65 frames), mean brightness monotonic world -> loading -> game, no flash back |
 | scroll_hit | unit | |
+| save_kind | unit | in-game: load list shows "Name (Autosave/Quicksave/Manual)" |
 | jit_names | PASS | every run: the patched image starts (the JIT crash it prevents is at startup) |
 | harness (test build only) | PASS | all runs |
 
