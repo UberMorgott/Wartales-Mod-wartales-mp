@@ -78,10 +78,12 @@
 //       pinned as inline dom attributes (offset-x / offset-y): a style refresh
 //       (the chest Element's hover) re-applies the CSS rules, which threw the
 //       chest back to `offset-y: -410`. A release after a move clears the
-//       double-push state, so quick successive drags all drag. It then puts an interactive on its first child with
-//       dom class "title" (the header; skipped when that child already has
-//       one) whose push starts `mpDragBegin(panel, null, key)`. Header buttons
-//       sit above that interactive and keep their clicks. The caller must own
+//       double-push state, so quick successive drags all drag. It then sets the
+//       onPush of the panel's own interactive (made if missing; below every
+//       child): a left push in the top PANEL_HEAD_PX band starts
+//       `mpDragBegin(panel, null, key)`, so the whole header bar drags (the
+//       "title" flow itself is content-sized). Header buttons and slots sit
+//       above that interactive and keep their clicks. The caller must own
 //       the panel's onAfterReflow.
 // Storage: `mpman.Storage.setUserData("mpWinPos:" + key, packed)` with
 // packed = ((dx + 32768) << 16) | ((dy + 32768) & 0xFFFF) (one Int per key;
@@ -98,6 +100,9 @@ use super::*;
 use hlbc::types::{EnumConstruct, RefEnumConstruct, RefGlobal, RefString, ValBool};
 
 const HEADER_PX: f64 = 70.0;
+/// A panel's header bar: the top band whose push starts its drag (the vanilla
+/// inventory title is 50 high; the chest caption with its margins about 55).
+const PANEL_HEAD_PX: f64 = 50.0;
 const WIDE: f64 = 0.9;
 const KEEP_PX: f64 = 48.0;
 const DOUBLE_S: f64 = 0.35;
@@ -106,7 +111,6 @@ pub(crate) const PREFIX: &str = "mpWinPos:";
 const BASE_PREFIX: &str = "mpWinBase:";
 pub(crate) const KEY_CHEST: &str = "GameInventory#chest";
 pub(crate) const KEY_INV: &str = "GameInventory#inv";
-const HEADER_CLASS: &str = "title";
 const HEAD_MARK: &str = "mpDragHead";
 pub(crate) const SIZE_PREFIX: &str = "mpWinSize:";
 /// A panel's vanilla scroll-area maxHeight, stored on install (reset target).
@@ -196,6 +200,8 @@ struct Ctx {
     sc_h: RefField,
     kind: RefField,
     button: RefField,
+    /// hxd.Event.relY: the push's y in the interactive (a panel: its top is 0).
+    rel_y: RefField,
     propagate: RefField,
     cursor: RefField,
     /// h2d.Object.name: marks a header interactive whose onPush is wrapped.
@@ -219,7 +225,6 @@ struct Ctx {
     /// onAfterReflow; still set while the flow measures (reflows) its children.
     need_reflow: RefField,
     set_enable_inter: RefFun,
-    has_class: RefFun,
     get_class: RefFun,
     class_name: RefFun,
     str_add: RefFun,
@@ -489,6 +494,7 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
     let sc_h = typed(code, scene_t, "height", i32_t)?;
     let (kind, kind_t) = field(code, ev_t, "kind")?;
     let button = typed(code, ev_t, "button", i32_t)?;
+    let rel_y = typed(code, ev_t, "relY", f64_t)?;
     let propagate = typed(code, ev_t, "propagate", bool_t)?;
     let (modal, modal_t) = field(code, win_t, "modal")?;
     let frame_flow = typed(code, win_t, "frameFlow", flow_t)?;
@@ -556,14 +562,6 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         set_enable_inter,
         "Flow.set_enableInteractive",
         &[flow_t, bool_t],
-        bool_t,
-    )?;
-    let has_class = method(code, dk_t, "hasClass")?.findex;
-    want_sig(
-        code,
-        has_class,
-        "Properties.hasClass",
-        &[dk_t, str_t],
         bool_t,
     )?;
     let set_attr = method(code, dk_t, "setAttribute")?.findex;
@@ -673,6 +671,7 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         sc_h,
         kind,
         button,
+        rel_y,
         propagate,
         cursor,
         name,
@@ -692,7 +691,6 @@ fn ctx(code: &Bytecode) -> Result<Ctx> {
         set_need_reflow,
         need_reflow,
         set_enable_inter,
-        has_class,
         get_class,
         class_name,
         str_add,
@@ -733,7 +731,6 @@ struct Globals {
     /// "mpWinBase:": a panel's styled (CSS) offsets, what a double push resets to.
     base: RefGlobal,
     err: RefGlobal,
-    title: RefGlobal,
     /// "offset-x" / "offset-y": the inline attributes a pin sets.
     attr_x: RefGlobal,
     attr_y: RefGlobal,
@@ -825,7 +822,6 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         prefix: str_global(code, c.str_t, PREFIX),
         base: str_global(code, c.str_t, BASE_PREFIX),
         err: str_global(code, c.str_t, S_ERR),
-        title: str_global(code, c.str_t, HEADER_CLASS),
         attr_x: str_global(code, c.str_t, "offset-x"),
         attr_y: str_global(code, c.str_t, "offset-y"),
         head_mark: str_global(code, c.str_t, HEAD_MARK),
@@ -887,7 +883,7 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         (rs_install, rs_reflow),
         cap_t,
     )?;
-    let panel = add_panel(code, c, &g, report, late, panel_push, cap_t)?;
+    let panel = add_panel(code, c, report, late, panel_push, cap_t)?;
     let win_push = add_win_push(code, c, report, begin)?;
     let (head_push, head_t) = add_head_push(code, c, win_push)?;
     let head = add_head(code, c, &g, head_push, head_t)?;
@@ -3502,9 +3498,11 @@ fn add_clamp(
     )
 }
 
-/// Panel push closure `(capture(panel, key), hxd.Event) -> void` and its capture enum type.
+/// Panel push closure `(capture(panel, key), hxd.Event) -> void` and its capture
+/// enum type: a left push in the panel's top PANEL_HEAD_PX band starts the drag.
 fn add_panel_push(code: &mut Bytecode, c: &Ctx, begin: RefFun) -> Result<(RefFun, RefType)> {
     let k0 = int_const(code, 0);
+    let f_head = float_const(code, PANEL_HEAD_PX);
     code.types.push(Type::Enum {
         name: RefString(0),
         global: RefGlobal(0),
@@ -3524,6 +3522,7 @@ fn add_panel_push(code: &mut Bytecode, c: &Ctx, begin: RefFun) -> Result<(RefFun
         r.r(c.str_t),
         r.r(c.obj_t),
     );
+    let (ry, lim) = (r.r(c.f64_t), r.r(c.f64_t));
     let mut a = Asm::new();
     a.op(Opcode::Field {
         dst: bt,
@@ -3535,6 +3534,24 @@ fn add_panel_push(code: &mut Bytecode, c: &Ctx, begin: RefFun) -> Result<(RefFun
         Opcode::JNotEq {
             a: bt,
             b: z,
+            offset: 0,
+        },
+        "end",
+    );
+    // Header band only.
+    a.op(Opcode::Field {
+        dst: ry,
+        obj: e,
+        field: c.rel_y,
+    });
+    a.op(Opcode::Float {
+        dst: lim,
+        ptr: f_head,
+    });
+    a.jmp(
+        Opcode::JSGt {
+            a: ry,
+            b: lim,
             offset: 0,
         },
         "end",
@@ -3672,38 +3689,23 @@ fn add_panel_late(
 }
 
 /// `panel(panel, key)`: onAfterReflow = panelLate (run once now: restore at
-/// once if already styled), then a drag interactive on the "title" header child.
+/// once if already styled), then the panel's own interactive (the vanilla
+/// `cursor: default` one, made if missing; below every child) gets the drag
+/// push, which acts only in the top PANEL_HEAD_PX band: the whole header bar
+/// drags, not just the "title" flow (content-sized: the chest's centred
+/// caption, the 220 px inventory title). Header buttons keep their clicks.
 fn add_panel(
     code: &mut Bytecode,
     c: &Ctx,
-    g: &Globals,
     report: RefFun,
     late: RefFun,
     panel_push: RefFun,
     cap_t: RefType,
 ) -> Result<RefFun> {
-    let k0 = int_const(code, 0);
     let mut r = Regs(vec![c.flow_t, c.str_t]);
     let (panel, key) = (Reg(0), Reg(1));
-    let (v, exc, b, cls, ch, raw, d) = (
-        r.r(c.void_t),
-        r.r(c.dyn_t),
-        r.r(c.bool_t),
-        r.r(c.str_t),
-        r.r(c.arr_t),
-        r.r(c.raw_t),
-        r.r(c.dyn_t),
-    );
-    let (n, i, ch_o, dm, hf, it, cx, cl) = (
-        r.r(c.i32_t),
-        r.r(c.i32_t),
-        r.r(c.obj_t),
-        r.r(c.dk_t),
-        r.r(c.flow_t),
-        r.r(c.inter_t),
-        r.r(cap_t),
-        r.r(c.push_t),
-    );
+    let (v, exc, b) = (r.r(c.void_t), r.r(c.dyn_t), r.r(c.bool_t));
+    let (it, cx, cl) = (r.r(c.inter_t), r.r(cap_t), r.r(c.push_t));
     let rc = r.r(c.reflow_t);
     let gd = Guard { exc, v };
     let mut a = Asm::new();
@@ -3735,71 +3737,13 @@ fn add_panel(
         fun: late,
         arg0: cx,
     });
-    a.op(Opcode::GetGlobal {
-        dst: cls,
-        global: g.title,
-    });
-    a.op(Opcode::Field {
-        dst: ch,
-        obj: panel,
-        field: c.children,
-    });
-    a.jmp(Opcode::JNull { reg: ch, offset: 0 }, "out");
-    a.op(Opcode::Field {
-        dst: n,
-        obj: ch,
-        field: c.arr_len,
-    });
-    a.op(Opcode::Int { dst: i, ptr: k0 });
-    a.loop_head("loop");
-    a.jmp(
-        Opcode::JSGte {
-            a: i,
-            b: n,
-            offset: 0,
-        },
-        "out",
-    );
-    a.op(Opcode::Field {
-        dst: raw,
-        obj: ch,
-        field: c.arr_arr,
-    });
-    a.op(Opcode::GetArray {
-        dst: d,
-        array: raw,
-        index: i,
-    });
-    a.op(Opcode::UnsafeCast { dst: ch_o, src: d });
-    a.op(Opcode::Incr { dst: i });
-    a.jmp(
-        Opcode::JNull {
-            reg: ch_o,
-            offset: 0,
-        },
-        "loop",
-    );
-    a.op(Opcode::Field {
-        dst: dm,
-        obj: ch_o,
-        field: c.dom,
-    });
-    a.jmp(Opcode::JNull { reg: dm, offset: 0 }, "loop");
-    a.op(Opcode::Call2 {
-        dst: b,
-        fun: c.has_class,
-        arg0: dm,
-        arg1: cls,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "loop");
-    // The header: a flow without an interactive of its own.
-    a.op(Opcode::SafeCast { dst: hf, src: ch_o });
+    // The panel's interactive (made if missing).
     a.op(Opcode::Field {
         dst: it,
-        obj: hf,
+        obj: panel,
         field: c.interactive,
     });
-    a.jmp(Opcode::JNotNull { reg: it, offset: 0 }, "out");
+    a.jmp(Opcode::JNotNull { reg: it, offset: 0 }, "set");
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(true),
@@ -3807,15 +3751,16 @@ fn add_panel(
     a.op(Opcode::Call2 {
         dst: b,
         fun: c.set_enable_inter,
-        arg0: hf,
+        arg0: panel,
         arg1: b,
     });
     a.op(Opcode::Field {
         dst: it,
-        obj: hf,
+        obj: panel,
         field: c.interactive,
     });
     a.jmp(Opcode::JNull { reg: it, offset: 0 }, "out");
+    a.label("set");
     a.op(Opcode::MakeEnum {
         dst: cx,
         construct: RefEnumConstruct(0),
@@ -5231,6 +5176,11 @@ mod tests {
                 } else if f == c.rs.set_max_h {
                     log(k, "maxHeight");
                     Some(a[1].clone())
+                } else if f == c.set_enable_inter {
+                    log(k, "enableInteractive");
+                    let it = k.obj(&[]);
+                    k.set(&a[0], c.interactive, it);
+                    Some(V::B(true))
                 } else if f == c.set_need_reflow {
                     log(k, "needReflow");
                     Some(V::B(true))
@@ -5639,6 +5589,60 @@ mod tests {
         event(&mut s, &c, &f, c.ev_move);
         assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
         assert_eq!(s.c.get(&obj, c.x), V::F(130.0));
+    }
+
+    /// The whole header bar drags a panel, not just its content-sized "title"
+    /// flow (the chest's centred caption): the drag push sits on the panel's own
+    /// interactive (made when missing, kept when there) and acts on a left push
+    /// in the top PANEL_HEAD_PX band only; lower pushes and other buttons pass.
+    #[test]
+    fn panel_header_band_drags() {
+        let Some(image) = game() else { return };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let (panel_fn, push_fn_) = (code.functions[n + 18].findex, code.functions[n + 13].findex);
+        let mut s = sim(&code, n, &c);
+        let (obj, _pr) = scene(&mut s, &c);
+        let dom = s.c.obj(&[(c.need_style, V::B(true))]);
+        s.c.set(&obj, c.dom, dom);
+        let key = V::S("k".into());
+
+        // No interactive yet: one is made on the panel and gets the drag push.
+        s.run(panel_fn, vec![obj.clone(), key.clone()]);
+        assert_eq!(s.c.take("enableInteractive").len(), 1);
+        let it = s.c.get(&obj, c.interactive);
+        assert_ne!(it, V::Null);
+        let V::Clo(pf, cap) = s.c.get(&it, c.on_push) else {
+            panic!("no panel push")
+        };
+        assert_eq!(pf, push_fn_);
+        let cap = *cap;
+
+        let push = |s: &mut Sim, rel_y: f64, button: i32| {
+            let e = s.c.obj(&[(c.button, V::I(button)), (c.rel_y, V::F(rel_y))]);
+            s.run(push_fn_, vec![cap.clone(), e]);
+            s.c.take("startCapture").len()
+        };
+        mouse(&mut s, 500.0, 300.0);
+        // Header band, right of the caption: drags.
+        assert_eq!(push(&mut s, 30.0, 0), 1);
+        event(&mut s, &c, &f, c.ev_release);
+        s.c.put("in", "now", V::F(20.0));
+        // Below the band (grid area) or another button: no drag.
+        assert_eq!(push(&mut s, PANEL_HEAD_PX + 1.0, 0), 0);
+        assert_eq!(push(&mut s, 30.0, 1), 0);
+        // Band edge still drags.
+        assert_eq!(push(&mut s, PANEL_HEAD_PX, 0), 1);
+        event(&mut s, &c, &f, c.ev_release);
+
+        // A panel that already has an interactive (vanilla `cursor: default`) keeps it.
+        let own = s.c.obj(&[]);
+        s.c.set(&obj, c.interactive, own.clone());
+        s.run(panel_fn, vec![obj.clone(), key]);
+        assert!(s.c.take("enableInteractive").is_empty());
+        assert_eq!(s.c.get(&obj, c.interactive), own);
+        assert!(matches!(s.c.get(&own, c.on_push), V::Clo(pf, _) if pf == push_fn_));
     }
 
     /// Chest panel life cycle: built in the constructor before its style is
