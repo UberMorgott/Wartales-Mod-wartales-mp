@@ -45,7 +45,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         })
         .collect();
     let [(i_sort, void, sort, list, cmp)] = sorts[..] else {
-        bail!("loadGames: expected one sort, found {} (already applied?)", sorts.len());
+        bail!(
+            "loadGames: expected one sort, found {} (already applied?)",
+            sorts.len()
+        );
     };
     let concats: Vec<(usize, Reg)> = f
         .ops
@@ -157,10 +160,7 @@ mod tests {
         patch_save_order(&mut code);
         let f = &code.functions[p.fi];
         let findex = f.findex;
-        let Opcode::Call2 {
-            fun: sort, ..
-        } = p.sort
-        else {
+        let Opcode::Call2 { fun: sort, .. } = p.sort else {
             unreachable!()
         };
         // ArrayObj length / array fields, as loadGames reads them.
@@ -184,7 +184,10 @@ mod tests {
             })
             .unwrap();
         let cf = &code.functions[fun_index(&code, cmp_fn).unwrap()];
-        let Opcode::Field { field: f_header, .. } = cf.ops[1] else {
+        let Opcode::Field {
+            field: f_header, ..
+        } = cf.ops[1]
+        else {
             panic!("comparator shape")
         };
         let Opcode::Field { field: f_irl, .. } = cf.ops[3] else {
@@ -231,7 +234,9 @@ mod tests {
             g
         };
         let items = |c: &Core, a: &V| -> Vec<V> {
-            let V::I(n) = c.get(a, a_len) else { panic!("len") };
+            let V::I(n) = c.get(a, a_len) else {
+                panic!("len")
+            };
             let raw = c.get(a, a_raw);
             (0..n).map(|k| c.key_get(&raw, &format!("i{k}"))).collect()
         };
@@ -302,7 +307,11 @@ mod tests {
             } else {
                 &["save1", "save3", "autosave", "save2"]
             };
-            assert_eq!(names(&sim.c, &r[ret_r.0 as usize]), want, "save mode {save_mode}");
+            assert_eq!(
+                names(&sim.c, &r[ret_r.0 as usize]),
+                want,
+                "save mode {save_mode}"
+            );
         }
 
         // The vanilla comparator: newer b -> 1 (a after b), older b -> -1, equal 0.
@@ -312,6 +321,5 @@ mod tests {
         assert_eq!(sim.run(cmp_fn, vec![old.clone(), new.clone()]), V::I(1));
         assert_eq!(sim.run(cmp_fn, vec![new.clone(), old.clone()]), V::I(-1));
         assert_eq!(sim.run(cmp_fn, vec![old.clone(), old]), V::I(0));
-
     }
 }
