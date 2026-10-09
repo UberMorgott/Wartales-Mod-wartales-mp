@@ -1226,7 +1226,16 @@ int main(int argc, char **argv) {
 			pr((unsigned char *)line);
 			pr((unsigned char *)nl);
 			pr((unsigned char *)multi);
-			check(calls() == 3, "the original hl_sys_print still runs");
+			// hxbit's network trace: SYNC lines counted, not logged; RPC kept.
+			pr((unsigned char *)L"12.34 [S] SYNC > ent.Roaming:7#8 aggroTime\n");
+			pr((unsigned char *)L"0.06 [C] SYNC < LobbyState#1 players\n12.35 [S] RPC < ent.Roaming:7#8 unlockAction\n");
+			check(calls() == 5, "the original hl_sys_print still runs");
+			check(wait_log(log, "] game: 12.35 [S] RPC < ent.Roaming:7#8 unlockAction\r\n", 5000),
+				"a network trace RPC line is logged, also after a SYNC line of the same message");
+			check(!log_contains(log, "SYNC > ent.Roaming") && !log_contains(log, "SYNC < LobbyState"),
+				"network trace SYNC lines are not logged");
+			check(log_contains(log, "] game: network SYNC trace lines (prefs networkLog) are counted, not logged\r\n"),
+				"the first skipped SYNC line leaves a note");
 			check(wait_log(log, "] game: Called from c.D (c/D.hx line 2)\r\n", 5000),
 				"a multi-line message is split into shim.log lines");
 			check(log_contains(log, "] game: mp: style: boom\r\n") &&

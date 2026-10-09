@@ -400,6 +400,25 @@ static BOOL game_emit(const wchar_t *w, size_t n) {
 	return TRUE;
 }
 
+// hxbit's network trace (on while the game's prefs.sav has networkLog set:
+// Game.enableNetworkLog, and always in the lobby) prints
+// "<secs> [S] SYNC > <object> <fields>" for every replicated field change of
+// every frame (ent.Roaming aggroTime, currentSailSpeed, ...). That per-tick
+// noise filled GAME_LINES_MAX in ~15 min and pushed out every later line, so
+// these lines are counted, not logged (a note on the first, the count at
+// exit); the trace's RPC and register lines are kept.
+static volatile LONG game_sync_skipped;
+
+static BOOL is_net_sync(const wchar_t *w, size_t len) {
+	size_t i = 0;
+	while (i < len && ((w[i] >= L'0' && w[i] <= L'9') || w[i] == L'.'))
+		i++;
+	if (i == 0 || len - i < 10)
+		return FALSE;
+	return w[i] == L' ' && w[i + 1] == L'[' && (w[i + 2] == L'S' || w[i + 2] == L'C') && w[i + 3] == L']' &&
+		wcsncmp(w + i + 4, L" SYNC ", 6) == 0;
+}
+
 static void detour_sys_print(unsigned char *msg) {
 	if (msg != NULL) {
 		const wchar_t *w = (const wchar_t *)msg;
@@ -415,6 +434,11 @@ static void detour_sys_print(unsigned char *msg) {
 			n = end - pos;
 			if (n > 0 && w[pos + n - 1] == L'\r')
 				n--;
+			if (is_net_sync(w + pos, n)) {
+				if (InterlockedIncrement(&game_sync_skipped) == 1)
+					game_line("game: network SYNC trace lines (prefs networkLog) are counted, not logged");
+				n = 0;
+			}
 			while (n > 0 && lines < GAME_MSG_LINES) {
 				size_t take = n > GAME_CHUNK ? GAME_CHUNK : n;
 				// Never split a UTF-16 surrogate pair.
@@ -1275,6 +1299,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
 	(void)reserved;
 	if (reason == DLL_PROCESS_DETACH) {
 		game_flush(TRUE); // the last buffered game lines (writer may be gone)
+		if (game_sync_skipped > 0)
+			shim_log("game: %ld network SYNC trace lines not logged", (long)game_sync_skipped);
 		return TRUE;
 	}
 	if (reason == DLL_PROCESS_ATTACH) {
