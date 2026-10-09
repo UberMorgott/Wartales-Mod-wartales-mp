@@ -42,9 +42,9 @@
 //        left edge, past the HUD docked there (BOX_ATTRS, BOX_MARGIN) gets, per other
 //        connected player j, a panel shaped like the vanilla #inventory one
 //        (`element#inventory` > `.title` (getName: nickname in the player
-//        colour; Close icon) + (styled inline: PANEL_ATTRS / TITLE_ATTRS / ...,
-//        the game-inventory CSS does not reach the HUD root; the title is
-//        the drag handle) +
+//        colour) + Close icon (top right of the panel) + (styled inline:
+//        PANEL_ATTRS / TITLE_ATTRS / ..., the game-inventory CSS does not
+//        reach the HUD root; the header band is the drag handle) +
 //        `inventory-content` with `new ui.comp.Inventory(FoundItems,
 //        p.inventory, 6, content)`), made draggable with
 //        `mpDragPanel(panel, "AllInv#" + j)` (window_drag; positions kept).
@@ -150,31 +150,31 @@ const PANEL_ATTRS: &[(&str, &str)] = &[
     ("cursor", "default"),
     ("background", "url(\"ui/elements/InventoryBg.png\") 50 50"),
 ];
-/// The header row (the drag handle): nickname left, close button right.
-/// `fill-width`: the row spans the panel (the vanilla `.title` is a fixed
-/// `width: 220` with the X on the panel itself), so the X sits at the panel's
-/// right edge and the whole top bar is the drag area.
+/// The header row: the nickname. Like the vanilla `.title` (`width: 220`) it is
+/// content-sized (`fill-width` does nothing in the unconstrained panel), so
+/// the X sits on the panel itself and the drag band is the panel's
+/// (window_drag mpDragPanel), not this row's.
 const TITLE_ATTRS: &[(&str, &str)] = &[
     ("class", "title"),
-    ("fill-width", "true"),
     ("height", "50"),
     ("min-width", "220"),
     ("padding-left", "20"),
-    ("padding-right", "44"),
     ("content-valign", "middle"),
 ];
 const NAME_ATTRS: &[(&str, &str)] = &[
     ("font", "'ui/fonts/eb_garamond_medium.fnt' 19 multi 0.5 0.5"),
     ("color", "#969696"),
 ];
-/// `.window icon.windowClose` + the inventory panel's offset.
+/// `.window icon.windowClose` + the inventory panel's offset, on the panel
+/// (vanilla `game-inventory #inventory icon.windowClose`): top right of the
+/// panel, no scale (vanilla has none: `scale: 0.5` drew it at half the
+/// chest's X in game).
 const CLOSE_ATTRS: &[(&str, &str)] = &[
     ("class", "windowClose"),
     ("networkable", "false"),
     ("position", "absolute"),
     ("align", "top right"),
     ("offset", "-10 15"),
-    ("scale", "0.5"),
     ("cursor", "button"),
 ];
 const ROWS: i32 = 6;
@@ -3208,7 +3208,7 @@ fn add_add_panel(
         p,
         &c,
         ip,
-        tp,
+        pp,
         "icon",
         Some(p.close_g),
         CLOSE_ATTRS,
@@ -5897,9 +5897,12 @@ mod tests {
             .expect("offset string");
         let attrs = sim.get(&bx, ATTRS);
         assert_eq!(sim.get(&attrs, DYN + k_off), V::S("280 -70".into()));
-        let k_fill = (0..code.strings.len())
-            .find(|&i| super::s(&code, RefString(i)) == "fill-width")
-            .expect("fill-width string");
+        let k_str = |name: &str| {
+            (0..code.strings.len())
+                .find(|&i| super::s(&code, RefString(i)) == name)
+                .expect("attribute string")
+        };
+        let (k_align, k_scale) = (k_str("align"), k_str("scale"));
         let mut kids = sim.children(&ui_o);
         assert_eq!(kids.split_off(4), [bx.clone()]);
         sim.set_children(&ui_o, vec![bx.clone()]);
@@ -5929,22 +5932,27 @@ mod tests {
         for (k, pnl) in panels.iter().enumerate() {
             assert_eq!(sim.get(pnl, TAG), s("element"));
             let ch = sim.children(pnl);
-            assert_eq!(ch.len(), 2, "title + inventory-content");
-            assert_eq!(sim.get(&ch[1], TAG), s("inventory-content"));
-            // the header row spans the panel: X at its right edge, all of it drags
-            let t_attrs = sim.get(&ch[0], ATTRS);
-            assert_eq!(sim.get(&t_attrs, DYN + k_fill), s("true"));
+            assert_eq!(
+                ch.iter().map(|o| sim.get(o, TAG)).collect::<Vec<_>>(),
+                [s("flow"), s("icon"), s("inventory-content")],
+                "title, X, inventory-content"
+            );
+            // the X is the panel's (vanilla #inventory): top right of the
+            // panel, not of the 220 px title; full size (no scale)
+            let x_attrs = sim.get(&ch[1], ATTRS);
+            assert_eq!(sim.get(&x_attrs, DYN + k_align), s("top right"));
+            assert_eq!(sim.get(&x_attrs, DYN + k_scale), V::Null);
             let title = sim.children(&ch[0]);
             assert_eq!(
                 title.iter().map(|o| sim.get(o, TAG)).collect::<Vec<_>>(),
-                [s("text-fixed"), s("icon")]
+                [s("text-fixed")]
             );
             // header: the owner's name (getName: nickname in the player colour)
             assert!(sim
                 .log
                 .contains(&("set", vec![title[0].clone(), s("nick")])));
             assert!(
-                matches!(sim.get(&title[1], u.blk.onclick.0), V::Clo(..)),
+                matches!(sim.get(&ch[1], u.blk.onclick.0), V::Clo(..)),
                 "close button"
             );
             let drags: Vec<&V> = sim
