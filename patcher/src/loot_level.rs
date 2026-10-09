@@ -308,28 +308,40 @@ pub(crate) fn patch_champion_gear(code: &mut Bytecode) {
     );
 }
 
-// The battle's guaranteed worn-gear drop goes to the strongest enemy.
+// The battle's guaranteed worn-gear drop goes to a random enemy, stronger ones
+// more likely.
 //
 // The worn-gear loop of genLoot (Debrief.hx:500-544) walks
 // `state.allUnits.array` in array order, and the first dead enemy with an
 // eligible item takes the guaranteed drop (`firstEquip`). The loop now walks a
-// copy of that array sorted strongest first:
+// copy of that array with the dead enemies in a weighted random order:
 //
-//   units = units.copy(); units.sort(lootCmp);   // inserted after the cast
+//   units = units.copy(); lootPick(this, units);   // inserted after the cast
 //
-//   lootCmp(a, b) = lootKey(b) - lootKey(a)
-//   lootKey(u)    = u.data.level * 2 + (class flags & (IsChampion | IsBoss) != 0 ? 1 : 0)
-//                   (-1 for a unit without data)
+//   lootPick:   for s = 0, 1, ...: total = sum of lootWeight(u) over units[s..];
+//               stop if total <= 0; r = game.state.random(total); the unit
+//               where the running sum passes r swaps with units[s]
+//   lootWeight: 0 for a unit without data / owner, of the player side, or alive;
+//               else min(max(level, 1), 100)^2, x2 for a champion / boss class
+//               (flags & (IsChampion | IsBoss))
 //
-// haxe.ds.ArraySort is a stable merge sort, so equal keys keep array order.
+// A weighted draw without replacement: the first unit of the order that has
+// an eligible item (not every dead enemy has one: captured animals,
+// NoEquipDrop creatures, all gear disableLoot) is drawn with odds
+// proportional to its weight among the eligible ones. So with levels 10 and
+// 12 the odds are 100 : 144, a champion of the same level doubles its share.
+// The draws use the host's game RNG (GameState.random, the call genLoot
+// already makes for the item, Debrief.hx:535; one call per dead enemy): no new
+// seed, and the loot is still generated only on the host. The item inside the
+// enemy is vanilla: a uniform `random(candidates.length)` over its worn items
+// that pass the candidate closures (feature, disableLoot data flag). The
+// level cap keeps the sum far below GameState.random's 2^30 range.
 //
 // A ForceDropWeapon class (named bosses) drops its weapon and vanilla then
 // clears `firstEquip`, so the forced weapon used up the guarantee whenever the
-// boss came first. Sorted, the boss nearly always comes first, so that `Mov
-// firstEquip = false` becomes a Nop: the forced weapon no longer counts as the
-// guaranteed worn-gear drop, which goes to the strongest enemy with an
-// eligible item (the boss itself or the next one); the others roll after it
-// strongest first. The guaranteed drop is still at most one per battle.
+// boss came first. That `Mov firstEquip = false` becomes a Nop: the forced
+// weapon no longer counts as the guaranteed worn-gear drop. The guaranteed
+// drop is still at most one per battle.
 //
 // The rest of the loop body per dead enemy (its loot-table rolls, Outlaws
 // gold) is unchanged; it runs in the new order, so the RNG calls interleave
@@ -345,11 +357,15 @@ struct OrderPlan {
     at: usize,
     units: Reg,
     copy: RefFun,
-    sort: RefFun,
-    cmp_t: RefType,
+    debrief_t: RefType,
+    arr_t: RefType,
+    /// ArrayObj.length / ArrayObj.array.
+    len: RefField,
+    raw: (RefField, RefType),
     dyn_t: RefType,
     i32_t: RefType,
     void_t: RefType,
+    bool_t: RefType,
     unit_t: RefType,
     data: (RefField, RefType),
     level: RefField,
@@ -357,6 +373,16 @@ struct OrderPlan {
     class_t: RefType,
     props: (RefField, RefType),
     flags: (RefField, RefType),
+    is_alive: RefFun,
+    owner: (RefField, RefType),
+    side: (RefField, RefType),
+    /// Debrief.state (battle.State) and its playerSide.
+    bstate: (RefField, RefType),
+    player_side: RefField,
+    /// Debrief.game, Game.state (st.GameState) and GameState.random.
+    game: (RefField, RefType),
+    gstate: (RefField, RefType),
+    random: RefFun,
     dbg: (usize, usize),
     /// The Mov firstEquip = false after a ForceDropWeapon drop.
     forced: usize,
@@ -394,23 +420,26 @@ fn loop_site(code: &Bytecode, gen: &Function) -> Result<(usize, Reg)> {
 }
 
 fn order_plan(code: &Bytecode) -> Result<OrderPlan> {
-    let gen = method(code, obj_type(code, "battle.Debrief")?, "genLoot")?;
+    let debrief_t = obj_type(code, "battle.Debrief")?;
+    let gen = method(code, debrief_t, "genLoot")?;
     let fi = fun_index(code, gen.findex)?;
+    if gen.regs.first() != Some(&debrief_t) {
+        bail!("genLoot: reg0 is not battle.Debrief");
+    }
     let unit_t = obj_type(code, "battle.Unit")?;
     let arr_t = obj_type(code, "hl.types.ArrayObj")?;
     let copy = method(code, arr_t, "copy")?.findex;
-    let sort = method(code, arr_t, "sort")?.findex;
-    let (sort_args, _) = sig(code, sort)?;
-    let [_, cmp_t] = sort_args[..] else { bail!("ArrayObj.sort: unexpected arguments") };
     let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
     let i32_t = prim_type(code, "i32", |t| matches!(t, Type::I32))?;
     let void_t = prim_type(code, "void", |t| matches!(t, Type::Void))?;
-    match &code.types[cmp_t.0] {
-        Type::Fun(TypeFun { args, ret }) if args[..] == [dyn_t, dyn_t] && *ret == i32_t => {}
-        _ => bail!("ArrayObj.sort: comparator is not (dynamic, dynamic) -> i32"),
-    }
+    let bool_t = prim_type(code, "bool", |t| matches!(t, Type::Bool))?;
     if sig(code, copy)?.1 != arr_t {
         bail!("ArrayObj.copy does not return ArrayObj");
+    }
+    let (len, len_t) = field(code, arr_t, "length")?;
+    let raw = field(code, arr_t, "array")?;
+    if len_t != i32_t || !matches!(code.types[raw.1.0], Type::Array) {
+        bail!("ArrayObj.length / array have unexpected types");
     }
     let su_t = obj_type(code, "st.Unit")?;
     let data = field(code, unit_t, "data")?;
@@ -421,13 +450,51 @@ fn order_plan(code: &Bytecode) -> Result<OrderPlan> {
     if level_t != i32_t {
         bail!("st.Unit.level is not i32");
     }
-    let gc = method(code, su_t, "getClass")?;
-    let get_class = gc.findex;
+    let get_class = method(code, su_t, "getClass")?.findex;
     let class_t = sig(code, get_class)?.1;
     let props = field_of_virtual(code, class_t, "props")?;
     let flags = field_of_virtual(code, props.1, "flags")?;
     if !matches!(code.types[flags.1.0], Type::Null(t) if t == i32_t) {
         bail!("class props.flags is not null<i32>");
+    }
+    let is_alive = method(code, unit_t, "isAlive")?.findex;
+    if sig(code, is_alive)? != (vec![unit_t], bool_t) {
+        bail!("battle.Unit.isAlive is not (Unit) -> bool");
+    }
+    let owner = field(code, unit_t, "owner")?;
+    let side = field(code, owner.1, "side")?;
+    let bstate = field(code, debrief_t, "state")?;
+    let (player_side, ps_t) = field(code, bstate.1, "playerSide")?;
+    if ps_t != side.1 {
+        bail!("battle.State.playerSide and Player.side differ in type");
+    }
+    let game = field(code, debrief_t, "game")?;
+    let gstate = field(code, game.1, "state")?;
+    let random = method(code, gstate.1, "random")?.findex;
+    if sig(code, random)? != (vec![gstate.1, i32_t], i32_t) {
+        bail!("GameState.random is not (GameState, i32) -> i32");
+    }
+    // genLoot itself reads every one of these fields with these types.
+    let reads = |f: RefField, t: RefType| {
+        gen.ops.iter().any(|o| match *o {
+            Opcode::Field { dst, field, .. } | Opcode::GetThis { dst, field } => {
+                field == f && gen.regs[dst.0 as usize] == t
+            }
+            _ => false,
+        })
+    };
+    for (name, f, t) in [
+        ("owner", owner.0, owner.1),
+        ("side", side.0, side.1),
+        ("state", bstate.0, bstate.1),
+        ("playerSide", player_side, side.1),
+        ("game", game.0, game.1),
+        ("game.state", gstate.0, gstate.1),
+        ("data", data.0, data.1),
+    ] {
+        if !reads(f, t) {
+            bail!("genLoot does not read field {name} as expected");
+        }
     }
 
     let (at, units) = loop_site(code, gen)?;
@@ -459,11 +526,14 @@ fn order_plan(code: &Bytecode) -> Result<OrderPlan> {
         at,
         units,
         copy,
-        sort,
-        cmp_t,
+        debrief_t,
+        arr_t,
+        len,
+        raw,
         dyn_t,
         i32_t,
         void_t,
+        bool_t,
         unit_t,
         data,
         level,
@@ -471,38 +541,64 @@ fn order_plan(code: &Bytecode) -> Result<OrderPlan> {
         class_t,
         props,
         flags,
+        is_alive,
+        owner,
+        side,
+        bstate,
+        player_side,
+        game,
+        gstate,
+        random,
         dbg,
         forced,
     })
 }
 
 fn order_apply(code: &mut Bytecode, p: OrderPlan) -> Result<()> {
-    // lootKey(u: dynamic) -> i32
-    let mut r = asm::Regs(vec![p.dyn_t]);
-    let (u, d, k, c, pr, fl, t, m) = (
-        r.r(p.unit_t),
+    let zero = int_const(code, 0);
+    let one = int_const(code, 1);
+    let mask = int_const(code, RANK_MASK);
+    let cap = int_const(code, 100);
+
+    // lootWeight(bs: battle.State, u: battle.Unit) -> i32
+    let mut r = asm::Regs(vec![p.bstate.1, p.unit_t]);
+    let (bs, u) = (Reg(0), Reg(1));
+    let (d, o, s1, s2, b, k, m, c, pr, fl, t) = (
         r.r(p.data.1),
+        r.r(p.owner.1),
+        r.r(p.side.1),
+        r.r(p.side.1),
+        r.r(p.bool_t),
+        r.r(p.i32_t),
         r.r(p.i32_t),
         r.r(p.class_t),
         r.r(p.props.1),
         r.r(p.flags.1),
         r.r(p.i32_t),
-        r.r(p.i32_t),
     );
-    let minus1 = int_const(code, -1);
-    let one = int_const(code, 1);
-    let mask = int_const(code, RANK_MASK);
-    let zero = int_const(code, 0);
     let mut a = asm::Asm::new();
-    a.op(Opcode::SafeCast { dst: u, src: Reg(0) });
     a.jmp(Opcode::JNull { reg: u, offset: 0 }, "none");
     a.op(Opcode::Field { dst: d, obj: u, field: p.data.0 });
     a.jmp(Opcode::JNull { reg: d, offset: 0 }, "none");
-    // k = level * 2
+    a.op(Opcode::Field { dst: o, obj: u, field: p.owner.0 });
+    a.jmp(Opcode::JNull { reg: o, offset: 0 }, "none");
+    a.op(Opcode::Field { dst: s1, obj: o, field: p.side.0 });
+    a.op(Opcode::Field { dst: s2, obj: bs, field: p.player_side });
+    a.jmp(Opcode::JEq { a: s1, b: s2, offset: 0 }, "none");
+    a.op(Opcode::Call1 { dst: b, fun: p.is_alive, arg0: u });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "none");
+    // k = min(max(level, 1), 100)^2
     a.op(Opcode::Field { dst: k, obj: d, field: p.level });
     a.op(Opcode::Int { dst: m, ptr: one });
-    a.op(Opcode::Shl { dst: k, a: k, b: m });
-    // + 1 for a champion / boss class
+    a.jmp(Opcode::JSGte { a: k, b: m, offset: 0 }, "cap");
+    a.op(Opcode::Mov { dst: k, src: m });
+    a.label("cap");
+    a.op(Opcode::Int { dst: m, ptr: cap });
+    a.jmp(Opcode::JSLte { a: k, b: m, offset: 0 }, "sq");
+    a.op(Opcode::Mov { dst: k, src: m });
+    a.label("sq");
+    a.op(Opcode::Mul { dst: k, a: k, b: k });
+    // x2 for a champion / boss class
     a.op(Opcode::Call1 { dst: c, fun: p.get_class, arg0: d });
     a.jmp(Opcode::JNull { reg: c, offset: 0 }, "ret");
     a.op(Opcode::Field { dst: pr, obj: c, field: p.props.0 });
@@ -514,54 +610,101 @@ fn order_apply(code: &mut Bytecode, p: OrderPlan) -> Result<()> {
     a.op(Opcode::And { dst: t, a: t, b: m });
     a.op(Opcode::Int { dst: m, ptr: zero });
     a.jmp(Opcode::JEq { a: t, b: m, offset: 0 }, "ret");
-    a.op(Opcode::Incr { dst: k });
+    a.op(Opcode::Int { dst: m, ptr: one });
+    a.op(Opcode::Shl { dst: k, a: k, b: m });
     a.label("ret");
     a.op(Opcode::Ret { ret: k });
     a.label("none");
-    a.op(Opcode::Int { dst: k, ptr: minus1 });
+    a.op(Opcode::Int { dst: k, ptr: zero });
     a.op(Opcode::Ret { ret: k });
-    let key_fn = asm::push_fn(code, vec![p.dyn_t], p.i32_t, r.0, a.finish(), p.dbg.0)?;
+    let weight_fn = asm::push_fn(code, vec![p.bstate.1, p.unit_t], p.i32_t, r.0, a.finish(), p.dbg.0)?;
 
-    // lootCmp(a: dynamic, b: dynamic) -> i32 = lootKey(b) - lootKey(a), typed as
-    // ArrayObj.sort's comparator.
-    let cmp_fn = next_findex(code)?;
-    code.functions.push(Function {
-        name: hlbc::types::RefString(0),
-        t: p.cmp_t,
-        findex: cmp_fn,
-        regs: vec![p.dyn_t, p.dyn_t, p.i32_t, p.i32_t],
-        ops: vec![
-            Opcode::Call1 { dst: Reg(2), fun: key_fn, arg0: Reg(0) },
-            Opcode::Call1 { dst: Reg(3), fun: key_fn, arg0: Reg(1) },
-            Opcode::Sub { dst: Reg(2), a: Reg(3), b: Reg(2) },
-            Opcode::Ret { ret: Reg(2) },
-        ],
-        debug_info: Some(vec![p.dbg; 4]),
-        assigns: Some(vec![]),
-        parent: None,
-    });
+    // lootPick(this: battle.Debrief, units: ArrayObj) -> void
+    let mut r = asm::Regs(vec![p.debrief_t, p.arr_t]);
+    let (this, units) = (Reg(0), Reg(1));
+    let (bs, g, gs, raw, n, i, total, w, x, z, dv, u, first, v, st) = (
+        r.r(p.bstate.1),
+        r.r(p.game.1),
+        r.r(p.gstate.1),
+        r.r(p.raw.1),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.i32_t),
+        r.r(p.dyn_t),
+        r.r(p.unit_t),
+        r.r(p.dyn_t),
+        r.r(p.void_t),
+        r.r(p.i32_t),
+    );
+    let mut a = asm::Asm::new();
+    a.jmp(Opcode::JNull { reg: units, offset: 0 }, "end");
+    a.op(Opcode::Field { dst: bs, obj: this, field: p.bstate.0 });
+    a.jmp(Opcode::JNull { reg: bs, offset: 0 }, "end");
+    a.op(Opcode::Field { dst: g, obj: this, field: p.game.0 });
+    a.jmp(Opcode::JNull { reg: g, offset: 0 }, "end");
+    a.op(Opcode::Field { dst: gs, obj: g, field: p.gstate.0 });
+    a.jmp(Opcode::JNull { reg: gs, offset: 0 }, "end");
+    a.op(Opcode::Field { dst: n, obj: units, field: p.len });
+    a.op(Opcode::Field { dst: raw, obj: units, field: p.raw.0 });
+    a.op(Opcode::Int { dst: z, ptr: zero });
+    a.op(Opcode::Int { dst: st, ptr: zero });
+    // slot st: a weighted draw from units[st..]
+    a.loop_head("next");
+    a.op(Opcode::Int { dst: total, ptr: zero });
+    a.op(Opcode::Mov { dst: i, src: st });
+    a.loop_head("sum");
+    a.jmp(Opcode::JSGte { a: i, b: n, offset: 0 }, "pick");
+    a.op(Opcode::GetArray { dst: dv, array: raw, index: i });
+    a.op(Opcode::UnsafeCast { dst: u, src: dv });
+    a.op(Opcode::Call2 { dst: w, fun: weight_fn, arg0: bs, arg1: u });
+    a.op(Opcode::Add { dst: total, a: total, b: w });
+    a.op(Opcode::Incr { dst: i });
+    a.jmp(Opcode::JAlways { offset: 0 }, "sum");
+    a.label("pick");
+    a.jmp(Opcode::JSLte { a: total, b: z, offset: 0 }, "end");
+    a.op(Opcode::Call2 { dst: x, fun: p.random, arg0: gs, arg1: total });
+    a.op(Opcode::Mov { dst: i, src: st });
+    a.loop_head("find");
+    a.jmp(Opcode::JSGte { a: i, b: n, offset: 0 }, "end");
+    a.op(Opcode::GetArray { dst: dv, array: raw, index: i });
+    a.op(Opcode::UnsafeCast { dst: u, src: dv });
+    a.op(Opcode::Call2 { dst: w, fun: weight_fn, arg0: bs, arg1: u });
+    a.op(Opcode::Sub { dst: x, a: x, b: w });
+    a.jmp(Opcode::JSLt { a: x, b: z, offset: 0 }, "swap");
+    a.op(Opcode::Incr { dst: i });
+    a.jmp(Opcode::JAlways { offset: 0 }, "find");
+    a.label("swap");
+    a.op(Opcode::GetArray { dst: first, array: raw, index: st });
+    a.op(Opcode::SetArray { array: raw, index: i, src: first });
+    a.op(Opcode::SetArray { array: raw, index: st, src: dv });
+    a.op(Opcode::Incr { dst: st });
+    a.jmp(Opcode::JAlways { offset: 0 }, "next");
+    a.label("end");
+    a.op(Opcode::Ret { ret: v });
+    let pick_fn = asm::push_fn(code, vec![p.debrief_t, p.arr_t], p.void_t, r.0, a.finish(), p.dbg.0)?;
 
     let f = &mut code.functions[p.fi];
     f.ops[p.forced + 1] = Opcode::Nop;
-    let rc = new_reg(f, p.cmp_t);
     let rv = new_reg(f, p.void_t);
     insert_ops(
         f,
         p.at,
         vec![
             Opcode::Call1 { dst: p.units, fun: p.copy, arg0: p.units },
-            Opcode::StaticClosure { dst: rc, fun: cmp_fn },
-            Opcode::Call2 { dst: rv, fun: p.sort, arg0: p.units, arg1: rc },
+            Opcode::Call2 { dst: rv, fun: pick_fn, arg0: Reg(0), arg1: p.units },
         ],
     );
     eprintln!(
-        "patched loot order fn@{}: the guaranteed worn-gear drop goes to the strongest enemy",
+        "patched loot order fn@{}: the guaranteed worn-gear drop goes to a random enemy, stronger ones more likely",
         f.findex.0
     );
     Ok(())
 }
 
-/// Walks genLoot's worn-gear loop strongest enemy first, or leaves `code` untouched and logs why.
+/// Puts a strength-weighted random dead enemy first in genLoot's worn-gear loop, or leaves `code` untouched and logs why.
 pub(crate) fn patch_loot_order(code: &mut Bytecode) {
     let p = match order_plan(code) {
         Ok(p) => p,
@@ -906,7 +1049,7 @@ mod tests {
         let Some(image) = game() else { return };
         let orig = read(&image);
         let p = order_plan(&orig).expect("plan");
-        let (fi, at, copy, sort) = (p.fi, p.at, p.copy, p.sort);
+        let (fi, at, copy) = (p.fi, p.at, p.copy);
         let mut code = read(&image);
         patch_loot_order(&mut code);
         let mut patched = Vec::new();
@@ -920,23 +1063,22 @@ mod tests {
             assert_eq!(same, i != fi, "function #{i} (fn@{})", a.findex.0);
         }
         let (a, b) = (&orig.functions[fi], &back.functions[fi]);
-        // The forced-weapon Mov became a Nop (index past the 3 inserted ops).
+        // The forced-weapon Mov became a Nop (index past the 2 inserted ops).
         let mut b = b.clone();
-        assert!(matches!(b.ops[p.forced + 1 + 3], Opcode::Nop));
-        b.ops[p.forced + 1 + 3] = a.ops[p.forced + 1].clone();
+        assert!(matches!(b.ops[p.forced + 1 + 2], Opcode::Nop));
+        b.ops[p.forced + 1 + 2] = a.ops[p.forced + 1].clone();
         let b = &b;
-        shifted(a, b, at, 3);
+        shifted(a, b, at, 2);
         check_flow(b);
-        check_types(&back, b, at..at + 3);
+        check_types(&back, b, at..at + 2);
         assert!(matches!(b.ops[at], Opcode::Call1 { fun, .. } if fun == copy));
-        assert!(matches!(b.ops[at + 2], Opcode::Call2 { fun, .. } if fun == sort));
-        let Opcode::StaticClosure { fun: cmp, .. } = b.ops[at + 1] else { panic!("closure") };
+        let Opcode::Call2 { fun: pick, arg0: Reg(0), arg1, .. } = b.ops[at + 1] else { panic!("pick call") };
+        assert_eq!(arg1, p.units);
         for f in &back.functions[n..] {
             check_flow(f);
             check_types(&back, f, 0..f.ops.len());
         }
-        let cmp_f = &back.functions[n + 1];
-        assert_eq!(cmp_f.findex, cmp);
+        assert_eq!(back.functions[n + 1].findex, pick);
 
         let mut again = read(&patched);
         assert!(order_plan(&again).is_err());
@@ -946,6 +1088,116 @@ mod tests {
         assert!(twice == patched);
     }
 
+    /// lootPick run in the interpreter for every value the first RNG draw can
+    /// return (later draws return 0): the order matches a weighted draw without
+    /// replacement, the first slot has odds = level^2 (x2 champion / boss),
+    /// and units of weight 0 (the player's, alive) stay behind, untouched.
+    #[test]
+    fn loot_pick_sim() {
+        use crate::testsim::{Core, Sim, V};
+        let Some(image) = game() else { return };
+        let mut code = read(&image);
+        let p = order_plan(&code).expect("plan");
+        let n = code.functions.len();
+        patch_loot_order(&mut code);
+        let pick = code.functions[n + 1].findex;
+        let (is_alive, get_class, random) = (p.is_alive, p.get_class, p.random);
+        let mut sim = Sim::new(
+            &code,
+            n,
+            move |c, f, a| {
+                if f == is_alive {
+                    Some(V::B(c.key_get(&a[0], "alive") == V::B(true)))
+                } else if f == get_class {
+                    Some(c.key_get(&a[0], "cls"))
+                } else if f == random {
+                    c.log.push(("random", a.to_vec()));
+                    let r = c.map("rng", "r");
+                    c.put("rng", "r", V::I(0));
+                    Some(r)
+                } else {
+                    None
+                }
+            },
+            |_, _, _| panic!("no virtual calls"),
+        );
+        let c = &mut sim.c;
+        let (ps, es) = (c.obj(&[]), c.obj(&[]));
+        let bstate = c.obj(&[(p.player_side, ps.clone())]);
+        let gstate = c.obj(&[]);
+        let gm = c.obj(&[(p.gstate.0, gstate.clone())]);
+        let debrief = c.obj(&[(p.bstate.0, bstate), (p.game.0, gm)]);
+        let unit = |c: &mut Core, side: &V, level: i32, flags: i32, alive: bool| {
+            let props = c.obj(&[(p.flags.0, V::I(flags))]);
+            let cls = c.obj(&[(p.props.0, props)]);
+            let data = c.obj(&[(p.level, V::I(level))]);
+            c.key_set(&data, "cls".into(), cls);
+            let owner = c.obj(&[(p.side.0, side.clone())]);
+            let u = c.obj(&[(p.data.0, data), (p.owner.0, owner)]);
+            c.key_set(&u, "alive".into(), V::B(alive));
+            u
+        };
+        let units = vec![
+            unit(c, &ps, 30, 0, false),       // the player's: 0
+            unit(c, &es, 10, 0, false),       // 100
+            unit(c, &es, 12, 0, false),       // 144
+            unit(c, &es, 20, 1 << 3, true),   // alive: 0
+            unit(c, &es, 10, 1 << 23, false), // boss: 200
+            unit(c, &es, 0, 0, false),        // level 0 counts as 1: 1
+            unit(c, &es, 9, 1 << 3, false),   // champion: 162
+        ];
+        let w = [0, 100, 144, 0, 200, 1, 162];
+        // The same draw in Rust: (order, totals passed to random).
+        let model = |mut r: i32| {
+            let mut idx: Vec<usize> = (0..w.len()).collect();
+            let mut totals = vec![];
+            for s in 0..w.len() {
+                let total: i32 = idx[s..].iter().map(|&k| w[k]).sum();
+                if total <= 0 {
+                    break;
+                }
+                totals.push(total);
+                let mut i = s;
+                loop {
+                    r -= w[idx[i]];
+                    if r < 0 {
+                        break;
+                    }
+                    i += 1;
+                }
+                idx.swap(s, i);
+                r = 0;
+            }
+            (idx, totals)
+        };
+        let total: i32 = w.iter().sum();
+        let mut hits = vec![0; units.len()];
+        for r in 0..total {
+            sim.c.put("rng", "r", V::I(r));
+            let arr = sim.c.arr(p.len, p.raw.0, units.clone());
+            sim.call(pick, vec![debrief.clone(), arr.clone()]);
+            let (order, totals) = model(r);
+            let calls: Vec<Vec<V>> = totals.iter().map(|&t| vec![gstate.clone(), V::I(t)]).collect();
+            assert_eq!(sim.c.take("random"), calls, "r = {r}");
+            assert_eq!(totals.len(), 5, "one draw per dead enemy");
+            let raw = sim.c.get(&arr, p.raw.0);
+            let got: Vec<V> = (0..units.len()).map(|k| sim.c.key_get(&raw, &format!("i{k}"))).collect();
+            let want: Vec<V> = order.iter().map(|&k| units[k].clone()).collect();
+            assert_eq!(got, want, "r = {r}");
+            assert!(got[5..].iter().all(|u| *u == units[0] || *u == units[3]), "r = {r}");
+            hits[order[0]] += 1;
+        }
+        assert_eq!(hits, w.to_vec());
+        // Level capped at 100 (no i32 overflow), and no dead enemy: no draw.
+        let big = unit(&mut sim.c, &es, 1_000_000, 1 << 3, false);
+        sim.c.put("rng", "r", V::I(0));
+        let arr = sim.c.arr(p.len, p.raw.0, vec![units[0].clone(), big]);
+        sim.call(pick, vec![debrief.clone(), arr]);
+        assert_eq!(sim.c.take("random"), vec![vec![gstate.clone(), V::I(20_000)]]);
+        let arr = sim.c.arr(p.len, p.raw.0, vec![units[0].clone(), units[3].clone()]);
+        sim.call(pick, vec![debrief.clone(), arr]);
+        assert!(sim.c.take("random").is_empty());
+    }
     #[test]
     fn champion_gear_installed_game() {
         let Some(image) = game() else { return };

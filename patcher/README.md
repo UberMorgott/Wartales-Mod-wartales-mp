@@ -184,17 +184,22 @@ closure; ForceDropWeapon, chance and pity counter unchanged.
 
 **Loot order** (same file, `patch_loot_order`): genLoot's worn-gear loop
 (Debrief.hx:500-544) walked `state.allUnits.array` in array order, so the
-first dead enemy with an eligible item took the guaranteed drop. Three ops
-after the loop's array cast make it walk a sorted copy: `units =
-units.copy(); units.sort(lootCmp)`, with two appended functions, `lootCmp(a,
-b) = lootKey(b) - lootKey(a)` (typed as ArrayObj.sort's comparator) and
-`lootKey(u) = level * 2 + (class IsChampion | IsBoss ? 1 : 0)` (-1 without
-data). haxe.ds.ArraySort is stable, so ties keep array order. The boss now
-nearly always comes first, and vanilla's `firstEquip = false` after a
-ForceDropWeapon drop would then eat the guarantee, so that Mov becomes a Nop:
+first dead enemy with an eligible item took the guaranteed drop. Two ops
+after the loop's array cast make it walk a copy with the dead enemies in a
+strength-weighted random order: `units = units.copy(); lootPick(this,
+units)`. Appended `lootWeight(state, u)` is 0 for a unit without data /
+owner, of the player side or alive, else `min(max(level, 1), 100)^2`,
+doubled for a class with IsChampion | IsBoss; `lootPick`, for each slot s,
+sums the weights of `units[s..]`, stops at 0, draws
+`r = game.state.random(total)` (the host RNG genLoot already uses for the
+item, Debrief.hx:535) and swaps the unit where the running sum passes `r`
+with slot s. A draw without replacement: the first enemy with an eligible
+item (captured animals, NoEquipDrop creatures and all-disableLoot gear have
+none) is weight-proportional among the eligible ones. The item inside that
+enemy stays vanilla (uniform over the candidates). Vanilla's `firstEquip = false` after a ForceDropWeapon drop
+would eat the guarantee when the boss is first, so that Mov becomes a Nop:
 the forced weapon no longer counts as the guaranteed worn-gear drop. The
-per-enemy loot-table rolls run in the new order (independent odds);
-state.allUnits is untouched.
+per-enemy loot-table rolls run in the new order (independent odds);state.allUnits is untouched.
 
 **Loot pity** (same file, `patch_loot_pity`): the extra worn-gear roll's
 chance (`0.08 + bonuses + equipLootProba * 0.03`, ops 654-700) is multiplied
