@@ -29,6 +29,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Post-battle loot with a damaged or injured squad: the screen no longer tears itself down and rebuilds every frame while the "repair all" / "cure all" availability changes, which could leave loot items and **Take all** dead (hover sound repeating, clicks lost). The buttons now just turn on and off. *(Vanilla bug.)*
 - A co-op load no longer waits forever for a player who disconnected before they were ready to start, and a reconnecting player is no longer counted twice. *(Vanilla bug.)*
 - Loading a save, restarting a battle or reloading from the pause menu in a co-op game no longer hangs on the loading screen when some players of the save are not in the session: the host keeps the lobby's list of absent players across the reload. *(Vanilla bug.)*
+- When the host loads a save inside a running co-op session, the other players no longer hang on an endless loading screen: the mod keeps the Steam connection to each player open while the game restarts its own session, so the reload also works on slow or unstable networks.
 - A player who reconnects during a battle no longer stays on the loading screen forever: the host replays the battle's start to that player. *(Vanilla bug.)*
 - A guest no longer freezes at the end of a battle after rejoining it mid-battle.
 - A player who leaves during a battle no longer blocks it: the host can play that player's units (also a turn they had already begun) until they come back; the units stay theirs and they take them over again when they rejoin. *(Vanilla bug.)*
@@ -71,6 +72,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 ### Gameplay and interface
 
+- The load list shows the kind of each save next to its name: (Autosave), (Quicksave) or (Manual), so auto, quick and manual saves of one campaign no longer look alike.
 - Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do.
 - Switching a unit's profession keeps the experience earned in the old one, and applies at once without the confirm window.
 - Hold-to-confirm rings fill three times faster.
