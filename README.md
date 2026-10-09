@@ -8,7 +8,7 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 
 ## What it does
 
-Everything below is in the one **winmm.dll**. The game patches are applied in memory when the game starts; the game files on disk are not changed. Each patch first checks that the game code looks as expected: on a different game build that patch silently stays off and everything else keeps working.
+Everything below is in the one **winmm.dll**. The game patches are applied in memory when the game starts; the game files on disk are not changed. Each patch first checks that the game code looks as expected: if any patch does not match (a different game build), none of them is applied and the game runs its original code, while the connection part of the mod (Steam transport, join by code, helper) still works.
 
 ### Network and lobby
 

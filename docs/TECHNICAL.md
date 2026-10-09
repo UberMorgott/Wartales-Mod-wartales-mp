@@ -287,11 +287,13 @@ needs no patch for it.
    game) creates a hidden unit's lobby entry with `p = getUser().id`, so
    `allUnitsAssigned` and `makeGroups` see the host as owner. Both walk the
    same createTroop order, so host and clients hide the same units; troops of
-   five or fewer are unchanged. On an op mismatch only this fix is skipped. Host and client load the same
+   five or fewer are unchanged. Host and client load the same
    `winmm.dll`, so both sides compute the same targets. It locates everything by name; if it
    cannot (another game build), it reports why in `shim.log`
-   (`tips: not applied: …`) and the copy stays the byte-patched image, so the
-   multiplayer part is never affected by it.
+   (`tips: not applied: …`). The stages are all-or-nothing (`materialise_copy`
+   in `shim/proxy/proxy.c`): if the byte patches or this stage do not match,
+   none of the patches is applied and the game loads its original bytecode;
+   the connection part (Steam transport hooks, join by code, helper) still works.
 5. **Moves the game's Steam transport onto SDR.** The game's Steam path is
    built on the deprecated `ISteamNetworking` P2P calls in `steam.hdll`. The
    mod hooks those six calls and re-implements them on
