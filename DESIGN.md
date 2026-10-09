@@ -225,7 +225,7 @@ SteamID, `resolveShortCode` → `join` → пуши `lobby/join`/`lobby/chat` ч
 | `send_p2p_packet(uid, data, len, type, ch)` | `SendMessageToUser(identity(SteamID64 из 8 байт uid), data, len, flags, ch)`; `type` 0→`Unreliable`, 1→`Unreliable\|NoDelay\|NoNagle`, 2→`Reliable\|NoNagle`, 3→`Reliable`; всегда `+AutoRestartBrokenSession`; `true` ⇔ `k_EResultOK` |
 | `is_p2p_packet_available(&size, ch)` | докачивает `ReceiveMessagesOnChannel(ch)` в свою FIFO канала и сообщает размер ГОЛОВЫ очереди |
 | `read_p2p_packet(buf, max, &len, ch)` | снимает голову очереди, копирует `min(size, max)` (усечение как в `ReadP2PPacket`, хвост пропадает вместе с пакетом), `len` = скопировано, возвращает SteamID64 отправителя как свежие 8 байт (`hl_copy_bytes`), `Release` сообщения |
-| `accept_p2p_session` / `close_p2p_session` | `AcceptSessionWithUser` / `CloseSessionWithUser`; close сразу выкидывает из очередей всё от этого пира (сперва докачав всё, что держит Steam), а сам `CloseSessionWithUser` откладывается на 1–2 с (см. ниже) |
+| `accept_p2p_session` / `close_p2p_session` | `AcceptSessionWithUser` / —; close выкидывает из очередей всё от этого пира (сперва докачав всё, что держит Steam), а сессию Steam **не закрывает** (см. ниже) |
 | `get_p2p_session_data` | `null` («сессии нет»); игра его не вызывает |
 
 Входящие сессии: игра принимает их по легаси-колбэку `P2PSessionRequest_t`, который у нового
@@ -274,13 +274,23 @@ SteamID, `resolveShortCode` → `join` → пуши `lobby/join`/`lobby/chat` ч
 очереди канала не осталось настоящих сообщений пира. `close_p2p_session` игры снимает взвод.
 Новый `sid` от пира — новая сессия. В логе: `sdr: session with <id> lost (...)`,
 `sdr: peer lost, injected close for <id> sid <n> on channel <c>`, затем обычное `closed`.
-Отложенный close: у `ISteamNetworkingMessages` нет linger — `CloseSessionWithUser` по
-`isteamnetworkingmessages.h` «immediately free up resources» (linger, `bEnableLinger`, есть только
-у `ISteamNetworkingSockets::CloseConnection`, хэндла соединения Messages не даёт); hlsteam
-`closeSession@55467` откладывает натив лишь на 100 мс (`haxe.Timer.delay`). Поэтому шим зовёт
-`CloseSessionWithUser` из диагностического потока через 1–2 с; отправка тому же пиру в этом
-окне отменяет отложенное закрытие. Проверено shimcheck (подставная `steam_api64.dll`:
-`fake_set_session_state`). Сторожевой таймер в байткоде (клиент в затемнении `doLeaveMode` без
+`CloseSessionWithUser` шим не зовёт вовсе. Загрузка сейва хостом посреди сессии — тот же
+`SteamService.stop` (код 8 + `closeSession`) для каждого гостя, что и настоящий уход, затем новый
+сервер, и гости тут же перезаходят (код 3 с новым `sid` → Join → ReadyToStart); отличить одно от
+другого в нативе нечем, и не нужно: игровую сессию уже закончил код 8. Закрытие сессии Steam
+только заставляло гостя поднимать новую SDR-сессию, а у игроков в РФ (ТСПУ/DPI: потери, зависания,
+медленная или заблокированная установка новых соединений) она может не подняться вовсе, тогда как
+старая живёт: 3 из 3 перезагрузок вчетвером висели на ready-start, где закрытие срабатывало
+(раньше close откладывался на 1 с и отменялся трафиком; хост грузится дольше). Сессию, которой
+никто не пользуется, Steam снимает сам через несколько минут (`isteamnetworkingmessages.h`), а
+смерть процесса пира видна как раньше (4 / 5 / −3 → вброс). Чтобы две стороны, обе отпустившие
+сессию, не перекидывались кодом 8 вечно (`onUserData@54888` отвечает кодом 8 на пакет неизвестного
+пользователя), шим после `close_p2p_session` отбрасывает входящий код 8 с `sid` закрытой сессии;
+поздний пакет закрытой сессии доходит до игры, но не взводит пира заново; новый `sid` взводит.
+Закрытая сессия — та, чей `sid` был в последнем исходящем коде 8 игры этому пиру: hlsteam
+закрывает через 100 мс после `stop()`, а `onUserData` останавливает старую службу уже по коду 3
+нового захода — пакеты и взвод нового `sid` закрытие не трогает. Без кода 8 — всё от пира, как раньше.
+Проверено shimcheck (подставная `steam_api64.dll`: `fake_set_session_state`). Сторожевой таймер в байткоде (клиент в затемнении `doLeaveMode` без
 `doEnterMode`) не сделан — отложен до живой проверки, хватит ли вброса.
 
 Диагностика (не зависит от колбэков): поток раз в секунду опрашивает

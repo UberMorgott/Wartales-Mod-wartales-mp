@@ -10,7 +10,8 @@
 // traffic: every one of those natives is diverted here, permanently, and
 // re-implemented on the modern ISteamNetworkingMessages interface through the
 // flat C API of steam_api64.dll (SendMessageToUser / ReceiveMessagesOnChannel /
-// AcceptSessionWithUser / CloseSessionWithUser). The game's unchanged calls
+// AcceptSessionWithUser; close_p2p_session keeps Steam's session, see there).
+// The game's unchanged calls
 // then travel over Valve's modern relay network (SDR).
 //
 // Semantics the game depends on, preserved exactly (hlsteam native/common.cpp,
@@ -130,7 +131,6 @@ static struct {
 	sdr_send_fn send;
 	sdr_receive_fn receive;
 	sdr_session_fn accept;
-	sdr_session_fn close;
 	sdr_release_fn release;
 	sdr_init_relay_fn init_relay;
 	sdr_relay_status_fn relay_status;
@@ -164,7 +164,6 @@ static const struct {
 	{"SteamAPI_ISteamNetworkingMessages_SendMessageToUser", (void **)&api.send},
 	{"SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel", (void **)&api.receive},
 	{"SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser", (void **)&api.accept},
-	{"SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser", (void **)&api.close},
 	{"SteamAPI_SteamNetworkingMessage_t_Release", (void **)&api.release},
 	{"SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess", (void **)&api.init_relay},
 	{"SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus", (void **)&api.relay_status},
@@ -260,13 +259,9 @@ static unsigned long sdr_sent, sdr_send_failed, sdr_received, sdr_dropped, sdr_a
 //            AutoRestartBrokenSession re-dial that worked), and only after
 //            every real message from the peer still queued on that channel
 //            has been read. A new sid from the peer is a new session.
-// close_p2p_session disarms. It also no longer closes at once: the
-// CloseSessionWithUser call waits SDR_CLOSE_DELAY_MS on the diag thread so
-// the reliable code-8 the game sent just before it (SteamService.stop) leaves
-// first; ISteamNetworkingMessages has no linger option, CloseSessionWithUser
-// frees the session "immediately" (isteamnetworkingmessages.h).
+// close_p2p_session disarms, and never closes Steam's session (see
+// detour_close_p2p_session).
 #define SDR_LOST_IDLE_MS 60000
-#define SDR_CLOSE_DELAY_MS 1000
 #define SDR_LOST_CONFIRM_MS 2000 // a re-dial that reaches connected by then cancels
 #define SDR_FRAME_CLOSE 8 // SteamService message code: stop
 
@@ -283,9 +278,11 @@ static struct {
 	unsigned char sid[4]; // bytes 3..6 of the last game packet, as received
 	int channel;         // where the game read it
 	DWORD last_recv;     // GetTickCount of that packet
-	BOOL close_pending;  // CloseSessionWithUser due at close_at
-	DWORD close_at;
-	DWORD last_seen;     // last send / read / session request naming the peer
+	BOOL stopping;       // the game sent the peer a code 8 for stop_sid ...
+	unsigned char stop_sid[4];
+	BOOL let_go;         // ... and then closed: gone_sid is over (another sid clears it)
+	unsigned char gone_sid[4];
+	DWORD last_seen;    // last send / read / session request naming the peer
 } sdr_watch[SDR_WATCH_MAX];
 static unsigned sdr_watch_n;
 static int sdr_relay_last = -1000;
@@ -308,7 +305,7 @@ static const char *state_name(int s) {
 
 // watch_peer starts following id; returns TRUE when it is new. When every
 // slot is taken, the slot idle longest is reused: one whose peer the game does
-// not hold (not armed), with no deferred close or pending injection. Lock held.
+// not hold (not armed), with no pending injection. Lock held.
 static BOOL watch_peer(uint64_t id) {
 	unsigned i, w = SDR_WATCH_MAX;
 	DWORD now = GetTickCount();
@@ -321,7 +318,7 @@ static BOOL watch_peer(uint64_t id) {
 		w = sdr_watch_n++;
 	} else {
 		for (i = 0; i < SDR_WATCH_MAX; i++) {
-			if (sdr_watch[i].armed || sdr_watch[i].close_pending || (sdr_watch[i].lost && !sdr_watch[i].injected))
+			if (sdr_watch[i].armed || (sdr_watch[i].lost && !sdr_watch[i].injected))
 				continue;
 			if (w == SDR_WATCH_MAX || now - sdr_watch[i].last_seen > now - sdr_watch[w].last_seen)
 				w = i;
@@ -344,19 +341,6 @@ static int find_watch(uint64_t id) {
 		if (sdr_watch[i].id == id)
 			return (int)i;
 	return -1;
-}
-
-// cancel_close drops a pending deferred CloseSessionWithUser of slot w. The
-// messages API keeps one session per peer: a close armed for the old session
-// that fires after the peer came back (a co-op reload: the guest closes, then
-// re-dials at once) kills the new session and its traffic. So the peer's new
-// session request, any message from it and a new session seen by the diag
-// thread all cancel it, like the game sending to it again does. Lock held.
-static void cancel_close(int w, const char *why) {
-	if (w < 0 || !sdr_watch[w].close_pending)
-		return;
-	sdr_watch[w].close_pending = FALSE;
-	shim_log("sdr: deferred close of %llu cancelled: %s", (unsigned long long)sdr_watch[w].id, why);
 }
 
 // mark_lost flags an armed session as gone; the diag thread injects. Lock held.
@@ -422,8 +406,6 @@ static void diag_tick(void) {
 			sdr_watch[i].end_reason = info.end_reason;
 			sdr_watch[i].state_since = now;
 			sdr_watch[i].stuck_logged = FALSE;
-			if (st >= 1 && st <= 3 && (prev == 0 || prev == 4 || prev == 5 || prev == -3))
-				cancel_close((int)i, "a new session with the peer");
 			if (st == 3 && sdr_watch[i].lost && !sdr_watch[i].injected) {
 				sdr_watch[i].lost = FALSE;
 				shim_log("sdr: session with %llu connected again, no close injected", (unsigned long long)sdr_watch[i].id);
@@ -503,13 +485,9 @@ static void session_request(const sdr_identity *peer, const char *via) {
 	unsigned char ok = 0;
 	if (peer == NULL || sdr_msgs == NULL)
 		return;
-	// Accept and cancel under one lock: a deferred close falling due on the
-	// diag thread in between would close the session just accepted.
 	EnterCriticalSection(&sdr_lock);
-	if (peer->type == SDR_IDENTITY_STEAMID) {
+	if (peer->type == SDR_IDENTITY_STEAMID)
 		watch_peer(peer->u.steam_id);
-		cancel_close(find_watch(peer->u.steam_id), "the peer asks for a new session");
-	}
 	ok = api.accept(sdr_msgs, peer);
 	LeaveCriticalSection(&sdr_lock);
 	sdr_accepted++;
@@ -757,6 +735,21 @@ static sdr_msg *queue_pop(int channel) {
 	return m;
 }
 
+// of_gone tells whether m is a game packet of the session the game closed
+// with that peer (its sid is gone_sid). Lock held.
+static BOOL of_gone(const sdr_msg *m) {
+	int w = find_watch(m->peer.u.steam_id);
+	return w >= 0 && sdr_watch[w].let_go && m->size >= 7 && memcmp(sdr_watch[w].gone_sid, (const unsigned char *)m->data + 3, 4) == 0;
+}
+
+// echo_of_let_go: a code 8 of the session the game closed. The game would
+// only answer it with its own code 8 (unknown user, onUserData@54888) or
+// ignore it (another session now): with Steam's session kept open, two sides
+// that both let go would bounce code 8 for ever.
+static BOOL echo_of_let_go(const sdr_msg *m) {
+	return of_gone(m) && ((const unsigned char *)m->data)[0] == SDR_FRAME_CLOSE;
+}
+
 // pump_batch moves up to one batch of what Steam holds for channel to the
 // tail of our queue; returns how many Steam handed over.
 static int pump_batch(int channel) {
@@ -769,7 +762,11 @@ static int pump_batch(int channel) {
 			sdr_dropped++;
 			continue;
 		}
-		cancel_close(find_watch(batch[i]->peer.u.steam_id), "the peer sends again");
+		if (echo_of_let_go(batch[i])) {
+			api.release(batch[i]);
+			sdr_dropped++;
+			continue;
+		}
 		queue_push(channel, batch[i]);
 		sdr_received++;
 	}
@@ -792,15 +789,20 @@ static void pump_game(int channel) {
 		pump_batch(channel);
 }
 
-// drop_peer discards queued messages from one SteamID, like CloseP2PSessionWithUser.
+// drop_peer discards queued messages from one SteamID, like
+// CloseP2PSessionWithUser; once the closed session's sid is known (let_go),
+// only that session's packets: a rejoin with a new sid read before the close
+// (onUserData stops the old service on code 3, hlsteam closes 100 ms later)
+// keeps its traffic. Lock held.
 static void drop_peer(uint64_t id) {
-	int c;
+	int c, w = find_watch(id);
+	BOOL all = w < 0 || !sdr_watch[w].let_go;
 	for (c = 0; c < SDR_CHANNELS; c++) {
 		sdr_node **link = &sdr_queue[c].head;
 		sdr_queue[c].tail = NULL;
 		while (*link != NULL) {
 			sdr_node *n = *link;
-			if (n->m->peer.u.steam_id == id) {
+			if (n->m->peer.u.steam_id == id && (all || n->m->size < 7 || of_gone(n->m))) {
 				*link = n->next;
 				msg_release(n->m);
 				free(n);
@@ -843,27 +845,11 @@ static BOOL inject_close(int w) {
 	return TRUE;
 }
 
-// lost_tick runs on the diag thread: deferred session closes fall due, and
-// lost sessions get their close once the game has read what the peer sent.
-// Lock held.
+// lost_tick runs on the diag thread: lost sessions get their close once the
+// game has read what the peer sent. Lock held.
 static void lost_tick(DWORD now) {
 	unsigned i;
 	for (i = 0; i < sdr_watch_n; i++) {
-		if (sdr_watch[i].close_pending && (LONG)(now - sdr_watch[i].close_at) >= 0) {
-			sdr_identity peer;
-			unsigned char ok;
-			int ch;
-			// Messages the peer sent while the game was not polling (a reload)
-			// cancel the close too: pull them in first.
-			for (ch = 0; ch < SDR_CHANNELS; ch++)
-				pump(ch);
-			if (sdr_watch[i].close_pending) {
-				sdr_watch[i].close_pending = FALSE;
-				identity_of(&peer, sdr_watch[i].id);
-				ok = api.close(sdr_msgs, &peer);
-				shim_log("sdr: deferred CloseSessionWithUser(%llu) = %u", (unsigned long long)sdr_watch[i].id, ok);
-			}
-		}
 		if (sdr_watch[i].lost && !sdr_watch[i].injected && now - sdr_watch[i].lost_at >= SDR_LOST_CONFIRM_MS) {
 			int c = sdr_watch[i].channel;
 			pump(c);
@@ -914,13 +900,19 @@ static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int l
 	identity_of(&to, uid_to_u64(uid));
 
 	EnterCriticalSection(&sdr_lock);
-	{
-		cancel_close(find_watch(to.u.steam_id), "the game sends to it again");
-	}
 	res = api.send(sdr_msgs, &to, data, (uint32_t)length, flags, channel);
 	if (watch_peer(to.u.steam_id))
 		shim_log("sdr: first packet to %llu: %d bytes, type %d -> flags 0x%x, channel %d = EResult %d (1 = OK)",
 			(unsigned long long)to.u.steam_id, length, type, flags, channel, res);
+	if (length >= 7 && data[0] == SDR_FRAME_CLOSE) {
+		// SteamService.stop / onUserData's FORCE_DISCONNECT: the session with
+		// this sid ends, closeSession follows.
+		int w = find_watch(to.u.steam_id);
+		if (w >= 0) {
+			sdr_watch[w].stopping = TRUE;
+			memcpy(sdr_watch[w].stop_sid, data + 3, 4);
+		}
+	}
 	if (res == SDR_RESULT_OK) {
 		sdr_sent++;
 	} else {
@@ -971,8 +963,9 @@ static vuid detour_read_p2p_packet(unsigned char *data, int max_length, uint32_t
 		shim_log("sdr: first packet received from %llu, %d bytes, channel %d", (unsigned long long)from, n, channel);
 	if (m->release != synth_release && m->size >= 7) {
 		// A game packet: [code][pid:2][sid:4]...; the session is in use.
+		// A late packet of the session the game closed does not arm it again.
 		int w = find_watch(from);
-		if (w >= 0) {
+		if (w >= 0 && !of_gone(m)) {
 			if (!sdr_watch[w].armed || memcmp(sdr_watch[w].sid, (const unsigned char *)m->data + 3, 4) != 0) {
 				sdr_watch[w].lost = FALSE; // a new session: its own close
 				sdr_watch[w].injected = FALSE;
@@ -1004,37 +997,46 @@ static unsigned char detour_accept_p2p_session(vuid uid) {
 	return ok;
 }
 
-// The queues are dropped at once, like CloseP2PSessionWithUser; Steam's own
-// close waits SDR_CLOSE_DELAY_MS on the diag thread (see the lost-peer
-// comment), so the game's last reliable message (code 8) is not discarded.
-// Without the diag thread (or a watch slot) it closes at once.
+// The game's closeSession (SteamService.stop: code 8, then this) ends its own
+// session with the peer: the queued messages from that peer are dropped, like
+// CloseP2PSessionWithUser did. Steam's session is NOT closed. The shim cannot
+// tell a host's save load (stop every guest, start a new server, guests rejoin
+// at once) from a real leave, and does not need to: the game's code 8 already
+// ended the game session on both sides. Closing Steam's session too only
+// forces a fresh SDR session for the rejoin, which may never come up on a
+// throttled network (4-player reloads stuck at ready-start), while the old
+// one keeps working. A session nobody uses times out within minutes
+// (isteamnetworkingmessages.h), and a peer whose process ends is reported
+// dead/closed as before.
+// The session that ends is the one the game's last code 8 named (stop_sid):
+// hlsteam closes 100 ms after stop(), and by then the peer may already be
+// back with a new sid (onUserData reads its code 3 before stopping the old
+// service), which keeps its watch and its queued packets. Without that code 8
+// everything from the peer goes, as before.
 static unsigned char detour_close_p2p_session(vuid uid) {
-	sdr_identity peer;
-	unsigned char ok = 1;
+	uint64_t id;
 	int w;
 	if (uid == NULL || !ready())
 		return 1; // nothing was open
-	identity_of(&peer, uid_to_u64(uid));
+	id = uid_to_u64(uid);
 	EnterCriticalSection(&sdr_lock);
 	for (w = 0; w < SDR_CHANNELS; w++)
 		pump(w); // what Steam still holds from the peer goes too, as a close would discard it
-	drop_peer(peer.u.steam_id);
-	w = find_watch(peer.u.steam_id);
+	w = find_watch(id);
 	if (w >= 0) {
-		sdr_watch[w].armed = sdr_watch[w].lost = sdr_watch[w].injected = FALSE; // the game let go
-		sdr_watch[w].close_pending = TRUE;
-		sdr_watch[w].close_at = GetTickCount() + SDR_CLOSE_DELAY_MS;
+		if (sdr_watch[w].stopping) { // else: a repeated close (FORCE_DISCONNECT timers) of gone_sid
+			sdr_watch[w].let_go = TRUE;
+			sdr_watch[w].stopping = FALSE;
+			memcpy(sdr_watch[w].gone_sid, sdr_watch[w].stop_sid, 4);
+		}
+		if (!sdr_watch[w].let_go || memcmp(sdr_watch[w].sid, sdr_watch[w].gone_sid, 4) == 0)
+			sdr_watch[w].armed = sdr_watch[w].lost = sdr_watch[w].injected = FALSE; // the game let go
 	}
-	if (w < 0 || !sdr_diag_started)
-		ok = api.close(sdr_msgs, &peer);
-	if (w >= 0 && !sdr_diag_started)
-		sdr_watch[w].close_pending = FALSE;
+	drop_peer(id);
 	LeaveCriticalSection(&sdr_lock);
-	shim_log("sdr: session with %llu closed (%s); sent %lu, failed %lu, received %lu, dropped %lu, auto-accepted %lu",
-		(unsigned long long)peer.u.steam_id,
-		w >= 0 && sdr_diag_started ? "ok, CloseSessionWithUser deferred 1 s" : ok ? "ok" : "was not open", sdr_sent,
-		sdr_send_failed, sdr_received, sdr_dropped, sdr_accepted);
-	return ok;
+	shim_log("sdr: session with %llu closed by the game (Steam's session kept); sent %lu, failed %lu, received %lu, dropped %lu, auto-accepted %lu",
+		(unsigned long long)id, sdr_sent, sdr_send_failed, sdr_received, sdr_dropped, sdr_accepted);
+	return 1;
 }
 
 static void *detour_get_p2p_session_data(vuid uid) {

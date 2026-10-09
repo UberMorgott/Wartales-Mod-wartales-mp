@@ -391,17 +391,15 @@ static void check_lost(read_fn read, avail_fn avail, session_fn close, HMODULE a
 		"injected frame is [08 00 00 11 22 33 44] from the host's SteamID");
 	Sleep(3500);
 	check(avail(&size, 0) == 0, "exactly one close per lost session");
-	// The game reacts with stop(): closeSession. Steam's close waits ~1 s.
+	// The game reacts with stop(): closeSession. Steam's session is kept.
 	stats(&st);
 	closes = st.closes;
 	put_uid(uid, HOST);
-	check(close(uid) == 1 && wait_log(log, "sdr: session with 76561198000000001 closed (ok, CloseSessionWithUser deferred 1 s)", 2000),
-		"close_p2p_session answers ok and defers Steam's close");
+	check(close(uid) == 1 && wait_log(log, "sdr: session with 76561198000000001 closed by the game (Steam's session kept)", 2000),
+		"close_p2p_session answers ok and keeps Steam's session");
+	Sleep(2500);
 	stats(&st);
-	check(st.closes == closes, "CloseSessionWithUser is not called at once (the game's last code 8 still leaves)");
-	check(wait_log(log, "sdr: deferred CloseSessionWithUser(76561198000000001) = 1", 4000), "the deferred close runs 1-2 s later");
-	stats(&st);
-	check(st.closes == closes + 1 && st.last_close == HOST, "deferred close named the host, once");
+	check(st.closes == closes, "CloseSessionWithUser is never called");
 
 	// A session the game closed itself is never reported back.
 	arm_peer(read, inject, set_state, log, GONE, sid_x, "second session armed");
@@ -448,51 +446,84 @@ static void check_lost(read_fn read, avail_fn avail, session_fn close, HMODULE a
 	close(uid);
 }
 
-// A co-op reload: the game closes its session with a peer (Steam's close
-// deferred ~1 s), and the peer comes straight back. The messages API keeps one
-// session per peer, so the old deferred close must not fire into the new one:
-// the peer's session request or a message from it cancels the close.
-static void check_reconnect(read_fn read, avail_fn avail, session_fn close, HMODULE api, const wchar_t *log, fire_fn fire) {
+// A co-op reload: the host's game stops every guest (code 8, closeSession),
+// starts a new server, and the guests rejoin over the same Steam session, which
+// the shim never closes: a fresh SDR session may not come up on a throttled
+// network. The session that ends is the one the game's code 8 named: a code 8
+// still carrying its sid is dropped (the game would only echo it back), a late
+// packet of it reaches the game but does not arm the lost-peer watch, and a
+// rejoin (new sid) arms it, even when read before the close.
+// The loopback fake hands every send back as a message from that peer.
+static void check_reconnect(read_fn read, avail_fn avail, session_fn close, send_fn send, HMODULE api, const wchar_t *log) {
 	inject_fn inject = (inject_fn)(void *)GetProcAddress(api, "fake_inject");
 	stats_fn stats = (stats_fn)(void *)GetProcAddress(api, "fake_stats");
 	set_state_fn set_state = (set_state_fn)(void *)GetProcAddress(api, "fake_set_session_state");
-	const uint64_t BACK = 76561198000000006ULL, TALK = 76561198000000007ULL;
-	const unsigned char sid[4] = {9, 0, 0, 0};
+	const uint64_t BACK = 76561198000000006ULL, EARLY = 76561198000000007ULL;
+	const unsigned char sid[4] = {9, 0, 0, 0}, sid_early[4] = {0x0c, 0, 0, 0};
+	const unsigned char want[7] = {8, 0, 0, 0x0a, 0, 0, 0}, want_early[7] = {8, 0, 0, 0x0d, 0, 0, 0};
 	unsigned char uid[8], buf[64];
 	uint32_t size, len;
+	unsigned closes;
 	vuid from;
 	fake_stats_t st;
 
-	// Peer re-dials: its session request cancels the pending close.
-	arm_peer(read, inject, set_state, log, BACK, sid, "reconnecting peer armed");
-	put_uid(uid, BACK);
-	check(close(uid) == 1 && wait_log(log, "sdr: session with 76561198000000006 closed (ok, CloseSessionWithUser deferred 1 s)", 2000),
-		"the game closes the session (reload), Steam's close deferred");
-	check(fire(BACK) == 1, "the peer asks for a new session at once");
-	check(wait_log(log, "sdr: deferred close of 76561198000000006 cancelled: the peer asks for a new session", 2000),
-		"its session request cancels the deferred close");
-	Sleep(2500);
-	check(!log_contains(log, "deferred CloseSessionWithUser(76561198000000006)"),
-		"no CloseSessionWithUser fires into the new session");
-
-	// Peer just sends again (session kept by Steam): a message cancels it too.
-	arm_peer(read, inject, set_state, log, TALK, sid, "talking peer armed");
-	put_uid(uid, TALK);
-	check(close(uid) == 1, "the game closes the second session");
-	inject(TALK, 0, "\x05\x01\x00\x09\x00\x00\x00hi", 9);
-	// The game does not poll meanwhile (loading): the close falls due with the
-	// message still at Steam; the diag thread pulls it in and cancels.
-	Sleep(2500);
-	check(wait_log(log, "sdr: deferred close of 76561198000000007 cancelled: the peer sends again", 2000),
-		"a message from the peer, unread by the game, cancels the deferred close");
-	size = 0;
-	check(avail(&size, 0) == 1 && size == 9, "the peer's new message is still there for the game");
-	from = read(buf, sizeof(buf), &len, 0);
-	check(from != NULL && get_uid(from) == TALK && len == 9, "the message reaches the game");
-	Sleep(2500);
+	arm_peer(read, inject, set_state, log, BACK, sid, "reloading peer armed");
 	stats(&st);
-	check(st.last_close != BACK && st.last_close != TALK && !log_contains(log, "deferred CloseSessionWithUser(76561198000000007)"),
-		"no CloseSessionWithUser for the peer that talks again");
+	closes = st.closes;
+	put_uid(uid, BACK);
+	check(send(uid, (unsigned char *)"\x08\x00\x00\x09\x00\x00\x00", 7, 2, 0) == 1, "the game's stop() sends code 8 for sid 9");
+	check(close(uid) == 1 && wait_log(log, "sdr: session with 76561198000000006 closed by the game (Steam's session kept)", 2000),
+		"the game closes the session (reload); Steam's session kept");
+	// The peer answers the stop with its own code 8 (old sid), then a late
+	// game packet of the old session, then rejoins with a new sid.
+	inject(BACK, 0, "\x08\x00\x00\x09\x00\x00\x00", 7);
+	inject(BACK, 0, "\x05\x02\x00\x09\x00\x00\x00ol", 9);
+	inject(BACK, 0, "\x03\x00\x00\x0a\x00\x00\x00", 7);
+	size = 0;
+	check(avail(&size, 0) == 1 && size == 9, "the old session's code 8s are dropped; its late packet comes first");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == BACK && len == 9, "the late packet reaches the game");
+	set_state(BACK, 4, 1000);
+	Sleep(3500);
+	check(!log_contains(log, "injected close for 76561198000000006"), "a late packet does not arm the closed session");
+	set_state(BACK, 3, 0);
+	check(wait_log(log, "sdr: session with 76561198000000006: state 3 (connected) was closed by peer", 4000), "the session is up again");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == BACK && len == 7 && buf[0] == 3, "the rejoin (new sid) reaches the game");
+	// The rejoined session is watched again: a loss injects with the new sid.
+	set_state(BACK, 4, 1000);
+	check(wait_log(log, "sdr: peer lost, injected close for 76561198000000006 sid 10 on channel 0", 8000),
+		"the rejoined session is armed with its new sid");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 7 && memcmp(buf, want, 7) == 0, "injected frame carries the new sid");
+	// A code 8 with another sid is the game's business: delivered.
+	inject(BACK, 0, "\x08\x00\x00\x0b\x00\x00\x00", 7);
+	check(avail(&size, 0) == 1 && size == 7, "a code 8 with another sid is delivered");
+	read(buf, sizeof(buf), &len, 0);
+
+	// The rejoin comes first: onUserData reads code 3 (new sid 13), stops the
+	// old service (code 8 for sid 12), hlsteam closes 100 ms later; the peer's
+	// next packet (sid 13) is queued by then. The close ends sid 12 only.
+	arm_peer(read, inject, set_state, log, EARLY, sid_early, "early-rejoin peer armed");
+	put_uid(uid, EARLY);
+	inject(EARLY, 0, "\x03\x00\x00\x0d\x00\x00\x00", 7);
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == EARLY && len == 7 && buf[0] == 3, "the early rejoin (sid 13) is read");
+	check(send(uid, (unsigned char *)"\x08\x00\x00\x0c\x00\x00\x00", 7, 2, 0) == 1, "the old service's stop() sends code 8 for sid 12");
+	inject(EARLY, 0, "\x05\x01\x00\x0d\x00\x00\x00jn", 9);
+	check(close(uid) == 1, "hlsteam's delayed closeSession of the old service");
+	check(close(uid) == 1, "a second delayed closeSession of it (no new code 8)");
+	size = 0;
+	check(avail(&size, 0) == 1 && size == 9, "the new session's packet survives the close; the old code 8 does not");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == EARLY && len == 9 && memcmp(buf + 7, "jn", 2) == 0, "it reaches the game");
+	set_state(EARLY, 4, 1000);
+	check(wait_log(log, "sdr: peer lost, injected close for 76561198000000007 sid 13 on channel 0", 8000),
+		"the new session stays armed through the old one's close");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 7 && memcmp(buf, want_early, 7) == 0, "injected frame carries sid 13");
+	stats(&st);
+	check(st.closes == closes, "no CloseSessionWithUser through the whole reload");
 }
 
 // Watch slots are reused: after many peers came and went (lobby probes over
@@ -717,17 +748,17 @@ static void check_sdr(int with_api, int partial, HMODULE steam, HMODULE api, con
 	inject(PEER, 1, "p2", 2);
 	check(avail(&size, 0) == 1 && size == 2, "queued messages before close");
 	check(close(peer) == 1, "close_p2p_session answers ok");
-	check(wait_log(log, "sdr: deferred CloseSessionWithUser(72623859790382856) = 1", 4000),
-		"close_p2p_session reaches CloseSessionWithUser, deferred 1-2 s");
+	check(wait_log(log, "sdr: session with 72623859790382856 closed by the game (Steam's session kept)", 4000),
+		"close_p2p_session is logged");
 	stats(&st);
-	check(st.closes == 1 && st.last_close == PEER, "close named the right peer");
+	check(st.closes == 0, "close_p2p_session keeps Steam's session (no CloseSessionWithUser)");
 	from = read(buf, sizeof(buf), &len, 0);
 	check(from != NULL && get_uid(from) == OTHER && memcmp(buf, "o1", 2) == 0, "close dropped the closed peer's messages, kept the other peer's");
 	check(read(buf, sizeof(buf), &len, 0) == NULL && read(buf, sizeof(buf), &len, 1) == NULL, "nothing from the closed peer remains on any channel");
 	check(sdata(peer) == NULL, "get_p2p_session_data answers null");
 
 	check_lost(read, avail, close, api, log);
-	check_reconnect(read, avail, close, api, log, fire);
+	check_reconnect(read, avail, close, send, api, log);
 	check_watch_reuse(read, close, api, log);
 
 	stats(&st);
