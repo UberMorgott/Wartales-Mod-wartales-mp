@@ -80,8 +80,12 @@ use super::mirror::{self, emit_log, emit_play_once, enum_constructs, int, want, 
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
-/// The x of a mirror event: far outside any map, never a cursor point.
-pub(crate) const SENTINEL: f64 = -987_654_321.0;
+/// The x of a mirror event: far outside any map, never a cursor point. The
+/// ping RPC writes its floats as f32 (`hxbit.Serializer.addFloat`: ToSFloat +
+/// 4-byte SetMem), so every peer but the sender reads x back through f32: the
+/// sentinel must be exact in f32 (-987654321 arrived as -987654336 and no
+/// event ever matched). y (a uid) and z (the event code) stay below 2^24.
+pub(crate) const SENTINEL: f64 = -1_000_000_000.0;
 /// ForgeAction.feedbackOnAction plays the hit sound / particles 0.4 s into the anim.
 const FX_DELAY: f64 = 0.4;
 const FX_LIFE: f64 = 1.5;
@@ -1456,6 +1460,16 @@ mod tests {
     use crate::asm::testutil::same;
     use crate::asm::testutil::*;
     use std::collections::HashMap;
+
+    /// The sentinels survive the ping RPC's f32 wire format and stay apart.
+    #[test]
+    fn sentinels_survive_f32_wire() {
+        let work = crate::work_mirror::SENTINEL;
+        for s in [SENTINEL, work] {
+            assert_eq!(s as f32 as f64, s, "{s} is not exact in f32");
+        }
+        assert_ne!(SENTINEL as f32, work as f32);
+    }
 
     /// Four hooks, four well-typed functions appended, every other function
     /// untouched; a second pass is a no-op.

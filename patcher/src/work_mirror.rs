@@ -20,7 +20,7 @@
 // click or shot, the idle at the end.
 //
 // The events ride the ping RPC like the forge mirror (mirror.rs), with their
-// own sentinel x = -987654322, y = hxbit uid of the activity element (place)
+// own sentinel x = -1000000064, y = hxbit uid of the activity element (place)
 // or of the unit (camp), z = code + (camp << 2) + (kind << 3); code 0 start,
 // 1 hit, 2 end; kind 0 UnitAction, 1 Archery:
 //   sender, `workSend(game, act, code, kind)`, co-op only (`ctrl.__host`),
@@ -40,7 +40,7 @@
 // machine, `mp: work recv <code> <kind> <camp> <stage>` on the others (stage 3
 // start, 4 hit, 5 end; 1 no worker found).
 // All players need this build (an older one shows a far-away ping with its
-// sound). Validated before editing; a mismatch skips the pass (logged).
+// sound). The y (a unit / element uid) and z go over the wire as f32 too. Validated before editing; a mismatch skips the pass (logged).
 
 use super::asm::{push_fn, Asm, Regs};
 
@@ -49,8 +49,9 @@ use super::mirror::{self, emit_idle_now, emit_log, emit_play_once, int, writer, 
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
-/// The x of a work mirror event (the forge's is -987654321).
-pub(crate) const SENTINEL: f64 = -987_654_322.0;
+/// The x of a work mirror event: exact in f32 (the ping RPC sends its floats
+/// as f32, see forge_mirror.rs `SENTINEL`) and not the forge's.
+pub(crate) const SENTINEL: f64 = -1_000_000_064.0;
 const RECV_TAG: &str = "mp: work recv";
 
 pub(crate) struct Plan {

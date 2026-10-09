@@ -537,7 +537,7 @@ getSerializeSchema / networkSetBitCond, которых у класса нет), 
 ударов (networkRPC / getRPCSchema / networkGetName / networkAllow + заглушки), гейты владельца в
 init / update / setActionDone (реплика сама бросала бы шаги, читала мышь и делала предметы), а
 реплицированное окно занимает экран зрителя. Вместо этого события едут по существующему RPC пинга
-(`Controller.ping(x, y, z, player)`: любой игрок -> хост -> все), x = SENTINEL (-987654321), y = hxbit
+(`Controller.ping(x, y, z, player)`: любой игрок -> хост -> все), x = SENTINEL (-1000000000, точно в f32: RPC шлёт float как f32), y = hxbit
 `__uid` элемента (`activity.target`), z = code + (a << 2) + (b << 6). Отправка
 (`forgeSend`, только в коопе, под trap): вход `ForgeAction.init` (code 0, старт),
 `setActionDone` (1, удар: a = индекс EScoreTier A/B/C = отлично/хорошо/плохо, b = 1 + индекс осколка
@@ -591,7 +591,7 @@ Snaring, Tracking и любая активность без своего окн�
 играет "Attack" на работнике (полоса — 2D), Archery — своя сцена от первого лица (лук, стрелы, мишень,
 звуки выстрела), без анимации работника. Поэтому зеркало играет рабочую анимацию из
 `UnitAction.click` ("Attack") один раз на клик/выстрел, затем idle, и idle в конце. События — по RPC
-пинга, как у ковки, x = -987654322, y = hxbit uid элемента (место) или юнита (лагерь), z = code +
+пинга, как у ковки, x = -1000000064, y = hxbit uid элемента (место) или юнита (лагерь), z = code +
 (camp << 2) + (kind << 3) (code 0 старт, 1 удар, 2 конец; kind 0 UnitAction, 1 Archery): `workSend`
 на входе `UnitAction.init` / `click` и `Archery.init` / `setWorldPosOnShoot`, только в коопе и
 никогда для реплицированной (кооп) активности, под trap; старт запоминает активность, а

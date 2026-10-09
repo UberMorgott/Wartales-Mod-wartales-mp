@@ -638,7 +638,7 @@ neither, so the others only got the worker parked at the anvil
 plus hand-written hxbit serialization and RPCs on ForgeAction (and a replicated
 window taking over every peer's screen), the events ride the existing ping RPC
 (`Controller.ping(x, y, z, player)`, any player -> host -> every machine) with
-x = -987654321, y = the element's hxbit `__uid`, z = code + (a << 2) + (b << 6):
+x = -1000000000 (exact in f32: the ping RPC sends its floats as f32), y = the element's hxbit `__uid`, z = code + (a << 2) + (b << 6):
 `ForgeAction.init` sends start (0), `setActionDone` a hit (1; a = EScoreTier
 A/B/C = perfect/good/bad, b = 1 + the shard's child index), `endActivity` the
 end (2; a = ActivityResult index); co-op only, under a trap. `ping__impl` starts
@@ -702,7 +702,7 @@ the worker (its progress bar is 2D); Archery is a first-person bow / arrows /
 target scene with shot sounds and no worker anim. So the mirror plays the work
 anim read from UnitAction.click ("Attack") once per click or shot, then the
 idle, and the idle at the end. Events ride the ping RPC like the forge mirror,
-with x = -987654322, y = the element's hxbit uid (place) or the unit's (camp),
+with x = -1000000064, y = the element's hxbit uid (place) or the unit's (camp),
 z = code + (camp << 2) + (kind << 3) (code 0 start, 1 hit, 2 end; kind 0
 UnitAction, 1 Archery): `workSend` at the entry of UnitAction.init / click and
 Archery.init / setWorldPosOnShoot, co-op only and never for a replicated (coop)
