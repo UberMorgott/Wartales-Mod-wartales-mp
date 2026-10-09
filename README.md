@@ -18,6 +18,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Keeps familiar Steam invitations. A Steam lobby is created automatically with the in-game room.
 - Fixes identified reconnection errors and a crash caused by waiting in the lobby.
 - Mod-file check on join: a player whose mod files (winmm.dll, and res1.pak if any) differ from the host's is refused at the join with a clear message instead of crashing later in the game.
+- Join by code (direct connection) now works for loaded co-op saves, and a host can start the game over the direct connection without hanging. Players are now identified by the game's own player id on both Steam and direct connections.
 
 ### Co-op stability
 
@@ -29,6 +30,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - A co-op load no longer waits forever for a player who disconnected before they were ready to start, and a reconnecting player is no longer counted twice. *(Vanilla bug.)*
 - Loading a save, restarting a battle or reloading from the pause menu in a co-op game no longer hangs on the loading screen when some players of the save are not in the session: the host keeps the lobby's list of absent players across the reload. *(Vanilla bug.)*
 - A player who reconnects during a battle no longer stays on the loading screen forever: the host replays the battle's start to that player. *(Vanilla bug.)*
+- A guest no longer freezes at the end of a battle after rejoining it mid-battle.
 - A player who leaves during a battle no longer blocks it: the host can play that player's units (also a turn they had already begun) until they come back; the units stay theirs and they take them over again when they rejoin. *(Vanilla bug.)*
 - The host no longer crashes when two lobby creations finish at the same moment (a left lobby's late connect result is ignored).
 - Clients no longer freeze when an enemy summons units and hits them in the same moment (for example the Rat Matriarch's howl spawning rats): the client makes the new units alive before it runs the host's battle messages. *(Vanilla bug.)*
@@ -56,6 +58,8 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - ALT highlight on the world map: holding the Outlines key (ALT) outlines the chests, gather nodes, treasure, tracks and other interactive elements on screen, as inside places; release clears them. Local only. Map places and roaming parties are not covered.
 - Party-wide inventory: dialog, crafting, repair and healing costs, fishing hooks and lockpicks are paid from your inventory, the chests and then the other players' inventories, and the counts on screen include the other players' items (fishing and lock picking no longer stop at 0 hooks / lockpicks while the chest or another player has some). The injury heal panel lists remedies the other players carry, and recipe ingredients in the Grimoire and item tooltips are no longer shown missing (red) when the chest or another player has them.
 - Shared chest panel: sort, quick stack (move your items the chest already holds) and take similar buttons.
+- The shared camp chest is available in a co-op game started from a solo save (players who joined later); before, the chest button and panel were missing on the world map until the host made camp. *(Vanilla bug.)*
+- During a confession or another shared dialog the inventory panels are hidden for every player, not only for the one who started it. *(Vanilla bug.)*
 - Other players' inventories: a new bottom-bar button (co-op only) (the inventory chest with a companions badge) opens one panel per other connected player at the left edge of the screen, draggable (positions kept). Full access, both ways: right click an item in a player's panel to take it (shift: choose the amount); while the panels are open, ctrl + right click an item in your own inventory to give it to the player whose panel you last hovered or clicked (ctrl + shift: choose the amount). To equip someone else's item, take it first. Dragging items onto or out of another player's panel is blocked. Every player needs this version: an older one refuses the transfer.
 - Forging is visible to the other players: while a player forges, everyone else in that place sees the worker at the anvil hammer, with each hit's particles and sound (perfect / good / bad) and the success or fail gesture at the end. Their camera, UI and controls are not touched. Every player needs this version: an older one shows a far-away ping and its sound instead.
 - Shared mini-games (fishing, mining, wood cutting, lock picking, singing, gambling, the ruins puzzles) no longer take over the other players' screens: only the player doing it gets the mini-game window and camera; everyone else keeps their own camera, inventory and controls and watches that player's character do it in the scene. Every player needs this version.
@@ -80,6 +84,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Skill tooltips show the Valor point cost outside battle for every unit, including the new-game screens.
 - In co-op a client's skill bar is up to date at round start (Inhalation and similar skills were greyed out until any action), and a client's skills read the current synced skill values (Inhalation's cost no longer used a stale count). *(Vanilla bug.)*
 - The chest panel opens where the game puts it, instead of displaced or snapping back on hover. A resized inventory panel scrolls with its scrollbar again.
+- Resized inventory panels: the scrollbar works and the rows are in order (the top row stays under the header); a resize stops above the HUD bottom bar; a double click on the title row restores the vanilla size and position; the chest panel is no longer an empty collapsed box after loading a save, and it draws above the inventory panel instead of behind it.
 - Clicks only reach the slots a scrolling list shows: a slot scrolled under the chest header no longer takes the click or drag. *(Vanilla bug.)*
 - Battle camera: rotating with the right mouse button while panning with the keyboard no longer speeds the camera up.
 - Tooltip keyword panels ("Poison", "Vigilance", ...) wrap into columns instead of running off the screen, and are not shown twice.
@@ -95,6 +100,8 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 - Writes game errors, co-op mode-switch steps and forced leaves to **shim.log**, to help with bug reports. This only adds log lines.
 - Writes the end steps of every activity and mini-game (ruins puzzles, lock picking, fishing, dice) and every refused co-op network call to **shim.log**, to find where a mini-game freezes. This only adds log lines.
+- The start-up window shows how many co-op patches were applied ("Applied N of M") with a progress bar, and says so when some were skipped.
+- **shim.log** is no longer flooded by network SYNC lines when the game's network log is on: they are counted instead, so later lines are not lost to the log size limit.
 - Writes post-battle loot-window steps (window rebuilds, button states, hovered and clicked elements) and camp-dialog choice / confession rewards to **shim.log**. This only adds log lines.
 
 ## Install
