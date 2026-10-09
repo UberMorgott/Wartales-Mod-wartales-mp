@@ -35,7 +35,8 @@
 // inventory panels keyed "AllInv#<slot>"):
 //   mpDragBegin(obj, follow, key)   on push: a second push on the same object
 //       within DOUBLE_S resets it (offset 0 on obj and follow, then the
-//       `mpWinBase:<key>` offsets if any; saved); otherwise starts a scene capture (with an onCancel: a capture
+//       `mpWinBase:<key>` offsets if any; saved; a resized panel also gets its
+//       vanilla height back, see "row resize"); otherwise starts a scene capture (with an onCancel: a capture
 //       taken over / stopped by other code drops the drag and saves). Moves set
 //       obj's (and follow's) offsets in its parent flow to mouse - start, the
 //       mouse clamped to the scene, and shift x/y by the change at once: no
@@ -108,6 +109,8 @@ pub(crate) const KEY_INV: &str = "GameInventory#inv";
 const HEADER_CLASS: &str = "title";
 const HEAD_MARK: &str = "mpDragHead";
 pub(crate) const SIZE_PREFIX: &str = "mpWinSize:";
+/// A panel's vanilla scroll-area maxHeight, stored on install (reset target).
+const BASE_H_PREFIX: &str = "mpWinBaseH:";
 /// Inventory grid row pitch (ui.comp.Inventory.INV_SPACING) and the scroll
 /// area's height beyond whole rows (vanilla 330 px = 6 rows + 12).
 const ROW_PX: i32 = 53;
@@ -258,6 +261,9 @@ struct RsCtx {
     /// Flow.set_maxHeight and its Null<Int>.
     set_max_h: RefFun,
     nint_t: RefType,
+    /// Flow.maxHeight (Null<Int>): the scroll area's vanilla height, read
+    /// before a saved size is applied (a double push restores it).
+    max_h: RefField,
     calc_h: RefField,
     /// `new h2d.Interactive(w, h, parent, shape)`; shape's type.
     inter_ctor: RefFun,
@@ -350,6 +356,7 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
     if sa != [c.flow_t, nint_t] || !matches!(code.types[nint_t.0], Type::Null(t) if t == c.i32_t) {
         bail!("Flow.set_maxHeight: unexpected signature");
     }
+    let max_h = typed(code, c.flow_t, "maxHeight", nint_t)?;
     let calc_h = typed(code, c.flow_t, "calculatedHeight", c.f64_t)?;
     let inter_ctor = method(code, c.inter_t, "__constructor__")?.findex;
     let (ia, ir) = sig(code, inter_ctor)?;
@@ -372,6 +379,7 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
         scroll_reset,
         set_max_h,
         nint_t,
+        max_h,
         calc_h,
         inter_ctor,
         shape_t: ia[4],
@@ -720,6 +728,8 @@ struct Globals {
     rs_max: RefGlobal,
     rs_my0: RefGlobal,
     size: RefGlobal,
+    /// "mpWinBaseH:": a panel's vanilla scroll-area maxHeight.
+    base_h: RefGlobal,
 }
 
 /// `Trap exc -> catch` ... `OUT: EndTrap; Ret v` / `catch: report(exc); Ret v`.
@@ -806,6 +816,7 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
         rs_max: add_global(code, c.i32_t),
         rs_my0: add_global(code, c.f64_t),
         size: str_global(code, c.str_t, SIZE_PREFIX),
+        base_h: str_global(code, c.str_t, BASE_H_PREFIX),
     };
     let dispose_fi = game_dispose_fi(code)?;
     let report = add_report(code, c, &g)?;
@@ -825,7 +836,17 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
     let rs_move = add_rs_move(code, c, &g, report, rs_apply)?;
     let event = add_event(code, c, &g, report, save, rs_move)?;
     let cancel = add_cancel(code, c, &g, report, save)?;
-    let begin = add_begin(code, c, &g, report, save, restore_base, event, cancel)?;
+    let begin = add_begin(
+        code,
+        c,
+        &g,
+        report,
+        save,
+        restore_base,
+        event,
+        cancel,
+        rs_content,
+    )?;
     let clamp = add_clamp(code, c, &g, report, save)?;
     let (panel_push, cap_t) = add_panel_push(code, c, begin)?;
     let rs = RsFns {
@@ -835,7 +856,7 @@ fn build(code: &mut Bytecode, c: &Ctx) -> Result<DragApi> {
     };
     let rs_push = add_rs_push(code, c, &g, report, begin, rs.content, cap_t)?;
     let rs_reflow = add_rs_reflow(code, c, report, clamp, &rs, cap_t)?;
-    let rs_install = add_rs_install(code, c, report, &rs, rs_push, cap_t)?;
+    let rs_install = add_rs_install(code, c, &g, report, &rs, rs_push, cap_t)?;
     let late = add_panel_late(
         code,
         c,
@@ -1264,8 +1285,12 @@ fn add_restore(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) 
 // AllInv: in a bottom-aligned box), so the top would move up: the panel's
 // offsetY grows by the added height, the top stays and the panel grows
 // downward. The rows are saved as `mpWinSize:<key>` at each change, the
-// position (offset) on release as for a move. On install (panel styled) a
-// saved size is applied; the panel's reflow handler (clamp, then the rows
+// position (offset) on release as for a move. On install (panel styled) the
+// scroll area's vanilla maxHeight is stored as `mpWinBaseH:<key>`, then a
+// saved size is applied. A double push resets a resized panel to vanilla:
+// styled offsets, `mpWinSize` removed, maxHeight back to `mpWinBaseH`
+// (the styled offsets with the grown height put the header above the
+// screen). The panel's reflow handler (clamp, then the rows
 // kept built: vanilla showInventory resets visibleHeight to 6) replaces the
 // plain clamp.
 
@@ -1980,6 +2005,7 @@ fn add_rs_reflow(
 fn add_rs_install(
     code: &mut Bytecode,
     c: &Ctx,
+    g: &Globals,
     report: RefFun,
     rs: &RsFns,
     rs_push: RefFun,
@@ -1989,6 +2015,7 @@ fn add_rs_install(
     let f_side = float_const(code, HANDLE_PX);
     let mut r = Regs(vec![c.flow_t, c.str_t]);
     let (panel, key) = (Reg(0), Reg(1));
+    let (full, mh, dd) = (r.r(c.str_t), r.r(c.rs.nint_t), r.r(c.dyn_t));
     let (v, exc, ct, rows, z, b, it, w) = (
         r.r(c.void_t),
         r.r(c.dyn_t),
@@ -2024,6 +2051,21 @@ fn add_rs_install(
         arg0: panel,
     });
     a.jmp(Opcode::JNull { reg: ct, offset: 0 }, "out");
+    // The vanilla height (constructor argument or CSS), before a saved size
+    // replaces it: what a double push on the header restores.
+    full_key(&mut a, c, g.base_h, full, key);
+    a.op(Opcode::Field {
+        dst: mh,
+        obj: ct,
+        field: c.rs.max_h,
+    });
+    a.op(Opcode::SafeCast { dst: dd, src: mh });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: c.set_ud,
+        arg0: full,
+        arg1: dd,
+    });
     a.op(Opcode::Call1 {
         dst: rows,
         fun: rs.read,
@@ -2700,11 +2742,21 @@ fn add_begin(
     restore_base: RefFun,
     event: RefFun,
     cancel: RefFun,
+    content: RefFun,
 ) -> Result<RefFun> {
     let k0 = int_const(code, 0);
     let f_dbl = float_const(code, DOUBLE_S);
     let mut r = Regs(vec![c.obj_t, c.obj_t, c.str_t]);
     let (obj, follow, key) = (Reg(0), Reg(1), Reg(2));
+    let (full, sd, nd, pf, ct, nh, inv) = (
+        r.r(c.str_t),
+        r.r(c.dyn_t),
+        r.r(c.dyn_t),
+        r.r(c.flow_t),
+        r.r(c.rs.cont_t),
+        r.r(c.rs.nint_t),
+        r.r(c.rs.inv_t),
+    );
     let (v, exc, p, fl, sc, pr, fp) = (
         r.r(c.void_t),
         r.r(c.dyn_t),
@@ -2797,6 +2849,78 @@ fn add_begin(
         arg1: follow,
         arg2: key,
     });
+    // A resized panel also gets its vanilla height back (saved size dropped):
+    // the resize grew it downward by raising offsetY, so the styled offsets
+    // with the grown height put its header above the screen.
+    a.jmp(
+        Opcode::JNull {
+            reg: key,
+            offset: 0,
+        },
+        "reset_done",
+    );
+    full_key(&mut a, c, g.size, full, key);
+    a.op(Opcode::Null { dst: nd });
+    a.op(Opcode::Call2 {
+        dst: sd,
+        fun: c.get_ud,
+        arg0: full,
+        arg1: nd,
+    });
+    a.jmp(Opcode::JNull { reg: sd, offset: 0 }, "reset_done");
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: c.set_ud,
+        arg0: full,
+        arg1: nd,
+    });
+    a.op(Opcode::SafeCast { dst: pf, src: obj });
+    a.op(Opcode::Call1 {
+        dst: ct,
+        fun: content,
+        arg0: pf,
+    });
+    a.jmp(Opcode::JNull { reg: ct, offset: 0 }, "reset_done");
+    full_key(&mut a, c, g.base_h, full, key);
+    a.op(Opcode::Call2 {
+        dst: sd,
+        fun: c.get_ud,
+        arg0: full,
+        arg1: nd,
+    });
+    a.op(Opcode::SafeCast { dst: nh, src: sd });
+    a.op(Opcode::Call2 {
+        dst: nh,
+        fun: c.rs.set_max_h,
+        arg0: ct,
+        arg1: nh,
+    });
+    // vanilla's update for a new viewport (needScroll class, scroll at the top)
+    a.op(Opcode::Call1 {
+        dst: inv,
+        fun: c.rs.get_inv,
+        arg0: ct,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: inv,
+            offset: 0,
+        },
+        "reset_scroll",
+    );
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: c.rs.content_changed,
+        arg0: ct,
+        arg1: inv,
+    });
+    a.label("reset_scroll");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: c.rs.scroll_reset,
+        arg0: ct,
+    });
+    a.label("reset_done");
     a.op(Opcode::Null { dst: nobj });
     a.op(Opcode::SetGlobal {
         global: g.last,
@@ -5655,7 +5779,7 @@ mod tests {
         let (panel, pr) = scene(s, c);
         let k = &mut s.c;
         let inv = k.obj(&[(c.rs.vis_h, V::I(6)), (c.rs.base_h, V::I(6))]);
-        let cont = k.obj(&[(c.rs.calc_h, V::F(330.0))]);
+        let cont = k.obj(&[(c.rs.calc_h, V::F(330.0)), (c.rs.max_h, V::I(330))]);
         k.key_set(&cont, "cont".into(), V::B(true));
         k.key_set(&cont, "inv".into(), inv.clone());
         let kids = k.arr(c.arr_len, c.arr_arr, vec![V::Null, cont.clone()]);
@@ -5692,6 +5816,11 @@ mod tests {
         // Install: no saved size, a handle at the bottom-left corner.
         s.run(f.rs_install, vec![panel.clone(), key.clone()]);
         assert!(s.c.take("maxHeight").is_empty(), "no size to restore");
+        assert_eq!(
+            s.c.map("ud", "mpWinBaseH:k"),
+            V::I(330),
+            "vanilla height kept"
+        );
         let made = s.c.take("handle");
         assert_eq!(made.len(), 1);
         let it = made[0][0].clone();
@@ -5782,15 +5911,31 @@ mod tests {
         assert_eq!(s.c.get(&pr, c.off_x), V::I(30));
         assert!(s.c.take("maxHeight").is_empty());
         event(&mut s, &c, &f, c.ev_release);
-        // Double click on the header: position reset, size kept.
+        // Double click on the header: vanilla placement and vanilla height
+        // (stored on install), the saved size dropped.
         s.c.put("in", "now", V::F(30.0));
         press(&mut s, &f, &panel);
         event(&mut s, &c, &f, c.ev_release);
         s.c.put("in", "now", V::F(30.1));
+        s.c.take("maxHeight");
+        s.c.take("contentChanged");
+        s.c.take("scrollReset");
         s.run(f.begin, vec![panel.clone(), V::Null, key.clone()]);
         assert_eq!(s.c.get(&pr, c.off_x), V::I(0));
         assert_eq!(s.c.get(&pr, c.off_y), V::I(0));
-        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(MIN_ROWS));
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::Null);
+        assert_eq!(s.c.take("maxHeight"), vec![vec![cont.clone(), V::I(330)]]);
+        assert_eq!(s.c.take("contentChanged").len(), 1);
+        assert_eq!(s.c.take("scrollReset"), vec![vec![cont.clone()]]);
+        // A second reset (no saved size): position only.
+        s.c.put("in", "now", V::F(40.0));
+        press(&mut s, &f, &panel);
+        event(&mut s, &c, &f, c.ev_release);
+        s.c.put("in", "now", V::F(40.1));
+        s.run(f.begin, vec![panel.clone(), V::Null, key.clone()]);
+        assert!(s.c.take("maxHeight").is_empty());
+        // A size saved again (another resize) for the reopen below.
+        s.c.put("ud", "mpWinSize:k", V::I(MIN_ROWS));
 
         // Reopened (a new panel): the saved size comes back; its reflow
         // rebuilds rows that vanilla dropped (showInventory: 6, scroll: fewer).
@@ -5871,5 +6016,85 @@ mod tests {
             "pinned over the CSS offset"
         );
         assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(7));
+    }
+
+    /// Push the resize handle of `panel` (installed by `late`) at y0, move to y1, release.
+    fn resize(s: &mut Sim, c: &Ctx, f: &Fns, panel: &V, y0: f64, y1: f64) {
+        let it = s.c.take("handle").last().expect("a handle")[0].clone();
+        let V::Clo(_, hcap) = s.c.get(&it, c.on_push) else {
+            panic!("no handle push on {panel:?}")
+        };
+        mouse(s, 20.0, y0);
+        let kd = s.c.enm(c.ev_push, vec![]);
+        let e = s.c.obj(&[(c.kind, kd), (c.button, V::I(0))]);
+        s.run(f.rs_push, vec![*hcap, e]);
+        mouse(s, 20.0, y1);
+        event(s, c, f, c.ev_move);
+        event(s, c, f, c.ev_release);
+        s.c.take("startCapture");
+    }
+
+    /// The chest (CSS offset-y -410, vanilla scroll area 170) resized at its
+    /// styled spot grows downward (offsetY raised by the added rows); a
+    /// double click on its header then puts it back where vanilla does:
+    /// styled offsets AND vanilla height (with the grown height the styled
+    /// offset put the header above the screen, y -359, and the issue #4
+    /// guard kept it there). At that spot the clamp leaves it alone (#4).
+    #[test]
+    fn chest_reset_after_resize_is_vanilla() {
+        let Some(image) = game() else { return };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let (panel, pr, cont, _) = rs_panel(&mut s, &c);
+        s.c.set(&cont, c.rs.max_h, V::I(170));
+        let (al_h, al_v) = (s.c.enm(0, vec![]), s.c.enm(2, vec![]));
+        s.c.set(&pr, c.is_abs, V::B(true));
+        s.c.set(&pr, c.h_align, al_h);
+        s.c.set(&pr, c.v_align, al_v);
+        s.c.set(&pr, c.off_y, V::I(-410));
+        s.c.set(&pr, c.p_calc_w, V::I(300));
+        s.c.set(&panel, c.visible, V::B(true));
+        let dom = s.c.obj(&[(c.need_style, V::B(false))]);
+        s.c.set(&panel, c.dom, dom);
+        let cap = s.c.enm(0, vec![panel.clone(), V::S("k".into())]);
+        s.run(f.late, vec![cap.clone()]);
+        assert_eq!(s.c.map("ud", "mpWinBase:k"), packed(0, -410));
+        assert_eq!(s.c.map("ud", "mpWinBaseH:k"), V::I(170));
+
+        // +3 rows (all the room below it): offsetY -410 + 159.
+        resize(&mut s, &c, &f, &panel, 600.0, 600.0 + 3.0 * ROW_PX as f64);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-410 + 3 * ROW_PX));
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(9));
+        assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(0, -410 + 3 * ROW_PX));
+
+        // Double click on the header.
+        s.c.take("maxHeight");
+        s.c.put("in", "now", V::F(20.0));
+        press(&mut s, &f, &panel);
+        event(&mut s, &c, &f, c.ev_release);
+        s.c.put("in", "now", V::F(20.1));
+        s.run(f.begin, vec![panel.clone(), V::Null, V::S("k".into())]);
+        assert_eq!(s.c.get(&pr, c.off_x), V::I(0));
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-410), "styled spot");
+        assert_eq!(
+            s.c.take("maxHeight"),
+            vec![vec![cont.clone(), V::I(170)]],
+            "vanilla height"
+        );
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::Null, "size forgotten");
+        assert_eq!(s.c.map("ud", "mpWinPos:k"), packed(0, -410));
+
+        // Its reflow (parent seen above the screen, stale): left alone (#4).
+        let fl = s.c.get(&panel, c.parent);
+        s.c.set(&fl, c.abs_y, V::F(-500.0));
+        s.c.take("setUserData");
+        s.c.take("needReflow");
+        s.run(f.rs_reflow, vec![cap]);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(-410));
+        assert!(s.c.take("needReflow").is_empty());
+        assert!(s.c.take("setUserData").is_empty());
+        assert!(s.c.take("maxHeight").is_empty(), "no size re-applied");
     }
 }
