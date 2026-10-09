@@ -58,6 +58,7 @@ mod mod_version;
 mod net_guard;
 mod npc_talk;
 mod party_inventory;
+mod patch_queue;
 mod ping_cell;
 mod ready_start;
 mod returning_units;
@@ -226,6 +227,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     scroll_hit::patch_scroll_hit(&mut code);
     save_kind::patch_save_kind(&mut code);
     save_order::patch_save_order(&mut code);
+    patch_queue::patch_patch_queue(&mut code);
     jit_names::patch_jit_names(&mut code);
     }
     #[cfg(feature = "harness")]
