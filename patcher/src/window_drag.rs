@@ -265,6 +265,12 @@ struct RsCtx {
     /// before a saved size is applied (a double push restores it).
     max_h: RefField,
     calc_h: RefField,
+    /// `Game.inst.ui.worldButtonsBar` (class global, its type; then each
+    /// field with its type): the HUD bottom bar a resize stops above.
+    game_cls: (RefGlobal, RefType),
+    game_inst: (RefField, RefType),
+    game_ui: (RefField, RefType),
+    ui_bar: (RefField, RefType),
     /// `new h2d.Interactive(w, h, parent, shape)`; shape's type.
     inter_ctor: RefFun,
     shape_t: RefType,
@@ -358,6 +364,16 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
     }
     let max_h = typed(code, c.flow_t, "maxHeight", nint_t)?;
     let calc_h = typed(code, c.flow_t, "calculatedHeight", c.f64_t)?;
+    let game_t = obj_type(code, "Game")?;
+    let (game_cls, game_cls_t) = class_global(code, "Game")?;
+    let game_inst = typed(code, game_cls_t, "inst", game_t)?;
+    let ui_t = obj_type(code, "ui.GameUI")?;
+    let game_ui = typed(code, game_t, "ui", ui_t)?;
+    let bar_t = obj_type(code, "ui.comp.gameUIComp.WorldButtonsBar")?;
+    if !is_sub(code, bar_t, c.obj_t) {
+        bail!("WorldButtonsBar is not an h2d.Object");
+    }
+    let ui_bar = typed(code, ui_t, "worldButtonsBar", bar_t)?;
     let inter_ctor = method(code, c.inter_t, "__constructor__")?.findex;
     let (ia, ir) = sig(code, inter_ctor)?;
     if ia.len() != 5 || ia[..4] != [c.inter_t, c.f64_t, c.f64_t, c.obj_t] || ir != c.void_t {
@@ -381,6 +397,10 @@ fn rs_ctx(code: &Bytecode, c: &RsBase) -> Result<RsCtx> {
         nint_t,
         max_h,
         calc_h,
+        game_cls: (game_cls, game_cls_t),
+        game_inst: (game_inst, game_t),
+        game_ui: (game_ui, ui_t),
+        ui_bar: (ui_bar, bar_t),
         inter_ctor,
         shape_t: ia[4],
         bg_color,
@@ -1276,7 +1296,8 @@ fn add_restore(code: &mut Bytecode, c: &Ctx, prefix: RefGlobal, report: RefFun) 
 // Its push starts the shared drag capture in resize mode (`g.rs_on`): a move
 // sets the panel's InventoryContent (the scroll area) to `rows` whole grid
 // rows, rows = start + round(mouse dy / ROW_PX), clamped to [MIN_ROWS, as
-// many as fit below the panel on screen]: max height = rows * ROW_PX +
+// many as fit below the panel on screen, above the HUD bottom bar
+// (Game.inst.ui.worldButtonsBar) while it is shown]: max height = rows * ROW_PX +
 // ROW_PAD (Flow.set_maxHeight only; no CSS sets it on
 // inventory-content). Width is untouched. Enough grid rows are built
 // (Inventory.visibleHeight / baseHeight >= rows, forceUpdate). The three
@@ -1768,6 +1789,12 @@ fn add_rs_push(
         r.r(c.obj_t),
         r.r(c.bool_t),
     );
+    let (gcls, gi, gui, bar) = (
+        r.r(c.rs.game_cls.1),
+        r.r(c.rs.game_inst.1),
+        r.r(c.rs.game_ui.1),
+        r.r(c.rs.ui_bar.1),
+    );
     let gd = Guard { exc, v };
     let mut a = Asm::new();
     guard_open(&mut a, &gd);
@@ -1828,13 +1855,85 @@ fn add_rs_push(
         b: fr,
     });
     a.op(Opcode::ToInt { dst: rows, src: h });
-    // Max: what fits between the panel's bottom and the screen's (no less than now).
+    // Max: what fits between the panel's bottom and the screen's, or the top
+    // of the HUD bottom bar when it is shown (no less than now).
     a.op(Opcode::Field {
         dst: si,
         obj: sc,
         field: c.sc_h,
     });
     a.op(Opcode::ToSFloat { dst: room, src: si });
+    a.op(Opcode::GetGlobal {
+        dst: gcls,
+        global: c.rs.game_cls.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: gcls,
+            offset: 0,
+        },
+        "bar",
+    );
+    a.op(Opcode::Field {
+        dst: gi,
+        obj: gcls,
+        field: c.rs.game_inst.0,
+    });
+    a.jmp(Opcode::JNull { reg: gi, offset: 0 }, "bar");
+    a.op(Opcode::Field {
+        dst: gui,
+        obj: gi,
+        field: c.rs.game_ui.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: gui,
+            offset: 0,
+        },
+        "bar",
+    );
+    a.op(Opcode::Field {
+        dst: bar,
+        obj: gui,
+        field: c.rs.ui_bar.0,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: bar,
+            offset: 0,
+        },
+        "bar",
+    );
+    a.op(Opcode::Field {
+        dst: b,
+        obj: bar,
+        field: c.visible,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "bar");
+    a.op(Opcode::Field {
+        dst: t,
+        obj: bar,
+        field: c.abs_y,
+    });
+    a.op(Opcode::Float { dst: h, ptr: f0 });
+    a.jmp(
+        Opcode::JSLte {
+            a: t,
+            b: h,
+            offset: 0,
+        },
+        "bar",
+    );
+    a.jmp(
+        Opcode::JSGte {
+            a: t,
+            b: room,
+            offset: 0,
+        },
+        "bar",
+    );
+    a.op(Opcode::Mov { dst: room, src: t });
+    a.label("bar");
     for fl in [c.abs_y, c.rs.calc_h] {
         a.op(Opcode::Field {
             dst: t,
@@ -6096,5 +6195,36 @@ mod tests {
         assert!(s.c.take("needReflow").is_empty());
         assert!(s.c.take("setUserData").is_empty());
         assert!(s.c.take("maxHeight").is_empty(), "no size re-applied");
+    }
+
+    /// The resize stops above the HUD bottom bar (Game.inst.ui.worldButtonsBar)
+    /// while it is shown: panel bottom 900, bar top 1000 -> one more row
+    /// (screen bottom 1080 would allow 3); hidden bar -> the screen bottom.
+    #[test]
+    fn resize_stops_above_hud_bar() {
+        let Some(image) = game() else { return };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let f = fns(&code, n);
+        let mut s = sim(&code, n, &c);
+        let bar = s.c.obj(&[(c.visible, V::B(true)), (c.abs_y, V::F(1000.0))]);
+        let ui = s.c.obj(&[(c.rs.ui_bar.0, bar.clone())]);
+        let gi = s.c.obj(&[(c.rs.game_ui.0, ui)]);
+        let gcls = s.c.obj(&[(c.rs.game_inst.0, gi)]);
+        s.c.globals.insert(c.rs.game_cls.0 .0, gcls);
+        let (panel, _, _, _) = rs_panel(&mut s, &c);
+        s.run(f.rs_install, vec![panel.clone(), V::S("k".into())]);
+        resize(&mut s, &c, &f, &panel, 600.0, 1600.0);
+        assert_eq!(s.c.take("maxHeight").last().unwrap()[1], rs_height(7));
+        assert_eq!(s.c.map("ud", "mpWinSize:k"), V::I(7));
+
+        // The bar hidden: down to the screen bottom (6 + 3 rows).
+        s.c.set(&bar, c.visible, V::B(false));
+        let (p2, _, _, _) = rs_panel(&mut s, &c);
+        s.c.put("ud", "mpWinSize:k", V::Null);
+        s.run(f.rs_install, vec![p2.clone(), V::S("k".into())]);
+        s.c.put("in", "now", V::F(30.0));
+        resize(&mut s, &c, &f, &p2, 600.0, 1600.0);
+        assert_eq!(s.c.take("maxHeight").last().unwrap()[1], rs_height(9));
     }
 }
