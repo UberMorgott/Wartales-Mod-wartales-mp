@@ -450,6 +450,21 @@ before it threw is kept. Not covered, still vanilla: argument decoding,
 property sync, object registration, full sync, RPC result callbacks, protocol
 errors. Skipped (logged) on mismatch.
 
+**Cancelled RPC results** (`src/rpc_cancel.rs`): when the host gets a call with
+a result for an object it does not know, hxbit answers `CANCEL_RPC` (12) and
+the caller's `processMessage` only removes the waiting callback, so it never
+runs. For a guest's battle skill request (`Battle.executeSkill`: `lockCounter++`,
+released by the result callback) that left `isLocked()` true for the rest of
+the battle: clicks, End Turn and damage previews dead, nothing logged. Now
+`Controller.battleExecuteSkill` notes each call id in an IntMap kept per host
+(`host.rpcUID - 1` right after `beginRPC`; cleared by Game.dispose), and when a
+noted id of the current host is cancelled the cancel branch first runs its
+waiting callback on a zero-filled input (the result decodes as false, like a
+refused request, so the lock is released), restores the ctx and prints
+`mp: net: RPC result #<id> (battle skill request) cancelled by the host; its
+callback ran as refused`. Other cancelled calls stay vanilla. Skipped (logged)
+on mismatch.
+
 **Client window close** (`src/window_close.rs`): the modal backdrop click
 (`Window.setModal`'s windowRoot onClick, Window.hx:295-300) closes a window on
 a click outside it, but on a client it always called `triggerClose()`, the RPC

@@ -62,6 +62,7 @@ mod patch_queue;
 mod ping_cell;
 mod ready_start;
 mod returning_units;
+mod rpc_cancel;
 mod save_kind;
 mod save_order;
 mod scroll_hit;
@@ -209,6 +210,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     tavern_resume::patch_tavern_resume(&mut code);
     mod_version::patch_mod_version(&mut code);
     net_guard::patch_net_guard(&mut code);
+    rpc_cancel::patch_rpc_cancel(&mut code);
     tip_overflow::patch_tip_overflow(&mut code);
     tooltip_input::patch(&mut code);
     censer_tip::patch_censer_tip(&mut code);
