@@ -62,6 +62,7 @@ mod npc_talk;
 mod party_inventory;
 mod patch_queue;
 mod ping_cell;
+mod prepared_skill;
 mod ready_start;
 mod returning_units;
 mod rpc_cancel;
@@ -191,6 +192,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     follow::patch_follow(&mut code);
     marker_names::patch_marker_names(&mut code);
     skill_cost::patch_skill_cost(&mut code);
+    prepared_skill::patch_prepared_skill(&mut code);
     skill_sync::patch_skill_sync(&mut code);
     skill_vars::patch_skill_vars(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
@@ -925,6 +927,7 @@ fn resolve_jumps(ops: &mut [Opcode], targets: &[(usize, usize)]) {
             | Opcode::JEq { offset, .. }
             | Opcode::JNotEq { offset, .. }
             | Opcode::JFalse { offset, .. }
+            | Opcode::JTrue { offset, .. }
             | Opcode::JAlways { offset }
             | Opcode::Trap { offset, .. } => *offset = off,
             _ => unreachable!("not a jump"),

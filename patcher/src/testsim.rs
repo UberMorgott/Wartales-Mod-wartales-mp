@@ -277,6 +277,13 @@ impl<'a> Sim<'a> {
                 Opcode::EnumField {
                     dst, value, field, ..
                 } => r[rr(dst)] = self.c.key_get(&r[rr(value)], &format!("e{}", field.0)),
+                Opcode::EnumAlloc { dst, construct } => {
+                    r[rr(dst)] = self.c.enm(construct.0 as i32, vec![])
+                }
+                Opcode::SetEnumField { value, field, src } => {
+                    let (e, v) = (r[rr(value)].clone(), r[rr(src)].clone());
+                    self.c.key_set(&e, format!("e{}", field.0), v);
+                }
                 Opcode::MakeEnum {
                     dst,
                     construct,
