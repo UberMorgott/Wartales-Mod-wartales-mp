@@ -49,6 +49,7 @@ mod jit_names;
 mod job_confirm;
 mod job_xp;
 mod loading_draw;
+mod lock_diag;
 mod log_error_cast;
 mod loot_level;
 mod loot_all;
@@ -211,6 +212,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     mod_version::patch_mod_version(&mut code);
     net_guard::patch_net_guard(&mut code);
     rpc_cancel::patch_rpc_cancel(&mut code);
+    lock_diag::patch_lock_diag(&mut code);
     tip_overflow::patch_tip_overflow(&mut code);
     tooltip_input::patch(&mut code);
     censer_tip::patch_censer_tip(&mut code);

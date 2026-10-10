@@ -465,6 +465,13 @@ refused request, so the lock is released), restores the ctx and prints
 callback ran as refused`. Other cancelled calls stay vanilla. Skipped (logged)
 on mismatch.
 
+**Battle lock diagnostics** (`src/lock_diag.rs`, print only): `set_lockCounter`
+keeps the call stack of each 0 -> n lock; a refusal while locked prints
+`mp: lock: <host refused a skill request | host refused an end turn | end turn
+blocked>, lockCounter=<n>, isAuth=<b>, locked since: <stack>` (netExecuteSkill,
+Controller.battleUnitEndTurn__impl, Battle.endTurn; at most 40 lines a run).
+Skipped (logged) on mismatch.
+
 **Client window close** (`src/window_close.rs`): the modal backdrop click
 (`Window.setModal`'s windowRoot onClick, Window.hx:295-300) closes a window on
 a click outside it, but on a client it always called `triggerClose()`, the RPC
