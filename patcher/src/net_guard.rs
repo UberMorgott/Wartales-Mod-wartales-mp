@@ -24,6 +24,11 @@
 //      An exception inside a writer leaves it raised for good: a partial
 //      message may be pending in ctx.out, or a send may be half done, and no
 //      handler exception is swallowed any more (vanilla from then on).
+//      `Game.start` counts the same way: a client starts its game inside its
+//      message handler (the onMessage closure Game.startClient installs), and an
+//      exception out of it must end the session as in vanilla, not leave a
+//      half-built world (World set, state never initialised: `Null access
+//      .getRegion` every frame, endless loading).
 //   G. A receive generation (new I32 global), +1 at the start of every
 //      `processMessage`: any message handled while a handler runs changes it.
 //   I. Every `__impl` call of every generated `networkRPC`, and
@@ -554,6 +559,18 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("endRPC: expected one Ret");
     }
     counted.push((fun_index(code, end.findex)?, None, r));
+    // Game.start counts as a writer: an exception out of it (a client's start
+    // runs inside its message handler) is never swallowed, so a
+    // broken start does not leave a half-built world running.
+    let start = method(code, c.game_t, "start")?;
+    let r = rets(start);
+    if fun_args(code, start) != [c.game_t]
+        || r.is_empty()
+        || r.iter().any(|&i| !no_switch_to(start, i))
+    {
+        bail!("Game.start: unexpected shape");
+    }
+    counted.push((fun_index(code, start.findex)?, Some(0), r));
     Ok(Plan {
         c,
         guarded,
@@ -1215,7 +1232,7 @@ mod tests {
             .flat_map(|g| &g.sites)
             .filter(|s| s.name.is_none())
             .count();
-        assert_eq!((n_impl, n_msg, p.counted.len()), (701, 4, 15));
+        assert_eq!((n_impl, n_msg, p.counted.len()), (701, 4, 16));
 
         // Block lengths, independent of register and constant numbers.
         let k = dummy_consts();
