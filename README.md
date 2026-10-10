@@ -97,6 +97,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Battle camera: rotating with the right mouse button while panning with the keyboard no longer speeds the camera up.
 - Tooltip keyword panels ("Poison", "Vigilance", ...) wrap into columns instead of running off the screen, and are not shown twice.
 - A censer that grants Purge (Remastered) shows its tooltip in chests, shops and other inventories again; before, its tooltip failed every frame, which froze the moved item between cells and dropped the FPS.
+- A boss's prepared two-turn skill that its script refuses when it fires (Matthias Lund's Lucilla Vengeance in Remastered) is cancelled and the turn goes on as usual; before, the battle froze on the boss's turn.
 - Starting troops larger than the new-game customize screen (it has five spots): instead of crashing ("Missing prefab Camera06"), the extra animals are left off the screen and belong to the host; humans always get a spot. Troops of five or fewer look exactly as before.
 
 ### Start-screen tooltips
