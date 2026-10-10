@@ -41,6 +41,10 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - A guest whose host left or crashed is no longer stuck on a black screen (seen after the host left the owned tavern and quit): the mod notices that the host's session is gone, and the game shows its normal disconnect message and returns to the title. A leaving player's own goodbye is now sent before their connection is closed.
 - A runaway style pass while the game-over window is built (for example after an escort dies and you press Continue) no longer leaves every button dead on every screen: the UI recovers, the error is logged to **shim.log**, and the normal pause menu opens instead. *(Vanilla bug.)*
 - A failed activity of a client (a lost fish or a broken lockpick on Extreme, or a failed activity that injures) no longer freezes fishing or the activity with a "Not allowed" error: the unit's injury is applied by the host and synced to everyone.
+- A co-op client no longer runs out of memory after several loads: the game kept every loaded world in a queue that only the host ever empties, so each save load, battle restart or reload on a client added a whole world to memory. *(Vanilla bug.)*
+- A battle skill request that the host cancels no longer leaves the client's battle locked (clicks, **End Turn** and damage previews dead): the client handles the cancel as a refused request.
+- A client watching another player's fishing, gathering, lock picking or singing no longer gets a stuck camera, cursor or inventory: only the host builds that mini-game window, so the watching client no longer hits an error that left its controls locked.
+- Watching forging, archery and work now reaches the other players: the marker values of these events were changed by the network's float precision, so they used to see an idle worker and a far-away ping.
 
 ### Co-op play
 
@@ -65,6 +69,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Forging is visible to the other players: while a player forges, everyone else in that place sees the worker at the anvil hammer, with each hit's particles and sound (perfect / good / bad) and the success or fail gesture at the end. Their camera, UI and controls are not touched. Every player needs this version: an older one shows a far-away ping and its sound instead.
 - Shared mini-games (fishing, mining, wood cutting, lock picking, singing, gambling, the ruins puzzles) no longer take over the other players' screens: only the player doing it gets the mini-game window and camera; everyone else keeps their own camera, inventory and controls and watches that player's character do it in the scene. Every player needs this version.
 - Archery and the progress-bar activities (studying, money laundering, dismantling, altering, snaring, tracking, ...) are visible to the other players too: the character doing it makes a work motion for each click or shot, in a place or in the camp. Their camera, UI and controls are not touched. Every player needs this version: an older one shows a far-away ping and its sound instead.
+- The bard's tavern song is visible to the other players: everyone else in the tavern sees the singer's song animation. Every player needs this version.
 - **Take all** button on the post-battle loot screen, and a take-all icon on searched barrels, crates and chests and on dialog item grids.
 - Item tooltips no longer swallow mouse input: a tooltip pushed over the hovered slot could make loot items unclickable and keep re-opening itself.
 - Career Plan fix: a client could see "+2" on level-up and get only "+1". The host now grants the extra point on top of its own current offer, ignores a grant when the unit has no aptitude point left, and drops a stale second request.
@@ -72,7 +77,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 ### Gameplay and interface
 
-- The load list shows the kind of each save next to its name: (Autosave), (Quicksave) or (Manual), so auto, quick and manual saves of one campaign no longer look alike.
+- The load list shows the kind of each save next to its name: (Autosave), (Quicksave) or (Manual), so auto, quick and manual saves of one campaign no longer look alike. The list is sorted newest first, the autosave included (before, the autosave was always on top, even when older).
 - Enemy friendly fire: area attacks cast by enemies also hit their own allies (never the caster), as player area attacks already do.
 - Switching a unit's profession keeps the experience earned in the old one, and applies at once without the confirm window.
 - Hold-to-confirm rings fill three times faster.
@@ -105,6 +110,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - The start-up window shows how many co-op patches were applied ("Applied N of M") with a progress bar, and says so when some were skipped.
 - **shim.log** is no longer flooded by network SYNC lines when the game's network log is on: they are counted instead, so later lines are not lost to the log size limit.
 - Writes post-battle loot-window steps (window rebuilds, button states, hovered and clicked elements) and camp-dialog choice / confession rewards to **shim.log**. This only adds log lines.
+- Writes battle requests refused while the battle is locked, and the call that took the lock, to **shim.log**, to find what leaves a battle dead. This only adds log lines.
 
 ## Install
 
