@@ -45,6 +45,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - A battle skill request that the host cancels no longer leaves the client's battle locked (clicks, **End Turn** and damage previews dead): the client handles the cancel as a refused request.
 - A client watching another player's fishing, gathering, lock picking or singing no longer gets a stuck camera, cursor or inventory: only the host builds that mini-game window, so the watching client no longer hits an error that left its controls locked.
 - Watching forging, archery and work now reaches the other players: the marker values of these events were changed by the network's float precision, so they used to see an idle worker and a far-away ping.
+- A guest joining or rejoining while a camp confession scene runs no longer loads forever: the joining guest now rebuilds the confession character from the synced confession instead of hitting an error, and an error while a guest's game starts is no longer ignored (it used to leave a half-loaded world on an endless loading screen).
 
 ### Co-op play
 
