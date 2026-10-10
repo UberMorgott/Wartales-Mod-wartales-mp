@@ -35,6 +35,7 @@ mod direct_lobby;
 mod dialog_inventory;
 mod dialog_recruit;
 mod dlc_untouched;
+mod fake_npc;
 mod drop_in;
 mod follow;
 mod force_leave;
@@ -168,6 +169,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     dialog_recruit::patch_dialog_recruit(&mut code);
     dialog_inventory::patch_dialog_inventory(&mut code);
     camp_talk::patch_camp_talk(&mut code);
+    fake_npc::patch_fake_npc(&mut code);
     camp_any_unit::patch_camp_any_unit(&mut code);
     camp_choice::patch_camp_choice(&mut code);
     hold_speed::patch_hold_speed(&mut code);
