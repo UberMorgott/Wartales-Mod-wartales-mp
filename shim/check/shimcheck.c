@@ -526,6 +526,36 @@ static void check_reconnect(read_fn read, avail_fn avail, session_fn close, send
 	check(st.closes == closes, "no CloseSessionWithUser through the whole reload");
 }
 
+// A guest's join dial that never connects (issue #7: SDR rendezvous timed
+// out): the game sent code 3 and read nothing back, yet must get its close,
+// with the sid it dialled, or it waits on the loading screen for ever.
+// The loopback fake echoes the send back; the game reads that first.
+static void check_dial_failed(read_fn read, session_fn close, send_fn send, HMODULE api, const wchar_t *log) {
+	fire_failed_fn fire_failed = (fire_failed_fn)(void *)GetProcAddress(api, "fake_fire_session_failed");
+	const uint64_t DIAL = 76561198000000008ULL;
+	const unsigned char want[7] = {8, 0, 0, 0x2a, 0x2b, 0x2c, 0x2d};
+	unsigned char uid[8], buf[64];
+	uint32_t len;
+	vuid from;
+
+	set_state_fn set_state = (set_state_fn)(void *)GetProcAddress(api, "fake_set_session_state");
+	put_uid(uid, DIAL);
+	set_state(DIAL, 2, 0); // finding route, never connected
+	check(send(uid, (unsigned char *)"\x03\x01\x00\x2a\x2b\x2c\x2d", 7, 2, 0) == 1, "the guest's connectTo sends code 3 with its sid");
+	set_state(DIAL, 5, 5008);
+	check(fire_failed != NULL && fire_failed(DIAL, 5008, "Timed out attempting to negotiate rendezvous") == 1,
+		"SessionFailed posted for the dial");
+	// Armed by the send alone: the loopback echo is still unread.
+	check(wait_log(log, "sdr: session with 76561198000000008 lost (SessionFailed", 4000), "the dial counts as a session in use");
+	from = read(buf, sizeof(buf), &len, 0); // the loopback echo goes first, as any queued real message
+	check(from != NULL && get_uid(from) == DIAL && len == 7 && buf[0] == 3, "loopback echo of the dial read");
+	check(wait_log(log, "sdr: peer lost, injected close for 76561198000000008 sid 757869354 on channel 0", 8000),
+		"a failed dial gets a close with the dialled sid");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == DIAL && len == 7 && memcmp(buf, want, 7) == 0, "injected frame [08 00 00 2a 2b 2c 2d]");
+	close(uid);
+}
+
 // Watch slots are reused: after many peers came and went (lobby probes over
 // the bridge, guests that left), a new game session still gets its close.
 static void check_watch_reuse(read_fn read, session_fn close, HMODULE api, const wchar_t *log) {
@@ -759,6 +789,7 @@ static void check_sdr(int with_api, int partial, HMODULE steam, HMODULE api, con
 
 	check_lost(read, avail, close, api, log);
 	check_reconnect(read, avail, close, send, api, log);
+	check_dial_failed(read, close, send, api, log);
 	check_watch_reuse(read, close, api, log);
 
 	stats(&st);

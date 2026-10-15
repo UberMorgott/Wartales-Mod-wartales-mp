@@ -246,8 +246,12 @@ static unsigned long sdr_sent, sdr_send_failed, sdr_received, sdr_dropped, sdr_a
 // onUserData@54888 lets code 8 past the pid-order check, matches sid (bytes
 // 3..6) against the session and runs stop(); onStop() -- the vanilla
 // disconnect path (Host.connect closure @55008 -> message, back to title).
-//   armed:   the game read a game packet (>= 7 bytes) from the peer since its
-//            last close_p2p_session; that packet's sid and channel are kept.
+//   armed:   the game read a game packet (>= 7 bytes) from the peer, or sent
+//            it a join (code 3: a guest's dial, before anything comes back),
+//            since its last close_p2p_session; that packet's sid and channel
+//            are kept. Vanilla told a dial that never connected through
+//            P2PSessionConnectFail_t (onUserClose@54887 -> onConnect(null));
+//            without this the guest waited on the loading screen for ever.
 //   lost:    while armed, Steam reports the session closed by the peer (4),
 //            failed locally (5) or dead (-3), or SessionFailed_t arrives; or
 //            it reports none (0) within SDR_LOST_IDLE_MS of the last packet
@@ -264,6 +268,7 @@ static unsigned long sdr_sent, sdr_send_failed, sdr_received, sdr_dropped, sdr_a
 #define SDR_LOST_IDLE_MS 60000
 #define SDR_LOST_CONFIRM_MS 2000 // a re-dial that reaches connected by then cancels
 #define SDR_FRAME_CLOSE 8 // SteamService message code: stop
+#define SDR_FRAME_JOIN 3  // SteamService message code: a guest's join (connectTo@54893)
 
 static struct {
 	uint64_t id;
@@ -868,6 +873,21 @@ static void lost_tick(DWORD now) {
 	}
 }
 
+// arm marks the session with sid as one the game holds with the watched peer
+// w: from a game packet it read, or the join it sent. Lock held.
+static void arm(int w, const unsigned char *sid, int channel) {
+	if (w < 0)
+		return;
+	if (!sdr_watch[w].armed || memcmp(sdr_watch[w].sid, sid, 4) != 0) {
+		sdr_watch[w].lost = FALSE; // a new session: its own close
+		sdr_watch[w].injected = FALSE;
+	}
+	sdr_watch[w].armed = TRUE;
+	memcpy(sdr_watch[w].sid, sid, 4);
+	sdr_watch[w].channel = channel;
+	sdr_watch[w].last_recv = GetTickCount();
+}
+
 static BOOL channel_ok(int channel) {
 	if (channel >= 0 && channel < SDR_CHANNELS)
 		return TRUE;
@@ -912,6 +932,12 @@ static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int l
 			sdr_watch[w].stopping = TRUE;
 			memcpy(sdr_watch[w].stop_sid, data + 3, 4);
 		}
+	} else if (length >= 7 && data[0] == SDR_FRAME_JOIN) {
+		// SteamService.connectTo's join: the session with this sid is in use
+		// before anything came back, unless it is the one the game let go.
+		int w = find_watch(to.u.steam_id);
+		if (w >= 0 && !(sdr_watch[w].let_go && memcmp(sdr_watch[w].gone_sid, data + 3, 4) == 0))
+			arm(w, data + 3, channel);
 	}
 	if (res == SDR_RESULT_OK) {
 		sdr_sent++;
@@ -961,20 +987,10 @@ static vuid detour_read_p2p_packet(unsigned char *data, int max_length, uint32_t
 	from = m->peer.u.steam_id;
 	if (watch_peer(from) || sdr_received == 1)
 		shim_log("sdr: first packet received from %llu, %d bytes, channel %d", (unsigned long long)from, n, channel);
-	if (m->release != synth_release && m->size >= 7) {
+	if (m->release != synth_release && m->size >= 7 && !of_gone(m)) {
 		// A game packet: [code][pid:2][sid:4]...; the session is in use.
 		// A late packet of the session the game closed does not arm it again.
-		int w = find_watch(from);
-		if (w >= 0 && !of_gone(m)) {
-			if (!sdr_watch[w].armed || memcmp(sdr_watch[w].sid, (const unsigned char *)m->data + 3, 4) != 0) {
-				sdr_watch[w].lost = FALSE; // a new session: its own close
-				sdr_watch[w].injected = FALSE;
-			}
-			sdr_watch[w].armed = TRUE;
-			memcpy(sdr_watch[w].sid, (const unsigned char *)m->data + 3, 4);
-			sdr_watch[w].channel = channel;
-			sdr_watch[w].last_recv = GetTickCount();
-		}
+		arm(find_watch(from), (const unsigned char *)m->data + 3, channel);
 	}
 	msg_release(m);
 	LeaveCriticalSection(&sdr_lock);
