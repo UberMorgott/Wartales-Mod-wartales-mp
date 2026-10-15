@@ -9,6 +9,14 @@
 //	endpoint  [flags:1 bit7=0][ipv4:4][port:2]                              7 bytes -> 12 + 1 = 13 symbols
 //	steam     [flags:1 bit7=1][account:4 BE][key:4 BE]                       9 bytes -> 15 + 1 = 16 symbols
 //	combined  [flags:1 bit7=1 bit6=1][ipv4:4][port:2][account:4 BE][key:4 BE] 15 bytes -> 24 + 1 = 25 symbols
+//	punch     [flags:1 = 0][ipv4:4][tcp port:2][udp port:2]                    9 bytes -> 15 + 1 = 16 symbols
+//	reply     [flags:1 bit7=0 bit6=1][ipv4:4][udp port:2]                     7 bytes -> 12 + 1 = 13 symbols
+//
+// A punch code is a host's manual code: the direct TCP route plus the UDP
+// address STUN saw for the host's punch socket (same IP). It shares the steam
+// length and is told apart by bit 7. A reply code goes the other way: a guest
+// whose punch got no answer hands the host its own UDP address. It shares the
+// endpoint length and is told apart by bit 6, which older helpers reject.
 //
 // An endpoint route is the direct transport: the guest connects to ip:port.
 // A steam route is the SDR transport: the guest reaches the host through
@@ -57,6 +65,9 @@ const (
 	// with it, the combined layout.
 	FlagSteam = 0x80
 	FlagBoth  = 0x40
+	// FlagReply (bit 6 without bit 7) on an endpoint-length code marks a
+	// guest's reply code.
+	FlagReply = FlagBoth
 
 	// steamIDBase is SteamID64 of account 0 in universe Public, type
 	// Individual, instance Desktop: what every player account is.
@@ -96,6 +107,34 @@ func AccountID(steamID64 uint64) (uint32, bool) {
 type Code struct {
 	Endpoint *Endpoint
 	Steam    *Steam
+	// Punch is the host's UDP punch address (punch layout, with Endpoint).
+	Punch *Endpoint
+	// Reply is a guest's UDP address (reply layout, alone): not a route.
+	Reply *Endpoint
+}
+
+// EncodePunch makes a host's 16 symbol code: the TCP endpoint e and the UDP
+// port of the punch socket as STUN saw it, on the same IP.
+func EncodePunch(e Endpoint, udpPort uint16) (string, error) {
+	ip4 := e.IP.To4()
+	if ip4 == nil {
+		return "", fmt.Errorf("join code needs an IPv4 address, got %v", e.IP)
+	}
+	payload := make([]byte, steamPayloadLen) // flags 0
+	copy(payload[1:5], ip4)
+	binary.BigEndian.PutUint16(payload[5:7], e.Port)
+	binary.BigEndian.PutUint16(payload[7:9], udpPort)
+	return encode(payload, steamBodyLen), nil
+}
+
+// EncodeReply makes a guest's 13 symbol reply code from its UDP address.
+func EncodeReply(e Endpoint) (string, error) {
+	ip4 := e.IP.To4()
+	if ip4 == nil {
+		return "", fmt.Errorf("reply code needs an IPv4 address, got %v", e.IP)
+	}
+	payload := []byte{FlagReply, ip4[0], ip4[1], ip4[2], ip4[3], byte(e.Port >> 8), byte(e.Port)}
+	return encode(payload, bodyLen), nil
 }
 
 // EncodeCombined turns an endpoint and a steam route into a 25 symbol code.
@@ -264,6 +303,9 @@ func DecodeAny(s string) (Code, error) {
 		if err != nil {
 			return Code{}, err
 		}
+		if p[0]&(FlagSteam|FlagBoth) == FlagReply {
+			return Code{Reply: &Endpoint{IP: net.IPv4(p[1], p[2], p[3], p[4]), Port: binary.BigEndian.Uint16(p[5:7])}}, nil
+		}
 		if p[0]&(FlagSteam|FlagBoth) != 0 {
 			return Code{}, fmt.Errorf("%w: layout flags on an endpoint-length code", errBadCode)
 		}
@@ -276,6 +318,13 @@ func DecodeAny(s string) (Code, error) {
 		p, err := decode(norm, steamBodyLen, steamPayloadLen)
 		if err != nil {
 			return Code{}, err
+		}
+		if p[0] == 0 {
+			ip := net.IPv4(p[1], p[2], p[3], p[4])
+			return Code{
+				Endpoint: &Endpoint{IP: ip, Port: binary.BigEndian.Uint16(p[5:7])},
+				Punch:    &Endpoint{IP: ip, Port: binary.BigEndian.Uint16(p[7:9])},
+			}, nil
 		}
 		if p[0]&(FlagSteam|FlagBoth) != FlagSteam {
 			return Code{}, fmt.Errorf("%w: wrong layout flags on a steam-length code", errBadCode)

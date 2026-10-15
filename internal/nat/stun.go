@@ -38,14 +38,7 @@ func STUNExternalIP(server string) (net.IP, error) {
 	}
 	defer func() { _ = c.Close() }() // UDP socket, nothing to flush on close
 
-	req := make([]byte, 20)
-	binary.BigEndian.PutUint16(req[0:], 0x0001) // binding request
-	binary.BigEndian.PutUint16(req[2:], 0)      // no attributes
-	binary.BigEndian.PutUint32(req[4:], magicCookie)
-	if _, err := rand.Read(req[8:20]); err != nil {
-		return nil, err
-	}
-
+	req := BindingRequest()
 	if err := c.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return nil, err
 	}
@@ -60,7 +53,34 @@ func STUNExternalIP(server string) (net.IP, error) {
 	return parseSTUN(buf[:n], req[8:20])
 }
 
+// BindingRequest builds an RFC 5389 binding request with a random
+// transaction id (bytes 8..20).
+func BindingRequest() []byte {
+	req := make([]byte, 20)
+	binary.BigEndian.PutUint16(req[0:], 0x0001) // binding request, no attributes
+	binary.BigEndian.PutUint32(req[4:], magicCookie)
+	_, _ = rand.Read(req[8:20]) // crypto/rand.Read never returns an error
+	return req
+}
+
+// IsSTUN reports whether a datagram looks like a STUN message (RFC 5389
+// §6: top two bits zero, magic cookie at offset 4). Punch and KCP packets
+// never match: KCP has its command byte (81..84) at offset 4.
+func IsSTUN(b []byte) bool {
+	return len(b) >= 20 && b[0]&0xc0 == 0 && binary.BigEndian.Uint32(b[4:]) == magicCookie
+}
+
 func parseSTUN(resp, txID []byte) (net.IP, error) {
+	a, err := ParseBinding(resp, txID)
+	if err != nil {
+		return nil, err
+	}
+	return a.IP, nil
+}
+
+// ParseBinding returns the mapped address (ip and port) of a binding success
+// response to the request with transaction id txID.
+func ParseBinding(resp, txID []byte) (*net.UDPAddr, error) {
 	if len(resp) < 20 {
 		return nil, errors.New("stun: short response")
 	}
@@ -81,7 +101,7 @@ func parseSTUN(resp, txID []byte) (net.IP, error) {
 
 	// XOR-MAPPED-ADDRESS wins over MAPPED-ADDRESS whatever order they arrive
 	// in: some NATs rewrite the plain one on the way back.
-	var mapped net.IP
+	var mapped *net.UDPAddr
 	for len(body) >= 4 {
 		typ := binary.BigEndian.Uint16(body)
 		length := int(binary.BigEndian.Uint16(body[2:]))
@@ -91,18 +111,19 @@ func parseSTUN(resp, txID []byte) (net.IP, error) {
 		val := body[4 : 4+length]
 		switch typ {
 		case attrXORMappedAddress, attrXORMappedAddressLegacy:
-			if ip := ipv4Attr(val); ip != nil {
-				// The IPv4 address is XOR-ed with the magic cookie.
+			if a := ipv4Attr(val); a != nil {
+				// Address and port are XOR-ed with the magic cookie.
 				var key [4]byte
 				binary.BigEndian.PutUint32(key[:], magicCookie)
-				for i := range ip {
-					ip[i] ^= key[i]
+				for i := range a.IP {
+					a.IP[i] ^= key[i]
 				}
-				return ip, nil
+				a.Port ^= int(magicCookie >> 16)
+				return a, nil
 			}
 		case attrMappedAddress:
-			if ip := ipv4Attr(val); ip != nil && mapped == nil {
-				mapped = ip
+			if a := ipv4Attr(val); a != nil && mapped == nil {
+				mapped = a
 			}
 		}
 		// attributes are padded to a multiple of 4 bytes
@@ -116,11 +137,11 @@ func parseSTUN(resp, txID []byte) (net.IP, error) {
 
 // ipv4Attr decodes the {reserved, family, port, address} body shared by
 // MAPPED-ADDRESS and XOR-MAPPED-ADDRESS, returning nil unless it is IPv4.
-func ipv4Attr(val []byte) net.IP {
+func ipv4Attr(val []byte) *net.UDPAddr {
 	if len(val) < 8 || val[1] != familyIPv4 {
 		return nil
 	}
 	ip := make(net.IP, 4)
 	copy(ip, val[4:8])
-	return ip
+	return &net.UDPAddr{IP: ip, Port: int(binary.BigEndian.Uint16(val[2:4]))}
 }
