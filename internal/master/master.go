@@ -79,6 +79,8 @@ type Options struct {
 	DirectTimeout time.Duration
 	// DialDirect replaces the TCP dialer of the direct route (tests).
 	DialDirect func(ctx context.Context, addr string) (net.Conn, error)
+	// Punch is the UDP socket for join codes behind NAT; nil = TCP only.
+	Punch Puncher
 }
 
 // Server is the master.

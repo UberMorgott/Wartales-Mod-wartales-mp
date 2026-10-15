@@ -67,9 +67,12 @@ var errNoTransport = errors.New("no usable transport")
 //     Steam API, and the join code request is what fails, with a retry hint,
 //     until it is ready.
 //
+// punch (the UDP socket knows its address) makes join codes work without a
+// reachable TCP endpoint, so with no SDR it also keeps the lobby direct.
+//
 // mode forces either transport; forcing SDR against a known-bad SDR is still
 // refused. The returned string is the reason, for the log.
-func chooseTransport(mode string, ep nat.Endpoint, epErr error, sdr SDRStatus) (Transport, string, error) {
+func chooseTransport(mode string, ep nat.Endpoint, epErr error, sdr SDRStatus, punch bool) (Transport, string, error) {
 	endpoint := func() string {
 		if epErr != nil {
 			return "public endpoint unknown (" + epErr.Error() + ")"
@@ -117,6 +120,9 @@ func chooseTransport(mode string, ep nat.Endpoint, epErr error, sdr SDRStatus) (
 		if epErr == nil && ep.Reachable {
 			// The only route left is the unproven one: take it, and say so.
 			return TransportDirect, "no SDR, falling back to the unverified endpoint: " + endpoint() + "; " + sdrState(), nil
+		}
+		if punch {
+			return TransportDirect, "no SDR; join codes punch through UDP: " + endpoint() + "; " + sdrState(), nil
 		}
 		return TransportDirect, "", fmt.Errorf("%w: %s; %s", errNoTransport, endpoint(), sdrState())
 	}

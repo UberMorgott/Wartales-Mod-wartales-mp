@@ -49,7 +49,7 @@ func TestChooseTransport(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, reason, err := chooseTransport(c.mode, c.ep, c.epErr, c.sdr)
+			got, reason, err := chooseTransport(c.mode, c.ep, c.epErr, c.sdr, false)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
 			}

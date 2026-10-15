@@ -21,6 +21,7 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/master"
 	"github.com/UberMorgott/wartales-mp/internal/modver"
 	"github.com/UberMorgott/wartales-mp/internal/nat"
+	"github.com/UberMorgott/wartales-mp/internal/punch"
 	"github.com/UberMorgott/wartales-mp/internal/relay"
 	"github.com/UberMorgott/wartales-mp/internal/sdrbridge"
 )
@@ -104,7 +105,22 @@ func runCmd(args []string) (err error) {
 	var key [4]byte
 	_, _ = rand.Read(key[:]) // crypto/rand.Read never returns an error
 
-	ms := master.New(master.Options{
+	// The UDP socket for join codes behind NAT: same port number as the
+	// relay, its streams end on the relay port over loopback.
+	servers := nat.STUNServers
+	if listenHost != "" {
+		servers = nil // harness: loopback only (testPunch)
+	}
+	var puncher master.Puncher
+	ps, perr := punch.Open(*port, net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)), servers, logger)
+	if perr != nil {
+		logger.Printf("punch: no UDP socket (%v); join codes need a reachable TCP port", perr)
+	} else {
+		defer func() { _ = ps.Close() }() // shutting down
+		puncher = ps
+	}
+
+	opts := master.Options{
 		Addr:       *masterAddr,
 		TLS:        tlsCfg,
 		RelayPort:  *port,
@@ -118,7 +134,10 @@ func runCmd(args []string) (err error) {
 		Bridge:     bridge,
 		LinkKey:    binary.BigEndian.Uint32(key[:]),
 		Mod:        mod,
-	})
+		Punch:      puncher,
+	}
+	testPunch(ps, &opts, logger)
+	ms := master.New(opts)
 	bridge.OnPeer = ms.ServeSDRLink
 	// A connection arriving on the public port from the internet is the only
 	// proof the endpoint is reachable; UPnP and STUN are hints.
@@ -140,6 +159,15 @@ func runCmd(args []string) (err error) {
 	go func() { errs <- ms.ListenAndServe() }()
 
 	// Warm the public endpoint up so the first join code is instant.
+	if ps != nil {
+		go func() {
+			if r, err := ps.Endpoint(); err != nil {
+				logger.Printf("punch: %v; join codes carry no UDP address until STUN answers", err)
+			} else {
+				logger.Printf("punch: UDP address %s, NAT mapping %s", r.Mapped, r.Mapping)
+			}
+		}()
+	}
 	go func() {
 		ep, err := endpoint()
 		switch {
@@ -234,9 +262,14 @@ func codeCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if c.Steam != nil {
+		switch {
+		case c.Reply != nil:
+			fmt.Printf("reply %s\n", c.Reply.Addr())
+		case c.Punch != nil:
+			fmt.Printf("%s, punch udp %s\n", c.Endpoint.Addr(), c.Punch.Addr())
+		case c.Steam != nil:
 			fmt.Printf("steam %d key %08x (flags %d)\n", c.Steam.SteamID64(), c.Steam.Key, c.Steam.Flags)
-		} else {
+		default:
 			fmt.Printf("%s (flags %d)\n", c.Endpoint.Addr(), c.Endpoint.Flags)
 		}
 	default:

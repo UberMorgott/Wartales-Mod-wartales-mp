@@ -393,7 +393,7 @@ func (s *Server) decideTransport() (Transport, string, error) {
 	if s.opt.SDRStatus != nil {
 		sdr = s.opt.SDRStatus()
 	}
-	return chooseTransport(s.opt.Transport, ep, epErr, sdr)
+	return chooseTransport(s.opt.Transport, ep, epErr, sdr, s.opt.Punch != nil && s.opt.Punch.Ready())
 }
 
 // lobbyCreate replies with the new lobby id only; the client builds the
@@ -680,17 +680,23 @@ func (s *Server) lobbyMakeShortCode(a lobbyArgs, _ Peer) (any, error) {
 		return nil, wireErrf("Unknown lobby %s", a.ID)
 	}
 	ep, err := s.endpointRoute()
-	if err != nil {
-		return nil, wireErrf("Cannot create direct join code: %v; use a Steam invitation", err)
-	}
-	short, err := code.EncodeDirect(*ep)
-	if err != nil {
-		return nil, err
+	short, punched := s.punchCode(ep)
+	if !punched {
+		if err != nil {
+			return nil, wireErrf("Cannot create direct join code: %v; use a Steam invitation", err)
+		}
+		if short, err = code.EncodeDirect(*ep); err != nil {
+			return nil, err
+		}
 	}
 	s.lobbies.mu.Lock()
 	s.lobbies.codes[short] = a.ID
 	s.lobbies.mu.Unlock()
-	s.opt.Log.Printf("master: manual join code for %s issued (direct %s)", a.ID, ep.Addr())
+	if c, err := code.DecodeAny(short); err == nil && c.Punch != nil {
+		s.opt.Log.Printf("master: manual join code for %s issued (direct %s, punch %s)", a.ID, c.Endpoint.Addr(), c.Punch.Addr())
+	} else {
+		s.opt.Log.Printf("master: manual join code for %s issued (direct %s)", a.ID, ep.Addr())
+	}
 	return map[string]any{"shortCode": short}, nil
 }
 
@@ -892,6 +898,10 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 	if id != "" {
 		return s.lobbyInfo(id)
 	}
+	// A guest's reply code: the host punches back toward it.
+	if c, err := code.DecodeAny(a.ShortCode); err == nil && c.Reply != nil {
+		return nil, s.punchReply(*c.Reply)
+	}
 
 	if cl := s.uplink(); cl != nil {
 		raw, _, err := s.forward("lobby/resolveShortCode", args)
@@ -969,6 +979,11 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 		}
 		if c.Steam != nil {
 			s.opt.Log.Printf("master: falling back to SDR after the direct route to %s failed", addr)
+		}
+	}
+	if c.Punch != nil {
+		if raw, err := s.punchRoute(c, try); raw != nil || err != nil {
+			return raw, err
 		}
 	}
 	if c.Steam != nil {
