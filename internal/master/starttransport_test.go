@@ -25,7 +25,7 @@ func (sdrAddrConn) RemoteAddr() net.Addr { return sdrAddr{} }
 func linkPeer(t *testing.T, name string, overSDR bool) *link.Peer {
 	t.Helper()
 	hostEnd, guestEnd := net.Pipe()
-	var c net.Conn = hostEnd
+	c := net.Conn(hostEnd)
 	if overSDR {
 		c = sdrAddrConn{hostEnd}
 	}
