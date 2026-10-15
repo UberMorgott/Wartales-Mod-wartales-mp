@@ -919,14 +919,14 @@ func (s *Server) lobbyResolveShortCode(a lobbyArgs, args json.RawMessage, p Peer
 // but a moment's delay.
 func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error) {
 	var failures []string
-	try := func(what string, dial func() (net.Conn, error), key uint32, probe time.Duration) (json.RawMessage, bool) {
+	try := func(what, relay string, dial func() (net.Conn, error), key uint32, probe time.Duration) (json.RawMessage, bool) {
 		conn, err := dial()
 		if err != nil {
 			s.opt.Log.Printf("master: route %s failed: %v", what, err)
 			failures = append(failures, what+": "+err.Error())
 			return nil, false
 		}
-		cl, err := s.attachLink(conn, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Game: p.GameID(), Key: key, Mod: s.localMod()}, what, probe)
+		cl, err := s.attachLink(conn, link.User{ID: p.UserID(), Name: p.Name(), Steam: p.SteamID(), Game: p.GameID(), Key: key, Mod: s.localMod()}, what, relay, probe)
 		if err != nil {
 			s.opt.Log.Printf("master: route %s failed: %v", what, err)
 			failures = append(failures, what+": "+err.Error())
@@ -963,7 +963,7 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 		if c.Steam != nil {
 			key = c.Steam.Key
 		}
-		if raw, ok := try("direct "+addr, func() (net.Conn, error) { return s.dialDirect(addr) }, key, directProbeTimeout); ok {
+		if raw, ok := try("direct "+addr, addr, func() (net.Conn, error) { return s.dialDirect(addr) }, key, directProbeTimeout); ok {
 			return raw, nil
 		}
 		if c.Steam != nil {
@@ -981,7 +981,7 @@ func (s *Server) cascade(c code.Code, args json.RawMessage, p Peer) (any, error)
 				return nil, wireErrf("Steam relay not ready yet (%s); try again in a few seconds", why)
 			}
 			failures = append(failures, what+": not ready ("+why+")")
-		} else if raw, ok := try(what, func() (net.Conn, error) { return s.opt.Bridge.Dial(target) }, c.Steam.Key, sdrCallTimeout); ok {
+		} else if raw, ok := try(what, "", func() (net.Conn, error) { return s.opt.Bridge.Dial(target) }, c.Steam.Key, sdrCallTimeout); ok {
 			return raw, nil
 		}
 	}
@@ -1014,8 +1014,10 @@ func (s *Server) dialDirect(addr string) (net.Conn, error) {
 }
 
 // attachLink runs the guest side of a link over conn and makes it the
-// master's uplink. probe bounds each command over it.
-func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Duration) (*link.Client, error) {
+// master's uplink. probe bounds each command over it. relay is the host
+// endpoint a direct route dialed ("" over SDR): the game's relay address in
+// the host's lobby messages is rewritten to it (guestRelayAddr).
+func (s *Server) attachLink(c net.Conn, u link.User, what, relay string, probe time.Duration) (*link.Client, error) {
 	attached := make(chan struct{})
 	var cl *link.Client
 	cl, err := link.DialConn(c, u,
@@ -1024,6 +1026,9 @@ func (s *Server) attachLink(c net.Conn, u link.User, what string, probe time.Dur
 			if sess == nil {
 				s.opt.Log.Printf("master: %s pushed %s %s, but no game is connected; dropped", what, cmd, applog.Trunc(args))
 				return
+			}
+			if relay != "" && cmd == "lobby/chat" {
+				args = s.guestRelayAddr(args, relay)
 			}
 			sess.Push(cmd, args)
 		},

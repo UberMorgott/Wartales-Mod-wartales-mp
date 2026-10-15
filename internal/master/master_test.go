@@ -1628,7 +1628,7 @@ func TestOldLinkClosePreservesReplacement(t *testing.T) {
 	attach := func(name string) (*link.Client, net.Conn) {
 		local, remote := net.Pipe()
 		go func() { _, _ = io.Copy(io.Discard, remote) }()
-		cl, err := s.attachLink(local, link.User{ID: "S12345678"}, name, time.Second)
+		cl, err := s.attachLink(local, link.User{ID: "S12345678"}, name, "", time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
