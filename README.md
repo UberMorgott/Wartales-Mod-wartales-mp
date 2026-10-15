@@ -19,6 +19,9 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - Fixes identified reconnection errors and a crash caused by waiting in the lobby.
 - Mod-file check on join: a player whose mod files (winmm.dll, and res1.pak if any) differ from the host's is refused at the join with a clear message instead of crashing later in the game.
 - Join by code (direct connection) now works for loaded co-op saves, and a host can start the game over the direct connection without hanging. Players are now identified by the game's own player id on both Steam and direct connections.
+- Join by code works between different PCs: a guest who joined by code now connects its game to the host's address instead of its own PC, and the game plays over the direct connection instead of Steam. The connection is chosen when the host starts the game from how the guests joined; a lobby that mixes Steam and code guests shows a message naming the Steam players instead of starting.
+- A guest whose Steam join never connects now gets the game's normal connection error instead of an endless loading screen.
+- NAT hole punching for join codes *(experimental, not yet confirmed on a real router)*: when the host's port is not reachable, the guest tries to open a direct UDP path to the host. If the host does not answer within a few seconds, the guest's game shows a reply code; the host enters it in the game's code field, and the guest joins again within 2 minutes.
 
 ### Co-op stability
 
@@ -128,7 +131,7 @@ Install the mod on every player's machine. **All players need the same version**
 
 **Through Steam:** the host creates a co-op game. Once Steam is ready, friends can select **Join Game** in the Steam friends list without waiting for an invitation. Normal invitations still work. Try this first; it usually needs no router configuration.
 
-**By code:** the host creates a game and sends its code to the friend, who enters it in the game. Codes normally have **8 symbols**, or 11 with custom settings. This method needs a reachable direct connection to the host. If it fails, join through Steam instead.
+**By code:** the host creates a game and sends its code to the friend, who enters it in the game. Codes normally have **8 symbols**, or 11 with custom settings, or 16 when they also carry the host's address for NAT hole punching. This method needs a reachable direct connection to the host (hole punching may find one through the router). If it fails, join through Steam instead.
 
 ## Update or remove
 
@@ -136,7 +139,7 @@ To update, close the game and replace **winmm.dll** with the new version. To uni
 
 ## Known issues
 
-- Joining **by code** needs the host's port to be reachable from the internet (an open / forwarded port or UPnP on the host's router). Joining through a Steam invite or the friends list is not affected.
+- Joining **by code** needs the host's port to be reachable from the internet (an open / forwarded port or UPnP on the host's router), unless NAT hole punching gets through; hole punching is experimental and will not work behind some routers (symmetric NAT). Joining through a Steam invite or the friends list is not affected.
 - Not yet confirmed in a live co-op session: the guest's exit when the host vanished, any unit in the camp, the other players' inventories, and watching forging, work and mini-games. If one of them misbehaves, send **shim.log** from every player.
 - The post-battle loot fix (dead loot items / **Take all** with a damaged squad) is defensive: it removes the rebuild cause found in the game code but has not yet been confirmed in a live co-op session. If loot still does not react, send **shim.log** from every player (the loot-window diagnostics above are included).
 
