@@ -220,6 +220,7 @@ struct Ctx {
     unit_t: RefType,
     unit_name: RefField,
     unit_ap: RefField,
+    unit_weapon: (RefField, RefType),
     unit_owner: (RefField, RefType),
     player_name: RefField,
     player_connected: RefField,
@@ -275,6 +276,15 @@ struct Ctx {
     debrief: (RefField, RefType),
     loot: (RefField, RefType),
     all_items: RefFun,
+    /// InventoryContent.getInventory -> ui.comp.Inventory, its `inventory`
+    /// (the chest panel's st.Inventory); BasePlayer.netPickItem (the hand),
+    /// its `k` (st.Item) and `count`.
+    get_inventory: RefFun,
+    uinv_t: RefType,
+    uinv_inv: RefField,
+    pick: (RefField, RefType),
+    pick_k: (RefField, RefType),
+    pick_count: RefField,
 }
 
 /// Game fields the dump reads.
@@ -567,6 +577,8 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
     }
     want_sig(code, get_units, &[state_t, ref_i32_t], arr_t, "getUnits")?;
     let f = |t: RefType, n: &str| typed(code, t, n, f64_t);
+    let uinv_t = obj_type(code, "ui.comp.Inventory")?;
+    let pick = field(code, player_t, "netPickItem")?;
     Ok(Ctx {
         void_t,
         i32_t,
@@ -648,6 +660,7 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         unit_t,
         unit_name: typed(code, unit_t, "name", str_t)?,
         unit_ap: typed(code, unit_t, "aptitudePoints", i32_t)?,
+        unit_weapon: field(code, unit_t, "weapon")?,
         unit_owner: (typed(code, unit_t, "owner", player_t)?, player_t),
         // the player id: both harness players share one Steam name
         player_name: typed(code, player_t, "user", str_t)?,
@@ -728,6 +741,15 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         debrief,
         loot: (loot, inv_t),
         all_items: mfn(inv_t, "getAllItems", &[inv_t], arr_t)?,
+        get_inventory: {
+            let ic_t = field(code, game_inv.1, "inventoryContent")?.1;
+            mfn(ic_t, "getInventory", &[ic_t], uinv_t)?
+        },
+        uinv_t,
+        uinv_inv: typed(code, uinv_t, "inventory", inv_t)?,
+        pick,
+        pick_k: field(code, pick.1, "k")?,
+        pick_count: typed(code, pick.1, "count", i32_t)?,
     })
 }
 
@@ -1142,6 +1164,10 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let cam = r.r(c.state_camera.1);
     let drg = r.r(c.battle_drag.1);
     let hbar = r.r(c.ui_bar.1);
+    let uinv = r.r(c.uinv_t);
+    let pk = r.r(c.pick.1);
+    let hk = r.r(c.pick_k.1);
+    let uw = r.r(c.unit_weapon.1);
 
     let mut a = Asm::new();
     // --- state machine, outside the trap
@@ -1890,6 +1916,9 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.player(code, owner, s);
     w.connected(code, owner, b);
     w.kv(code, "aptitudePoints", unit, c.unit_ap, i);
+    w.lit(code, ",\"weapon\":");
+    w.a.fld(uw, unit, c.unit_weapon.0);
+    w.obj_q(uw);
     w.lit(code, "}");
     w.a.op(Opcode::Incr { dst: ix });
     w.a.go("army_loop");
@@ -2010,6 +2039,45 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         w.a.label(end);
         w.a.op(Opcode::Label);
     }
+    // item stacks (Std.string): the own inventory, the chest panel's
+    // inventory, the hand (netPickItem k and count)
+    w.lit(code, ",\"inv\":");
+    w.a.op(Opcode::Null { dst: list });
+    w.a.fld(me, g, c.g.me.0);
+    w.a.if_null(me, "inv_q");
+    w.a.fld(inv, me, c.player_inv);
+    w.a.if_null(inv, "inv_q");
+    w.a.call(list, c.all_items, &[inv]);
+    w.a.label("inv_q");
+    w.obj_q(list);
+    w.lit(code, ",\"chestItems\":");
+    w.a.op(Opcode::Null { dst: list });
+    w.a.fld(gui, g, c.game_ui.0);
+    w.a.if_null(gui, "ci_q");
+    w.a.fld(ginv, gui, c.game_inv.0);
+    w.a.if_null(ginv, "ci_q");
+    w.a.fld(icr, ginv, c.chest_content);
+    w.a.if_null(icr, "ci_q");
+    w.a.call(uinv, c.get_inventory, &[icr]);
+    w.a.if_null(uinv, "ci_q");
+    w.a.fld(inv, uinv, c.uinv_inv);
+    w.a.if_null(inv, "ci_q");
+    w.a.call(list, c.all_items, &[inv]);
+    w.a.label("ci_q");
+    w.obj_q(list);
+    w.lit(code, ",\"hand\":");
+    w.a.op(Opcode::Null { dst: hk });
+    w.a.int(i, k0);
+    w.a.fld(me, g, c.g.me.0);
+    w.a.if_null(me, "hand_q");
+    w.a.fld(pk, me, c.pick.0);
+    w.a.if_null(pk, "hand_q");
+    w.a.fld(hk, pk, c.pick_k.0);
+    w.a.fld(i, pk, c.pick_count);
+    w.a.label("hand_q");
+    w.obj_q(hk);
+    w.lit(code, ",\"handN\":");
+    w.val(i);
     // the post-battle loot pool (open Debrief window): Std.string of the stacks
     w.lit(code, ",\"loot\":");
     w.a.op(Opcode::Type {
