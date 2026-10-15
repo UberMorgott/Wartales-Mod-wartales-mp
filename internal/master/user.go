@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strconv"
 	"time"
 
@@ -121,7 +120,7 @@ func (s *Server) instanceGet(args json.RawMessage, p Peer) (any, error) {
 		}
 		return raw, nil
 	}
-	return s.instanceAnswer(net.JoinHostPort("127.0.0.1", strconv.Itoa(s.opt.RelayPort))), nil
+	return s.startAnswer(), nil
 }
 
 // instanceAnswer: the serverID must carry a password field. The client's

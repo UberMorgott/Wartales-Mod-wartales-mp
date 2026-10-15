@@ -13,7 +13,8 @@ import (
 // (isReconnect) reuses the transport of the host's game lobby even when the
 // verdict for a fresh lobby has changed meanwhile, so its member ids match
 // the ids the game's players were saved with. A later game lobby decides
-// afresh. Covers SDR -> endpoint verified and direct -> endpoint lost.
+// afresh. In auto mode every lobby is direct-marked (the game transport is
+// chosen at start, startAnswer), whatever the endpoint does.
 func TestReconnectLobbyKeepsGameTransport(t *testing.T) {
 	const hostSteam = "S0011223344556677"
 	for _, tc := range []struct {
@@ -21,7 +22,7 @@ func TestReconnectLobbyKeepsGameTransport(t *testing.T) {
 		first, later nat.Endpoint
 		wantSteam    bool // the game transport renders Steam ids (SDR)
 	}{
-		{"sdr game, endpoint verified later", lanEndpoint, publicEndpoint, true},
+		{"unverified endpoint, verified later", lanEndpoint, publicEndpoint, false},
 		{"direct game, endpoint lost later", publicEndpoint, lanEndpoint, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,7 +83,7 @@ func TestReconnectLobbyKeepsGameTransport(t *testing.T) {
 			mu.Unlock()
 
 			check("reconnect lobby", create(true), tc.wantSteam)
-			check("next game lobby", create(false), !tc.wantSteam)
+			check("next game lobby", create(false), tc.wantSteam)
 		})
 	}
 }

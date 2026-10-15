@@ -54,11 +54,11 @@ var errNoTransport = errors.New("no usable transport")
 //     UPnP mapping plus a STUN address is only a hint and never enough: it
 //     was seen to be wrong on a real machine (mapping present, address
 //     public, port refused from outside);
-//   - otherwise SDR for everything, lobby phase included (the join code then
-//     carries our SteamID and the proxy-link rides the SDR bridge). The join
-//     code still offers the hinted endpoint as its first route, so guests
-//     that can reach it do, and their arrival is what verifies it for the
-//     next lobby;
+//   - otherwise also direct-marked, but the game's own transport is decided
+//     at game start (startAnswer, issue #7): guests that joined over a direct
+//     link play over the relay, guests that joined over SDR (the proxy-link
+//     rides the SDR bridge) play over the game's Steam path. The join code
+//     still offers the hinted endpoint as its first route, then our SteamID;
 //   - if the shim has reported that SDR cannot work in this game process, a
 //     hinted endpoint is used unverified (and logged as such) because it is
 //     the only route left; with no endpoint at all the lobby is refused with
@@ -120,5 +120,10 @@ func chooseTransport(mode string, ep nat.Endpoint, epErr error, sdr SDRStatus) (
 		}
 		return TransportDirect, "", fmt.Errorf("%w: %s; %s", errNoTransport, endpoint(), sdrState())
 	}
-	return TransportSDR, endpoint() + "; " + sdrState(), nil
+	// Unverified endpoint, SDR not known bad: the lobby is marked direct all
+	// the same, so the host's game asks instance/get when it starts, and the
+	// game's transport is chosen then from how the guests actually joined
+	// (startAnswer): all over a direct link -> our relay, all over SDR ->
+	// the game's Steam path.
+	return TransportDirect, "chosen at game start by how the guests joined; " + endpoint() + "; " + sdrState(), nil
 }

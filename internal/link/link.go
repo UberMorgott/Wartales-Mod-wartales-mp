@@ -86,6 +86,7 @@ func (w *conn) send(e Envelope) error {
 type Peer struct {
 	user User
 	out  *conn
+	sdr  bool // the link rides the SDR bridge, not TCP
 
 	mu      sync.Mutex
 	pushUID int
@@ -105,6 +106,10 @@ func (p *Peer) Mod() *modver.Info { return p.user.Mod }
 
 // Name returns the guest's display name.
 func (p *Peer) Name() string { return p.user.Name }
+
+// OverSDR reports that the guest's link rides the SDR bridge (a Steam join),
+// not a direct TCP route.
+func (p *Peer) OverSDR() bool { return p.sdr }
 
 // Remote reports that this peer sits behind a proxy-link.
 func (p *Peer) Remote() bool { return true }
@@ -156,7 +161,7 @@ func Serve(c net.Conn, accept Accept, h Handler, onClose func(*Peer)) {
 	if !uid.IsSteam(u.Steam) {
 		u.Steam = ""
 	}
-	peer := &Peer{user: u, out: out}
+	peer := &Peer{user: u, out: out, sdr: c.RemoteAddr() != nil && c.RemoteAddr().Network() == "sdr"}
 	if onClose != nil {
 		defer onClose(peer)
 	}

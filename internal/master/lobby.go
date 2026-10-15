@@ -734,9 +734,10 @@ func (s *Server) issueInvite(id string, p Peer) (string, error) {
 	case st != nil:
 		short = code.EncodeSteam(*st)
 	case ep != nil:
-		// No SDR route. A pending bridge on a lobby that needs it is a
-		// "not yet", not a code that could not work.
-		if l.transport == TransportSDR && s.opt.Bridge != nil {
+		// No SDR route. A pending bridge, when only SDR reaches us from the
+		// internet (the endpoint is unverified), is a "not yet", not a code
+		// that could not work.
+		if verified, _ := s.endpointVerified(); (l.transport == TransportSDR || !verified) && s.opt.Bridge != nil {
 			if ready, why := s.opt.Bridge.Ready(); !ready && !s.opt.Bridge.Status().Known {
 				s.opt.Log.Printf("master: join code for %s not issued yet: %s", l.id, why)
 				return "", wireErrf("Steam relay not ready yet (%s); ask for the code again in a few seconds", why)

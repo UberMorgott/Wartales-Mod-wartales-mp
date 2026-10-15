@@ -850,7 +850,7 @@ func TestCascadeBothFail(t *testing.T) {
 
 // TestManualCodeAndSteamInviteRoutes: a host with an unverified endpoint and a
 // ready bridge issues a direct manual code and a combined Steam invite; the lobby
-// itself is on SDR, and a verified endpoint makes the lobby direct.
+// is direct-marked either way (the game transport is chosen at start).
 func TestManualCodeAndSteamInviteRoutes(t *testing.T) {
 	sw := sdrbridgetest.New(t)
 	hinted := nat.Endpoint{Addr: "45.154.88.66:14250", IP: net.IPv4(45, 154, 88, 66), Source: "UPnP+STUN", Reachable: true}
@@ -861,8 +861,8 @@ func TestManualCodeAndSteamInviteRoutes(t *testing.T) {
 		o.SDRStatus, o.Bridge, o.LinkKey = bridge.Status, bridge, 0xdeadbeef
 	})
 	host, id := createLobby(t, srv, cascadeHostID)
-	if srv.lobbies.get(id).transport != TransportSDR {
-		t.Fatal("an unverified endpoint must not put the lobby on the direct relay")
+	if srv.lobbies.get(id).transport != TransportDirect {
+		t.Fatal("every auto lobby is direct-marked; the game transport is chosen at start")
 	}
 	var short struct {
 		ShortCode string `json:"shortCode"`
@@ -1268,8 +1268,8 @@ func TestSDRLobbyEmitsRealSteamIDs(t *testing.T) {
 }
 
 // TestSDRLobbyWithoutSteamIDKeepsGameID: a member that reported no
-// (well-formed) Steam id is still named by its game id in an SDR lobby, so its
-// saves and its game agree on who it is; the lobby id carries no direct mark.
+// (well-formed) Steam id is still named by its game id, so its saves and its
+// game agree on who it is; an auto lobby is direct-marked (transport at start).
 func TestSDRLobbyWithoutSteamIDKeepsGameID(t *testing.T) {
 	addr := startMasterWith(t, lanEndpoint, SDRStatus{})
 
@@ -1281,8 +1281,8 @@ func TestSDRLobbyWithoutSteamIDKeepsGameID(t *testing.T) {
 	if err := json.Unmarshal(raw, &id); err != nil {
 		t.Fatal(err)
 	}
-	if strings.HasSuffix(id, DirectLobbyMark) {
-		t.Fatalf("SDR lobby id = %q carries the direct mark", id)
+	if !strings.HasSuffix(id, DirectLobbyMark) {
+		t.Fatalf("auto lobby id = %q lacks the direct mark", id)
 	}
 
 	guest := dialMaster(t, addr)
