@@ -245,3 +245,53 @@ func TestPunchNoAnswer(t *testing.T) {
 		t.Fatalf("Dial without STUN = %v", err)
 	}
 }
+
+// A guest that restarts on the same UDP address opens a new KCP
+// conversation; the host replaces the old tunnel at once instead of
+// dropping the new one until the keepalive timeout.
+func TestPunchGuestRestartSameAddress(t *testing.T) {
+	host := open(t, echo(t))
+	quiet := log.New(io.Discard, "", 0)
+	first, err := Open(0, "", nil, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := first.LocalAddr().Port
+	fwd, err := first.Dial(local(host))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, fwd, "before restart")
+	_ = first.Close()
+
+	again, err := Open(port, "", nil, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	if again.LocalAddr().Port != port {
+		t.Skipf("port %d not free again", port)
+	}
+	fwd, err = again.Dial(local(host))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, fwd, "after restart")
+}
+
+// Roles swap: the former host dials the former guest, whose tunnel it
+// serves; Dial must open its own instead of reusing the served one.
+func TestPunchRoleSwap(t *testing.T) {
+	a := open(t, echo(t))
+	b := open(t, echo(t))
+	fwd, err := b.Dial(local(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, fwd, "b to a")
+	fwd, err = a.Dial(local(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, fwd, "a to b")
+}

@@ -98,12 +98,21 @@ type target struct {
 	until time.Time
 }
 
-// peer is one tunnel: a guest's to a host (fwd set), or a host's from a
-// guest (fwd nil).
+// peer is one tunnel to one address, whoever opened it. Both ends splice
+// the streams they accept into their relay port; the end that joins over it
+// also gets fwd, the loopback listener whose connections become streams.
 type peer struct {
 	view *view
 	mux  *smux.Session
-	fwd  net.Listener
+	conv uint32       // the KCP conversation
+	fwd  net.Listener // guarded by Socket.mu
+	dead bool         // guarded by Socket.mu: dropped, fwd must not be set
+}
+
+// isKCP reports whether a datagram is a KCP segment (no crypt, no FEC):
+// conv(4) then a command byte 81..84, 24 bytes of header at least.
+func isKCP(pkt []byte) bool {
+	return len(pkt) >= kcp.IKCP_OVERHEAD && pkt[4] >= 81 && pkt[4] <= 84
 }
 
 // Open binds UDP port (any free port when it is taken) and starts serving:
@@ -153,7 +162,7 @@ func (s *Socket) Close() error {
 	s.peers = map[string]*peer{}
 	s.mu.Unlock()
 	for _, p := range peers {
-		p.close()
+		s.drop(p)
 	}
 	return s.conn.Close()
 }
@@ -194,10 +203,20 @@ func (s *Socket) read() {
 		default:
 			s.mu.Lock()
 			pr := s.peers[udp.String()]
+			var stale *peer
+			if pr != nil && isKCP(pkt) && binary.LittleEndian.Uint32(pkt) != pr.conv {
+				// The other end restarted on the same address: its new
+				// conversation replaces the old tunnel.
+				stale, pr = pr, nil
+				delete(s.peers, udp.String())
+			}
 			if pr == nil {
-				pr = s.newGuestLocked(udp, pkt)
+				pr = s.newPeerLocked(udp, pkt)
 			}
 			s.mu.Unlock()
+			if stale != nil {
+				s.drop(stale)
+			}
 			if pr != nil {
 				pr.view.push(packet{b: append([]byte(nil), pkt...), from: udp})
 			}
@@ -245,6 +264,11 @@ func (s *Socket) tick() {
 					continue
 				}
 				to = append(to, tg.addr)
+			}
+			for k, at := range s.heard {
+				if now.Sub(at) > heardFresh {
+					delete(s.heard, k)
+				}
 			}
 			keep := s.keep
 			s.mu.Unlock()
@@ -419,9 +443,9 @@ func (e *NoAnswerError) Error() string {
 
 // Dial reaches the host's punch address and returns a loopback TCP address
 // that leads to the host's relay port: the route to join over. A live tunnel
-// to the same host is reused. Without an answer within AnswerWait it returns
-// a *NoAnswerError and keeps punching for Budget, so the host's reply-code
-// punches find the way open.
+// to the same address is reused, whoever opened it. Without an answer within
+// AnswerWait it returns a *NoAnswerError and keeps punching for Budget, so the
+// host's reply-code punches find the way open.
 func (s *Socket) Dial(host string) (string, error) {
 	ha, err := net.ResolveUDPAddr("udp4", host)
 	if err != nil {
@@ -429,11 +453,11 @@ func (s *Socket) Dial(host string) (string, error) {
 	}
 	key := ha.String()
 	s.mu.Lock()
-	if p := s.peers[key]; p != nil && !p.mux.IsClosed() {
-		s.mu.Unlock()
-		return p.fwd.Addr().String(), nil
-	}
+	p := s.peers[key]
 	s.mu.Unlock()
+	if p != nil && !p.mux.IsClosed() {
+		return s.forward(p)
+	}
 	s.arm(ha)
 
 	self := make(chan Result, 1)
@@ -451,7 +475,34 @@ func (s *Socket) Dial(host string) (string, error) {
 		s.log.Printf("punch: no answer from %s within %v; our mapping %v (%s)", host, wait, r.Mapped, r.Mapping)
 		return "", e
 	}
-	return s.connect(ha)
+	v := newView(s)
+	sess, err := kcp.NewConn2(ha, nil, 0, 0, v)
+	if err != nil {
+		_ = v.Close()
+		return "", err
+	}
+	tune(sess)
+	mux, err := smux.Client(sess, muxConfig())
+	if err != nil {
+		_ = sess.Close()
+		_ = v.Close()
+		return "", err
+	}
+	p = &peer{view: v, mux: mux, conv: sess.GetConv()}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		s.drop(p)
+		return "", net.ErrClosed
+	}
+	old := s.peers[key]
+	s.addLocked(key, p)
+	s.mu.Unlock()
+	if old != nil {
+		s.drop(old)
+	}
+	s.log.Printf("punch: tunnel to %s open", key)
+	return s.forward(p)
 }
 
 // waitHeard waits until addr answered recently, or for d.
@@ -475,40 +526,23 @@ func (s *Socket) waitHeard(key string, d time.Duration) bool {
 	}
 }
 
-// connect opens the guest's tunnel to a host that answered.
-func (s *Socket) connect(ha *net.UDPAddr) (string, error) {
-	v := newView(s)
-	sess, err := kcp.NewConn2(ha, nil, 0, 0, v)
-	if err != nil {
-		return "", err
+// forward returns the tunnel's loopback listener, opening it on first use:
+// every connection to it is a new stream.
+func (s *Socket) forward(p *peer) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p.dead {
+		return "", net.ErrClosed
 	}
-	tune(sess)
-	mux, err := smux.Client(sess, muxConfig())
-	if err != nil {
-		_ = sess.Close()
-		return "", err
+	if p.fwd != nil {
+		return p.fwd.Addr().String(), nil
 	}
 	var lc net.ListenConfig
 	fwd, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
-		_ = mux.Close()
 		return "", err
 	}
-	p := &peer{view: v, mux: mux, fwd: fwd}
-	key := ha.String()
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		p.close()
-		return "", net.ErrClosed
-	}
-	old := s.peers[key]
-	s.peers[key] = p
-	delete(s.targets, key) // the tunnel's own traffic keeps the way open now
-	s.mu.Unlock()
-	if old != nil {
-		old.close()
-	}
+	p.fwd = fwd
 	go func() {
 		for {
 			c, err := fwd.Accept()
@@ -516,7 +550,7 @@ func (s *Socket) connect(ha *net.UDPAddr) (string, error) {
 				return
 			}
 			go func() {
-				st, err := mux.OpenStream()
+				st, err := p.mux.OpenStream()
 				if err != nil {
 					_ = c.Close()
 					return
@@ -525,71 +559,70 @@ func (s *Socket) connect(ha *net.UDPAddr) (string, error) {
 			}()
 		}
 	}()
-	go s.watch(key, p, "tunnel to "+key)
-	s.log.Printf("punch: tunnel to %s open; joining over %s", key, fwd.Addr())
+	s.log.Printf("punch: joining over %s", fwd.Addr())
 	return fwd.Addr().String(), nil
 }
 
-// watch forgets a tunnel once its smux session ends (keepalive timeout,
-// peer close, or ours).
-func (s *Socket) watch(key string, p *peer, what string) {
-	<-p.mux.CloseChan()
-	s.mu.Lock()
-	if s.peers[key] == p {
-		delete(s.peers, key)
-	}
-	s.mu.Unlock()
-	p.close()
-	s.log.Printf("punch: %s closed", what)
+// addLocked registers a new tunnel (s.mu held): it is served at once and
+// forgotten when its smux session ends (keepalive timeout, peer close, ours).
+func (s *Socket) addLocked(key string, p *peer) {
+	s.peers[key] = p
+	delete(s.targets, key) // the tunnel's own traffic keeps the way open now
+	go func() {
+		<-p.mux.CloseChan()
+		s.mu.Lock()
+		if s.peers[key] == p {
+			delete(s.peers, key)
+		}
+		s.mu.Unlock()
+		s.drop(p)
+		s.log.Printf("punch: tunnel %s closed", key)
+	}()
+	go s.serve(p, key)
 }
 
-func (p *peer) close() {
-	if p.fwd != nil {
-		_ = p.fwd.Close()
+// drop closes a tunnel and its listener.
+func (s *Socket) drop(p *peer) {
+	s.mu.Lock()
+	p.dead = true
+	fwd := p.fwd
+	s.mu.Unlock()
+	if fwd != nil {
+		_ = fwd.Close()
 	}
 	_ = p.mux.Close() // closes the KCP session
 	_ = p.view.Close()
 }
 
-// newGuestLocked opens the host side of a tunnel for a KCP packet from an
-// unknown address (s.mu held); nil drops the packet. Only a KCP data or
-// control segment opens one, and at most maxGuests run at once.
-func (s *Socket) newGuestLocked(from *net.UDPAddr, pkt []byte) *peer {
-	if s.closed || len(pkt) < kcp.IKCP_OVERHEAD || pkt[4] < 81 || pkt[4] > 84 {
-		return nil
-	}
-	guests := 0
-	for _, p := range s.peers {
-		if p.fwd == nil {
-			guests++
-		}
-	}
-	if guests >= maxGuests {
+// newPeerLocked opens our side of a tunnel for a KCP packet from an address
+// without one (s.mu held); nil drops the packet. Only a KCP segment opens
+// one, and at most maxGuests run at once.
+func (s *Socket) newPeerLocked(from *net.UDPAddr, pkt []byte) *peer {
+	if s.closed || !isKCP(pkt) || len(s.peers) >= maxGuests {
 		return nil
 	}
 	v := newView(s)
-	sess, err := kcp.NewConn3(binary.LittleEndian.Uint32(pkt), from, nil, 0, 0, v)
+	conv := binary.LittleEndian.Uint32(pkt)
+	sess, err := kcp.NewConn3(conv, from, nil, 0, 0, v)
 	if err != nil {
+		_ = v.Close()
 		return nil
 	}
 	tune(sess)
 	mux, err := smux.Server(sess, muxConfig())
 	if err != nil {
 		_ = sess.Close()
+		_ = v.Close()
 		return nil
 	}
-	p := &peer{view: v, mux: mux}
-	key := from.String()
-	s.peers[key] = p
-	delete(s.targets, key)
-	go s.watch(key, p, "tunnel from "+key)
-	go s.serveGuest(p, key)
-	s.log.Printf("punch: tunnel from %s", key)
+	p := &peer{view: v, mux: mux, conv: conv}
+	s.addLocked(from.String(), p)
+	s.log.Printf("punch: tunnel from %s", from)
 	return p
 }
 
-// serveGuest splices every stream of one guest's tunnel into the relay port.
-func (s *Socket) serveGuest(p *peer, from string) {
+// serve splices every stream the other end opens into our relay port.
+func (s *Socket) serve(p *peer, from string) {
 	for {
 		st, err := p.mux.AcceptStream()
 		if err != nil {
