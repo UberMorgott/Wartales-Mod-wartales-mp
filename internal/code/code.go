@@ -133,7 +133,7 @@ func EncodeReply(e Endpoint) (string, error) {
 	if ip4 == nil {
 		return "", fmt.Errorf("reply code needs an IPv4 address, got %v", e.IP)
 	}
-	payload := []byte{FlagReply, ip4[0], ip4[1], ip4[2], ip4[3], byte(e.Port >> 8), byte(e.Port)}
+	payload := []byte{FlagReply, ip4[0], ip4[1], ip4[2], ip4[3], byte(e.Port >> 8 & 0xff), byte(e.Port & 0xff)}
 	return encode(payload, bodyLen), nil
 }
 

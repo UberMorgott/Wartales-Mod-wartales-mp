@@ -1,6 +1,7 @@
 package punch
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -45,7 +46,7 @@ func fakeSTUN(t *testing.T, delta int) string {
 			binary.BigEndian.PutUint16(resp[26:], uint16(from.Port+delta)^0x2112) //nolint:gosec // test port
 			ip := from.IP.To4()
 			for i, k := range []byte{0x21, 0x12, 0xa4, 0x42} {
-				resp[28+i] = ip[i] ^ k
+				resp[28+i] = ip[i] ^ k //nolint:gosec // resp is 32 bytes, i < 4
 			}
 			_, _ = c.WriteToUDP(resp, from)
 		}
@@ -131,7 +132,8 @@ func TestEndpointNoServer(t *testing.T) {
 // echo is a TCP server that echoes every connection: the host's relay port.
 func echo(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
