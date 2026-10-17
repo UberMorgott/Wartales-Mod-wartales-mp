@@ -32,6 +32,7 @@ mod debrief_diag;
 mod debrief_enable;
 mod diag;
 mod direct_lobby;
+mod reload_route;
 mod start_transport;
 mod dialog_inventory;
 mod dialog_recruit;
@@ -212,6 +213,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     log_error_cast::patch_log_error_cast(&mut code);
     direct_lobby::patch_direct_lobby(&mut code);
     start_transport::patch_start_transport(&mut code);
+    reload_route::patch_reload_route(&mut code);
     window_drag::patch_window_drag(&mut code);
     take_all::patch_take_all(&mut code);
     tavern_resume::patch_tavern_resume(&mut code);
