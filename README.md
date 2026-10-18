@@ -128,6 +128,8 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 
 Install the mod on every player's machine. **All players need the same version**: a guest whose mod files differ from the host's cannot join.
 
+**Steam Deck, SteamOS or Linux (Proton):** copy **winmm.dll** next to **Wartales.exe** the same way, then in Steam right-click Wartales → **Properties** → **General** → **Launch options** and enter `WINEDLLOVERRIDES="winmm=n,b" %command%`. Without it Proton loads its own winmm.dll and the mod does not start. Proton players can play with Windows players.
+
 ## Play with a friend
 
 **Through Steam:** the host creates a co-op game. Once Steam is ready, friends can select **Join Game** in the Steam friends list without waiting for an invitation. Normal invitations still work. Try this first; it usually needs no router configuration.
