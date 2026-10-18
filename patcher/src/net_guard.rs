@@ -1687,8 +1687,9 @@ mod tests {
 
     /// Issue #8: Game.initAlive with a batch of pending battle entities. Each
     /// entity's init sees every other pending entity already bound to the
-    /// battle (vanilla: the later ones still have `battle == null`); a bound
-    /// entity keeps its battle, a non-entity state is left alone, and every
+    /// battle (vanilla: the later ones still have `battle == null`); the pre-bind
+    /// leaves an already-bound entity's battle untouched (checked before any
+    /// init runs: the real init overwrites it), a non-entity state is left alone, and every
     /// entity is still initialised exactly once, in queue order.
     #[test]
     fn init_alive_binds_the_whole_batch_first() {
@@ -1700,8 +1701,10 @@ mod tests {
         patch_net_guard(&mut code);
         let init_alive = code.functions[pb.fi].findex;
 
-        let run = |code: &Bytecode| -> (Vec<Vec<V>>, Vec<V>, V) {
+        let run = |code: &Bytecode| -> (Vec<Vec<V>>, Vec<V>, V, Vec<V>) {
             let ents = std::cell::RefCell::new(Vec::<V>::new());
+            // Battles of every entity as the first init starts (= right after the pre-bind).
+            let pre = std::cell::RefCell::new(None::<Vec<V>>);
             let f = &code.functions[pb.fi];
             let (a_len, a_raw, e_battle) = (pb.a_len, pb.a_raw, pb.e_battle);
             let stub = |core: &mut Core, fun: RefFun, args: &[V]| -> Option<V> {
@@ -1734,12 +1737,18 @@ mod tests {
                     .iter()
                     .filter(|e| **e != me)
                     .all(|e| core.get(e, e_battle) != V::Null);
-                core.log.push(("init", vec![me.clone(), V::B(bound)]));
-                // Entity.init: this.battle = Game.inst.battle (keeps a bound one's own).
-                if core.get(&me, e_battle) == V::Null {
-                    let bt = core.map("t", "bt");
-                    core.set(&me, e_battle, bt);
+                if pre.borrow().is_none() {
+                    let snap = ents
+                        .borrow()
+                        .iter()
+                        .map(|e| core.get(e, e_battle))
+                        .collect();
+                    *pre.borrow_mut() = Some(snap);
                 }
+                core.log.push(("init", vec![me.clone(), V::B(bound)]));
+                // Entity.init@8545 ops 0-4: this.battle = Game.inst.battle, unconditionally.
+                let bt = core.map("t", "bt");
+                core.set(&me, e_battle, bt);
                 V::Null
             };
             let mut sim = Sim::new(code, code.functions.len(), stub, method);
@@ -1775,17 +1784,23 @@ mod tests {
                 .iter()
                 .map(|o| sim.c.get(o, e_battle))
                 .collect();
-            (inits, after, other)
+            let pre = pre.borrow_mut().take().expect("no init ran");
+            (inits, after, other, pre)
         };
 
-        let (inits, after, other) = run(&code);
+        let (inits, after, other, pre) = run(&code);
+        // ents = [ea, eb, ec]: the pre-bind bound the null ones, left ec's own battle.
+        assert_eq!(
+            pre[2], other,
+            "pre-bind leaves an already-bound entity's battle"
+        );
+        assert!(pre[0] != V::Null && pre[0] == pre[1], "{pre:?}");
         assert_eq!(inits.len(), 3, "{inits:?}");
         assert!(inits.iter().all(|i| i[1] == V::B(true)), "{inits:?}");
         assert_eq!(after[1], V::Null, "non-entity state untouched");
-        assert_eq!(after[3], other, "a bound entity keeps its battle");
         assert!(after[0] != V::Null && after[0] == after[2]);
         // Vanilla: the first init sees a later entity of the batch unbound.
-        let (inits, _, _) = run(&orig);
+        let (inits, _, _, _) = run(&orig);
         assert_eq!(inits.len(), 3);
         assert_eq!(inits[0][1], V::B(false));
     }
