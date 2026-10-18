@@ -1162,7 +1162,7 @@ static BOOL channel_ok(int channel) {
 static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int length, int type, int channel) {
 	sdr_identity to;
 	int flags, res;
-	BOOL held = FALSE;
+	BOOL held = FALSE, first;
 	static int last_res;
 	static DWORD last_log;
 
@@ -1181,16 +1181,10 @@ static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int l
 	identity_of(&to, uid_to_u64(uid));
 
 	EnterCriticalSection(&sdr_lock);
-	backlog_flush();
-	if ((flags & SDR_SEND_RELIABLE) && backlog_has(to.u.steam_id))
-		res = SDR_RESULT_LIMIT_EXCEEDED; // behind what is held: never overtake it
-	else
-		res = api.send(sdr_msgs, &to, data, (uint32_t)length, flags, channel);
-	if ((flags & SDR_SEND_RELIABLE) && res == SDR_RESULT_LIMIT_EXCEEDED && backlog_hold(to.u.steam_id, data, length, flags, channel))
-		held = TRUE; // as the legacy reliable send queued it; counted as sent when Steam takes it
-	if (watch_peer(to.u.steam_id))
-		shim_log("sdr: first packet to %llu: %d bytes, type %d -> flags 0x%x, channel %d = EResult %d (1 = OK)",
-			(unsigned long long)to.u.steam_id, length, type, flags, channel, res);
+	// The peer is watched and the game's own session bookkeeping is done before
+	// anything is sent or held: a join whose hold is refused must doom its own
+	// sid (the game ignores the result and would wait for an answer for ever).
+	first = watch_peer(to.u.steam_id);
 	if (length >= 7 && data[0] == SDR_FRAME_CLOSE) {
 		// SteamService.stop / onUserData's FORCE_DISCONNECT: the session with
 		// this sid ends, closeSession follows.
@@ -1206,6 +1200,16 @@ static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int l
 		if (w >= 0 && !(sdr_watch[w].let_go && memcmp(sdr_watch[w].gone_sid, data + 3, 4) == 0))
 			arm(w, data + 3, channel);
 	}
+	backlog_flush();
+	if ((flags & SDR_SEND_RELIABLE) && backlog_has(to.u.steam_id))
+		res = SDR_RESULT_LIMIT_EXCEEDED; // behind what is held: never overtake it
+	else
+		res = api.send(sdr_msgs, &to, data, (uint32_t)length, flags, channel);
+	if ((flags & SDR_SEND_RELIABLE) && res == SDR_RESULT_LIMIT_EXCEEDED && backlog_hold(to.u.steam_id, data, length, flags, channel))
+		held = TRUE; // as the legacy reliable send queued it; counted as sent when Steam takes it
+	if (first)
+		shim_log("sdr: first packet to %llu: %d bytes, type %d -> flags 0x%x, channel %d = EResult %d (1 = OK)",
+			(unsigned long long)to.u.steam_id, length, type, flags, channel, res);
 	if (held) {
 		res = SDR_RESULT_OK;
 	} else if (res == SDR_RESULT_OK) {

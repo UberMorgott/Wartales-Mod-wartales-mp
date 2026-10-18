@@ -744,6 +744,33 @@ static void check_backlog(read_fn read, avail_fn avail, session_fn close, send_f
 		check(send(uid, buf, 0, 2, 0) == 0, "the 65537th is refused");
 		check(wait_log(log, "sdr: reliable messages to 76561198000000305 cannot be delivered (send backlog over its limit): 65536 held message(s) dropped", 3000),
 			"the over-limit backlog is given up");
+
+		// A guest's join (code 3, new sid) whose hold is refused (the backlog is
+		// full): that sid is doomed and the game gets its close, never a join
+		// lost in silence with the guest on the loading screen for ever.
+		{
+			const uint64_t JOIN = 76561198000000306ULL;
+			const unsigned char want_j[7] = {8, 0, 0, 0x51, 0x52, 0x53, 0x54};
+			unsigned char juid[8];
+			unsigned j;
+			for (j = 0, held = 1; j < 65536 && held; j++)
+				held = send(uid, buf, 0, 2, 0) == 1;
+			check(held, "the backlog is full again");
+			put_uid(juid, JOIN);
+			set_state(JOIN, 1, 0);
+			check(send(juid, (unsigned char *)"\x03\x00\x00\x51\x52\x53\x54", 7, 2, 0) == 0, "a join whose hold is refused fails");
+			check(wait_log(log, "sdr: reliable messages to 76561198000000306 cannot be delivered (send backlog over its limit): 0 held message(s) dropped; the session counts as lost", 3000),
+				"the refused join's session counts as lost");
+			put_uid(uid, FLOOD);
+			close(uid); // the flood's held messages go with its session, never reach the loopback
+			set_result(1);
+			set_state(JOIN, 3, 0);
+			check(wait_log(log, "sdr: peer lost, injected close for 76561198000000306 sid 1414746705 on channel 0", 8000),
+				"a close is injected for the join's sid, even after the transport connects");
+			from = read(buf, sizeof(buf), &len, 0);
+			check(from != NULL && get_uid(from) == JOIN && len == 7 && memcmp(buf, want_j, 7) == 0, "injected frame [08 00 00 51 52 53 54]");
+			close(juid);
+		}
 		set_result(1);
 		check(send(uid, (unsigned char *)"ok", 2, 2, 0) == 1, "sends work again afterwards");
 		from = read(buf, sizeof(buf), &len, 0);
