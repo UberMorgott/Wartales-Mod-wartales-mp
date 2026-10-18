@@ -34,11 +34,13 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 - A co-op load no longer waits forever for a player who disconnected before they were ready to start, and a reconnecting player is no longer counted twice. *(Vanilla bug.)*
 - Loading a save, restarting a battle or reloading from the pause menu in a co-op game no longer hangs on the loading screen when some players of the save are not in the session: the host keeps the lobby's list of absent players across the reload. *(Vanilla bug.)*
 - When the host loads a save inside a running co-op session, the other players no longer hang on an endless loading screen: the mod keeps the Steam connection to each player open while the game restarts its own session, so the reload also works on slow or unstable networks.
+- After the host reloads, no player hangs on an endless loading screen any more because one player's network data was dropped: when Steam has no room to send a message right away, the mod now holds it and sends it as soon as Steam can, instead of losing it.
 - A player who reconnects during a battle no longer stays on the loading screen forever: the host replays the battle's start to that player. *(Vanilla bug.)*
 - A guest no longer freezes at the end of a battle after rejoining it mid-battle.
 - A player who leaves during a battle no longer blocks it: the host can play that player's units (also a turn they had already begun) until they come back; the units stay theirs and they take them over again when they rejoin. *(Vanilla bug.)*
 - The host no longer crashes when two lobby creations finish at the same moment (a left lobby's late connect result is ignored).
 - Clients no longer freeze when an enemy summons units and hits them in the same moment (for example the Rat Matriarch's howl spawning rats): the client makes the new units alive before it runs the host's battle messages. *(Vanilla bug.)*
+- A client no longer freezes when an enemy summons several units at once (for example several rats): every new unit is tied to the battle before the client starts setting them up. (#8)
 - A joining player's loading screen no longer flickers while they wait for the host: it is drawn before the game state exists. *(Vanilla bug.)*
 - The join gate no longer deadlocks when a save is loaded while a player is joining.
 - The owned tavern's daily report on the other players' screens no longer shows every value as a loss (all red, as if the tavern had been reset): the host now sends the day's report only after it is filled in.
