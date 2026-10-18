@@ -359,6 +359,7 @@ static void mark_lost(int w, int st, int end_reason, const char *why) {
 }
 
 static void lost_tick(DWORD now);
+static void backlog_flush(void);
 
 // diag_tick polls what is watched. Lock held.
 static void diag_tick(void) {
@@ -372,6 +373,7 @@ static void diag_tick(void) {
 
 	if (state != SDR_READY)
 		return;
+	backlog_flush(); // also while the game is busy loading and sends nothing
 	if (sdr_utils != NULL) {
 		relay = api.relay_status(sdr_utils, NULL);
 		if (relay != sdr_relay_last) {
@@ -888,6 +890,173 @@ static void arm(int w, const unsigned char *sid, int channel) {
 	sdr_watch[w].last_recv = GetTickCount();
 }
 
+// ---------------------------------------------------------------------------
+// Outbound backlog. A legacy reliable SendP2PPacket was queued by Steam and
+// delivered; SendMessageToUser instead answers k_EResultLimitExceeded when
+// the session's send buffer is full (isteamnetworkingsockets.h: "there was
+// already too much data queued to be sent", k_ESteamNetworkingConfig_
+// SendBufferSize), and the game (SteamService.sendMessage) ignores the result.
+// The message was simply gone: a host's reload pushes the save to every guest
+// at once, a guest on a slow route fills its buffer, and the tail of what it
+// needed never arrives. mpman's own gap repair (code 9) only starts when a
+// later packet shows the gap, and before ReadyToStart nothing later comes:
+// the guest never readies and the host's ready barrier waits for ever
+// (4-player cave reload, v0.2.13).
+// So a reliable message Steam has no room for is held here and handed to
+// Steam later, in order: once a peer has anything held, every later reliable
+// message to it is held behind it, and the backlog is retried before each
+// send, on every receive poll and from the diag thread. Unreliable messages
+// keep their right to be dropped. A backlog Steam can never take (another
+// error, or more than SDR_BACKLOG_MAX bytes held) is given up and the session
+// counts as lost: the game gets its close through the lost-peer path above.
+// ---------------------------------------------------------------------------
+
+#define SDR_RESULT_LIMIT_EXCEEDED 25 // k_EResultLimitExceeded
+#define SDR_BACKLOG_MAX (64u << 20)
+#define SDR_BACKLOG_PEERS 64
+
+typedef struct sdr_out {
+	struct sdr_out *next;
+	uint64_t peer;
+	int flags, channel;
+	uint32_t len;
+	unsigned char data[];
+} sdr_out;
+
+static sdr_out *sdr_out_head;
+static size_t sdr_out_bytes;
+static unsigned long sdr_held; // messages ever held
+
+static BOOL backlog_has(uint64_t peer) {
+	sdr_out *n;
+	for (n = sdr_out_head; n != NULL; n = n->next)
+		if (n->peer == peer)
+			return TRUE;
+	return FALSE;
+}
+
+static void backlog_append(sdr_out *o) {
+	sdr_out **link = &sdr_out_head;
+	while (*link != NULL)
+		link = &(*link)->next;
+	o->next = NULL;
+	*link = o;
+	sdr_out_bytes += o->len;
+}
+
+// backlog_give_up drops what is held for peer and, when the game holds a
+// session with it, has the lost-peer path hand the game its close. Lock held.
+static void backlog_give_up(uint64_t peer, const char *why) {
+	sdr_out **link = &sdr_out_head;
+	unsigned long n = 0;
+	int w;
+	while (*link != NULL) {
+		sdr_out *o = *link;
+		if (o->peer == peer) {
+			*link = o->next;
+			sdr_out_bytes -= o->len;
+			sdr_send_failed++;
+			n++;
+			free(o);
+			continue;
+		}
+		link = &o->next;
+	}
+	w = find_watch(peer);
+	shim_log("sdr: reliable messages to %llu cannot be delivered (%s): %lu held message(s) dropped; %s",
+		(unsigned long long)peer, why, n,
+		w >= 0 && sdr_watch[w].armed ? "the session counts as lost, the game gets its close" : "the game holds no session with it");
+	if (w >= 0 && sdr_watch[w].armed && !sdr_watch[w].lost && !sdr_watch[w].injected) {
+		sdr_watch[w].lost = TRUE;
+		sdr_watch[w].lost_at = GetTickCount();
+	}
+}
+
+static BOOL backlog_blocked(const uint64_t *blocked, unsigned nb, uint64_t peer) {
+	unsigned i;
+	for (i = 0; i < nb; i++)
+		if (blocked[i] == peer)
+			return TRUE;
+	return FALSE;
+}
+
+// backlog_flush hands Steam what it now has room for, oldest first; a peer
+// whose buffer is still full keeps the rest of its messages in order. Lock held.
+static void backlog_flush(void) {
+	uint64_t blocked[SDR_BACKLOG_PEERS], gone = 0;
+	unsigned nb = 0;
+	BOOL all_blocked = FALSE, give_up = FALSE;
+	int gone_res = 0;
+	sdr_out **link = &sdr_out_head;
+
+	while (*link != NULL && !all_blocked) {
+		sdr_out *o = *link;
+		sdr_identity to;
+		int res;
+		if (backlog_blocked(blocked, nb, o->peer)) {
+			link = &o->next;
+			continue;
+		}
+		identity_of(&to, o->peer);
+		res = api.send(sdr_msgs, &to, o->data, o->len, o->flags, o->channel);
+		if (res == SDR_RESULT_LIMIT_EXCEEDED) {
+			if (nb < SDR_BACKLOG_PEERS)
+				blocked[nb++] = o->peer;
+			else
+				all_blocked = TRUE; // order first: everything else waits too
+			link = &o->next;
+			continue;
+		}
+		if (res != SDR_RESULT_OK) {
+			give_up = TRUE;
+			gone = o->peer;
+			gone_res = res;
+			break;
+		}
+		*link = o->next;
+		sdr_out_bytes -= o->len;
+		sdr_sent++;
+		{
+			uint64_t peer = o->peer;
+			free(o);
+			if (!backlog_has(peer))
+				shim_log("sdr: send backlog to %llu drained (Steam took every held message, in order); %lu held so far, %lu bytes still held",
+					(unsigned long long)peer, sdr_held, (unsigned long)sdr_out_bytes);
+		}
+	}
+	if (give_up) {
+		char why[64];
+		sprintf(why, "SendMessageToUser = EResult %d", gone_res);
+		backlog_give_up(gone, why);
+	}
+}
+
+// backlog_hold keeps a copy of a reliable message Steam has no room for (or
+// that must wait behind one). Lock held. FALSE: it cannot be held.
+static BOOL backlog_hold(uint64_t peer, const unsigned char *data, int length, int flags, int channel) {
+	sdr_out *o;
+	if (sdr_out_bytes + (size_t)length > SDR_BACKLOG_MAX) {
+		backlog_give_up(peer, "send backlog over its limit");
+		return FALSE;
+	}
+	o = (sdr_out *)malloc(sizeof(*o) + (size_t)length);
+	if (o == NULL) {
+		backlog_give_up(peer, "out of memory");
+		return FALSE;
+	}
+	o->peer = peer;
+	o->flags = flags;
+	o->channel = channel;
+	o->len = (uint32_t)length;
+	memcpy(o->data, data, (size_t)length);
+	if (!backlog_has(peer))
+		shim_log("sdr: send buffer to %llu full (EResult 25): reliable messages are held and handed to Steam in order as it takes them",
+			(unsigned long long)peer);
+	backlog_append(o);
+	sdr_held++;
+	return TRUE;
+}
+
 static BOOL channel_ok(int channel) {
 	if (channel >= 0 && channel < SDR_CHANNELS)
 		return TRUE;
@@ -902,6 +1071,7 @@ static BOOL channel_ok(int channel) {
 static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int length, int type, int channel) {
 	sdr_identity to;
 	int flags, res;
+	BOOL held = FALSE;
 	static int last_res;
 	static DWORD last_log;
 
@@ -920,7 +1090,13 @@ static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int l
 	identity_of(&to, uid_to_u64(uid));
 
 	EnterCriticalSection(&sdr_lock);
-	res = api.send(sdr_msgs, &to, data, (uint32_t)length, flags, channel);
+	backlog_flush();
+	if ((flags & SDR_SEND_RELIABLE) && backlog_has(to.u.steam_id))
+		res = SDR_RESULT_LIMIT_EXCEEDED; // behind what is held: never overtake it
+	else
+		res = api.send(sdr_msgs, &to, data, (uint32_t)length, flags, channel);
+	if ((flags & SDR_SEND_RELIABLE) && res == SDR_RESULT_LIMIT_EXCEEDED && backlog_hold(to.u.steam_id, data, length, flags, channel))
+		held = TRUE; // as the legacy reliable send queued it; counted as sent when Steam takes it
 	if (watch_peer(to.u.steam_id))
 		shim_log("sdr: first packet to %llu: %d bytes, type %d -> flags 0x%x, channel %d = EResult %d (1 = OK)",
 			(unsigned long long)to.u.steam_id, length, type, flags, channel, res);
@@ -939,7 +1115,9 @@ static unsigned char detour_send_p2p_packet(vuid uid, unsigned char *data, int l
 		if (w >= 0 && !(sdr_watch[w].let_go && memcmp(sdr_watch[w].gone_sid, data + 3, 4) == 0))
 			arm(w, data + 3, channel);
 	}
-	if (res == SDR_RESULT_OK) {
+	if (held) {
+		res = SDR_RESULT_OK;
+	} else if (res == SDR_RESULT_OK) {
 		sdr_sent++;
 	} else {
 		sdr_send_failed++;
@@ -959,6 +1137,7 @@ static unsigned char detour_is_p2p_packet_available(uint32_t *msg_size, int chan
 	if (!channel_ok(channel) || !ready())
 		return 0;
 	EnterCriticalSection(&sdr_lock);
+	backlog_flush(); // the game polls every frame: held messages go out as Steam takes them
 	pump_game(channel);
 	head = sdr_queue[channel].head;
 	if (head != NULL && msg_size != NULL)

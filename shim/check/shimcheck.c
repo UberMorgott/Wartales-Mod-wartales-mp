@@ -584,6 +584,81 @@ static void check_watch_reuse(read_fn read, session_fn close, HMODULE api, const
 	close(uid);
 }
 
+// Steam's send buffer to a peer is full (SendMessageToUser = EResult 25,
+// k_EResultLimitExceeded): a reliable message is never lost. It is held and
+// handed to Steam in order once there is room, and nothing reliable overtakes
+// it (a host's reload burst to a slow guest lost the save's tail, and the guest
+// never readied). Unreliable ones may still be dropped. A backlog Steam can
+// never take is given up and the session the game holds counts as lost.
+static void check_backlog(read_fn read, avail_fn avail, session_fn close, send_fn send, HMODULE api, const wchar_t *log) {
+	inject_fn inject = (inject_fn)(void *)GetProcAddress(api, "fake_inject");
+	stats_fn stats = (stats_fn)(void *)GetProcAddress(api, "fake_stats");
+	set_state_fn set_state = (set_state_fn)(void *)GetProcAddress(api, "fake_set_session_state");
+	void (*set_result)(int) = (void (*)(int))(void *)GetProcAddress(api, "fake_set_send_result");
+	const uint64_t SLOW = 76561198000000300ULL, DEAD = 76561198000000301ULL;
+	const unsigned char sid[4] = {0x31, 0, 0, 0}, want[7] = {8, 0, 0, 0x31, 0, 0, 0};
+	unsigned char uid[8], buf[64];
+	uint32_t size, len;
+	unsigned sends;
+	vuid from;
+	fake_stats_t st;
+
+	check(set_result != NULL, "fake exports fake_set_send_result");
+	if (set_result == NULL)
+		return;
+	put_uid(uid, SLOW);
+	stats(&st);
+	sends = st.sends;
+	set_result(25);
+	check(send(uid, (unsigned char *)"h1", 2, 2, 0) == 1 && send(uid, (unsigned char *)"h2", 2, 3, 0) == 1,
+		"buffer full: two reliable sends are held and answer true");
+	check(send(uid, (unsigned char *)"u", 1, 0, 0) == 0, "buffer full: an unreliable send fails (may be dropped)");
+	stats(&st);
+	check(st.sends == sends, "nothing reached Steam while its buffer is full");
+	check(wait_log(log, "sdr: send buffer to 76561198000000300 full (EResult 25): reliable messages are held", 2000),
+		"shim.log records the held backlog");
+	size = 0;
+	check(avail(&size, 0) == 0, "a poll with the buffer still full sends nothing");
+	set_result(1);
+	check(send(uid, (unsigned char *)"h3", 2, 2, 0) == 1, "room again: the next reliable send succeeds");
+	stats(&st);
+	check(st.sends == sends + 3 && st.last_flags == (8 | 1 | 32), "the held messages went first, then the new one, each with its own flags");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == SLOW && len == 2 && memcmp(buf, "h1", 2) == 0, "first held message arrives first");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 2 && memcmp(buf, "h2", 2) == 0, "second held message next");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 2 && memcmp(buf, "h3", 2) == 0, "the new message after them");
+	check(read(buf, sizeof(buf), &len, 0) == NULL, "nothing else: the dropped unreliable one never comes");
+	check(wait_log(log, "sdr: send backlog to 76561198000000300 drained", 2000), "shim.log records the backlog drained");
+
+	// Held messages also go out on the game's receive poll alone.
+	set_result(25);
+	check(send(uid, (unsigned char *)"p1", 2, 2, 0) == 1, "held again");
+	set_result(1);
+	check(avail(&size, 0) == 1 && size == 2, "a receive poll hands the held message to Steam (loopback: it is readable)");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && len == 2 && memcmp(buf, "p1", 2) == 0, "the polled-out message arrives");
+	put_uid(uid, SLOW);
+	close(uid);
+
+	// A backlog Steam refuses for good: given up, the held session is lost.
+	arm_peer(read, inject, set_state, log, DEAD, sid, "a session with a peer whose sends will fail is armed");
+	put_uid(uid, DEAD);
+	set_result(25);
+	check(send(uid, (unsigned char *)"d1", 2, 2, 0) == 1, "held for the doomed peer");
+	set_result(3); // k_EResultNoConnection
+	avail(&size, 0);
+	set_result(1);
+	check(wait_log(log, "sdr: reliable messages to 76561198000000301 cannot be delivered (SendMessageToUser = EResult 3): 1 held message(s) dropped; the session counts as lost", 3000),
+		"a refused backlog is dropped and the session counts as lost");
+	check(wait_log(log, "sdr: peer lost, injected close for 76561198000000301 sid 49 on channel 0", 8000),
+		"the game gets its close through the lost-peer path");
+	from = read(buf, sizeof(buf), &len, 0);
+	check(from != NULL && get_uid(from) == DEAD && len == 7 && memcmp(buf, want, 7) == 0, "injected frame [08 00 00 31 00 00 00]");
+	close(uid);
+}
+
 static void check_sdr(int with_api, int partial, HMODULE steam, HMODULE api, const wchar_t *log, const wchar_t *scratch) {
 	send_fn send = (send_fn)resolve(steam, "send_p2p_packet");
 	read_fn read = (read_fn)resolve(steam, "read_p2p_packet");
@@ -791,6 +866,7 @@ static void check_sdr(int with_api, int partial, HMODULE steam, HMODULE api, con
 	check_reconnect(read, avail, close, send, api, log);
 	check_dial_failed(read, close, send, api, log);
 	check_watch_reuse(read, close, api, log);
+	check_backlog(read, avail, close, send, api, log);
 
 	stats(&st);
 	check(st.allocated == st.released, "every message handed out by Steam was released");
