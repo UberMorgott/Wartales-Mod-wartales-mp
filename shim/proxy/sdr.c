@@ -280,6 +280,7 @@ static struct {
 	BOOL lost;           // ... and it dropped; inject when the queue is clear
 	DWORD lost_at;       // when that was seen
 	BOOL injected;       // the close was handed to the game for this session
+	BOOL doomed;         // ... lost for good: held messages of it were destroyed (backlog given up)
 	unsigned char sid[4]; // bytes 3..6 of the last game packet, as received
 	int channel;         // where the game read it
 	DWORD last_recv;     // GetTickCount of that packet
@@ -413,7 +414,7 @@ static void diag_tick(void) {
 			sdr_watch[i].end_reason = info.end_reason;
 			sdr_watch[i].state_since = now;
 			sdr_watch[i].stuck_logged = FALSE;
-			if (st == 3 && sdr_watch[i].lost && !sdr_watch[i].injected) {
+			if (st == 3 && sdr_watch[i].lost && !sdr_watch[i].injected && !sdr_watch[i].doomed) {
 				sdr_watch[i].lost = FALSE;
 				shim_log("sdr: session with %llu connected again, no close injected", (unsigned long long)sdr_watch[i].id);
 			} else if (st == 4 || st == 5 || st == -3)
@@ -883,6 +884,7 @@ static void arm(int w, const unsigned char *sid, int channel) {
 	if (!sdr_watch[w].armed || memcmp(sdr_watch[w].sid, sid, 4) != 0) {
 		sdr_watch[w].lost = FALSE; // a new session: its own close
 		sdr_watch[w].injected = FALSE;
+		sdr_watch[w].doomed = FALSE;
 	}
 	sdr_watch[w].armed = TRUE;
 	memcpy(sdr_watch[w].sid, sid, 4);
@@ -906,69 +908,150 @@ static void arm(int w, const unsigned char *sid, int channel) {
 // Steam later, in order: once a peer has anything held, every later reliable
 // message to it is held behind it, and the backlog is retried before each
 // send, on every receive poll and from the diag thread. Unreliable messages
-// keep their right to be dropped. A backlog Steam can never take (another
-// error, or more than SDR_BACKLOG_MAX bytes held) is given up and the session
-// counts as lost: the game gets its close through the lost-peer path above.
+// keep their right to be dropped.
+// Held messages belong to the game session they carry (sid, bytes 3..6 of
+// every SteamService frame). When the game closes a session, what it still
+// had held for it is dropped like the legacy close discarded it, except the
+// session's own goodbye (code 8), which the peer needs to run its stop; a
+// rejoin under a new sid is never held up by the old session's data, and
+// nothing about the old session touches the new one.
+// A backlog Steam can never take (another error, or more than SDR_BACKLOG_MAX
+// bytes / SDR_BACKLOG_MSGS messages held) is given up. Messages of the
+// session the game holds were destroyed then, so that session is doomed: it
+// counts as lost for good, a transport that connects (again) does not cancel
+// it, and the game always gets its close through the lost-peer path above.
 // ---------------------------------------------------------------------------
 
 #define SDR_RESULT_LIMIT_EXCEEDED 25 // k_EResultLimitExceeded
-#define SDR_BACKLOG_MAX (64u << 20)
+#define SDR_BACKLOG_MAX (64u << 20)  // bytes, bookkeeping included
+#define SDR_BACKLOG_MSGS 65536
 #define SDR_BACKLOG_PEERS 64
 
 typedef struct sdr_out {
 	struct sdr_out *next;
 	uint64_t peer;
 	int flags, channel;
+	BOOL has_sid;          // a game frame (>= 7 bytes): sid is its session
+	unsigned char sid[4];
 	uint32_t len;
 	unsigned char data[];
 } sdr_out;
 
-static sdr_out *sdr_out_head;
-static size_t sdr_out_bytes;
+static sdr_out *sdr_out_head, *sdr_out_tail;
+static size_t sdr_out_bytes; // sizeof(sdr_out) + payload, per held message
+static unsigned long sdr_out_n;
 static unsigned long sdr_held; // messages ever held
+static struct {
+	uint64_t peer;
+	unsigned long n; // 0: a free slot
+} sdr_out_peers[SDR_BACKLOG_PEERS];
+static unsigned sdr_out_npeers; // slots in use
 
-static BOOL backlog_has(uint64_t peer) {
-	sdr_out *n;
-	for (n = sdr_out_head; n != NULL; n = n->next)
-		if (n->peer == peer)
-			return TRUE;
-	return FALSE;
+C_ASSERT(offsetof(sdr_out, next) == 0); // a link that is not the head is its node
+
+static size_t out_cost(uint32_t len) { return sizeof(sdr_out) + (size_t)len; }
+
+static int out_peer(uint64_t peer) {
+	int i;
+	for (i = 0; i < SDR_BACKLOG_PEERS; i++)
+		if (sdr_out_peers[i].n > 0 && sdr_out_peers[i].peer == peer)
+			return i;
+	return -1;
 }
 
-static void backlog_append(sdr_out *o) {
-	sdr_out **link = &sdr_out_head;
-	while (*link != NULL)
-		link = &(*link)->next;
+static BOOL backlog_has(uint64_t peer) { return out_peer(peer) >= 0; }
+
+// backlog_append queues o at the tail; FALSE when no peer slot is free
+// (more than SDR_BACKLOG_PEERS peers with a backlog at once).
+static BOOL backlog_append(sdr_out *o) {
+	int i = out_peer(o->peer);
+	if (i < 0) {
+		for (i = 0; i < SDR_BACKLOG_PEERS && sdr_out_peers[i].n > 0; i++)
+			;
+		if (i == SDR_BACKLOG_PEERS)
+			return FALSE;
+		sdr_out_peers[i].peer = o->peer;
+		sdr_out_npeers++;
+	}
+	sdr_out_peers[i].n++;
 	o->next = NULL;
-	*link = o;
-	sdr_out_bytes += o->len;
+	if (sdr_out_tail != NULL)
+		sdr_out_tail->next = o;
+	else
+		sdr_out_head = o;
+	sdr_out_tail = o;
+	sdr_out_bytes += out_cost(o->len);
+	sdr_out_n++;
+	return TRUE;
 }
 
-// backlog_give_up drops what is held for peer and, when the game holds a
-// session with it, has the lost-peer path hand the game its close. Lock held.
-static void backlog_give_up(uint64_t peer, const char *why) {
+static void backlog_unlink(sdr_out **link) {
+	sdr_out *o = *link;
+	int i = out_peer(o->peer);
+	*link = o->next;
+	if (sdr_out_tail == o)
+		sdr_out_tail = link == &sdr_out_head ? NULL : (sdr_out *)link;
+	sdr_out_bytes -= out_cost(o->len);
+	sdr_out_n--;
+	if (i >= 0 && --sdr_out_peers[i].n == 0)
+		sdr_out_npeers--;
+	free(o);
+}
+
+// of_session: o belongs to the game session sid (a frame without a sid
+// belongs to whichever session is current).
+static BOOL of_session(const sdr_out *o, const unsigned char *sid) {
+	return !o->has_sid || memcmp(o->sid, sid, 4) == 0;
+}
+
+// backlog_close drops what is held for the session of peer the game closed:
+// all of the peer's held messages, or with a known closed sid only that
+// session's, its goodbye (code 8) excepted. Lock held.
+static void backlog_close(uint64_t peer, BOOL known, const unsigned char *sid) {
 	sdr_out **link = &sdr_out_head;
 	unsigned long n = 0;
-	int w;
 	while (*link != NULL) {
 		sdr_out *o = *link;
-		if (o->peer == peer) {
-			*link = o->next;
-			sdr_out_bytes -= o->len;
+		if (o->peer == peer && (!known || of_session(o, sid)) && !(o->len >= 7 && o->data[0] == SDR_FRAME_CLOSE)) {
+			backlog_unlink(link);
 			sdr_send_failed++;
 			n++;
-			free(o);
 			continue;
 		}
 		link = &o->next;
 	}
-	w = find_watch(peer);
+	if (n > 0)
+		shim_log("sdr: session with %llu closed by the game: %lu held message(s) of it dropped, like the legacy close", (unsigned long long)peer, n);
+}
+
+// backlog_give_up drops what is held for peer's session sid (has_sid FALSE:
+// the current one) and, when that is the session the game holds, dooms it:
+// the lost-peer path hands the game its close, whatever the transport does
+// next. Lock held.
+static void backlog_give_up(uint64_t peer, BOOL has_sid, const unsigned char *sid, const char *why) {
+	sdr_out **link = &sdr_out_head;
+	unsigned long n = 0;
+	int w = find_watch(peer);
+	BOOL current = w >= 0 && sdr_watch[w].armed && (!has_sid || memcmp(sdr_watch[w].sid, sid, 4) == 0);
+	const unsigned char *drop_sid = has_sid ? sid : (w >= 0 ? sdr_watch[w].sid : NULL);
+	while (*link != NULL) {
+		sdr_out *o = *link;
+		if (o->peer == peer && (drop_sid == NULL || of_session(o, drop_sid))) {
+			backlog_unlink(link);
+			sdr_send_failed++;
+			n++;
+			continue;
+		}
+		link = &o->next;
+	}
 	shim_log("sdr: reliable messages to %llu cannot be delivered (%s): %lu held message(s) dropped; %s",
 		(unsigned long long)peer, why, n,
-		w >= 0 && sdr_watch[w].armed ? "the session counts as lost, the game gets its close" : "the game holds no session with it");
-	if (w >= 0 && sdr_watch[w].armed && !sdr_watch[w].lost && !sdr_watch[w].injected) {
+		current ? "the session counts as lost, the game gets its close" : "not the session the game holds");
+	if (current && !sdr_watch[w].injected) {
+		if (!sdr_watch[w].lost)
+			sdr_watch[w].lost_at = GetTickCount();
 		sdr_watch[w].lost = TRUE;
-		sdr_watch[w].lost_at = GetTickCount();
+		sdr_watch[w].doomed = TRUE;
 	}
 }
 
@@ -983,13 +1066,14 @@ static BOOL backlog_blocked(const uint64_t *blocked, unsigned nb, uint64_t peer)
 // backlog_flush hands Steam what it now has room for, oldest first; a peer
 // whose buffer is still full keeps the rest of its messages in order. Lock held.
 static void backlog_flush(void) {
-	uint64_t blocked[SDR_BACKLOG_PEERS], gone = 0;
+	uint64_t blocked[SDR_BACKLOG_PEERS];
 	unsigned nb = 0;
-	BOOL all_blocked = FALSE, give_up = FALSE;
-	int gone_res = 0;
+	BOOL all_blocked = FALSE;
 	sdr_out **link = &sdr_out_head;
 
-	while (*link != NULL && !all_blocked) {
+	// Stops once every peer with a backlog is blocked: a poll costs one send
+	// per such peer, however long its backlog.
+	while (*link != NULL && !all_blocked && nb < sdr_out_npeers) {
 		sdr_out *o = *link;
 		sdr_identity to;
 		int res;
@@ -1008,26 +1092,25 @@ static void backlog_flush(void) {
 			continue;
 		}
 		if (res != SDR_RESULT_OK) {
-			give_up = TRUE;
-			gone = o->peer;
-			gone_res = res;
-			break;
+			uint64_t peer = o->peer;
+			BOOL has_sid = o->has_sid;
+			unsigned char sid[4];
+			char why[64];
+			memcpy(sid, o->sid, 4);
+			sprintf(why, "SendMessageToUser = EResult %d", res);
+			backlog_give_up(peer, has_sid, sid, why);
+			link = &sdr_out_head; // the list changed: start over (given-up messages are gone)
+			nb = 0;
+			continue;
 		}
-		*link = o->next;
-		sdr_out_bytes -= o->len;
-		sdr_sent++;
 		{
 			uint64_t peer = o->peer;
-			free(o);
+			backlog_unlink(link);
+			sdr_sent++;
 			if (!backlog_has(peer))
 				shim_log("sdr: send backlog to %llu drained (Steam took every held message, in order); %lu held so far, %lu bytes still held",
 					(unsigned long long)peer, sdr_held, (unsigned long)sdr_out_bytes);
 		}
-	}
-	if (give_up) {
-		char why[64];
-		sprintf(why, "SendMessageToUser = EResult %d", gone_res);
-		backlog_give_up(gone, why);
 	}
 }
 
@@ -1035,24 +1118,32 @@ static void backlog_flush(void) {
 // that must wait behind one). Lock held. FALSE: it cannot be held.
 static BOOL backlog_hold(uint64_t peer, const unsigned char *data, int length, int flags, int channel) {
 	sdr_out *o;
-	if (sdr_out_bytes + (size_t)length > SDR_BACKLOG_MAX) {
-		backlog_give_up(peer, "send backlog over its limit");
+	BOOL has_sid = length >= 7;
+	if (sdr_out_bytes + out_cost((uint32_t)length) > SDR_BACKLOG_MAX || sdr_out_n >= SDR_BACKLOG_MSGS) {
+		backlog_give_up(peer, has_sid, data + 3, "send backlog over its limit");
 		return FALSE;
 	}
-	o = (sdr_out *)malloc(sizeof(*o) + (size_t)length);
+	o = (sdr_out *)malloc(out_cost((uint32_t)length));
 	if (o == NULL) {
-		backlog_give_up(peer, "out of memory");
+		backlog_give_up(peer, has_sid, data + 3, "out of memory");
 		return FALSE;
 	}
 	o->peer = peer;
 	o->flags = flags;
 	o->channel = channel;
+	o->has_sid = has_sid;
+	if (has_sid)
+		memcpy(o->sid, data + 3, 4);
 	o->len = (uint32_t)length;
 	memcpy(o->data, data, (size_t)length);
 	if (!backlog_has(peer))
 		shim_log("sdr: send buffer to %llu full (EResult 25): reliable messages are held and handed to Steam in order as it takes them",
 			(unsigned long long)peer);
-	backlog_append(o);
+	if (!backlog_append(o)) {
+		free(o);
+		backlog_give_up(peer, has_sid, data + 3, "too many peers with a send backlog");
+		return FALSE;
+	}
 	sdr_held++;
 	return TRUE;
 }
@@ -1225,8 +1316,9 @@ static unsigned char detour_close_p2p_session(vuid uid) {
 			memcpy(sdr_watch[w].gone_sid, sdr_watch[w].stop_sid, 4);
 		}
 		if (!sdr_watch[w].let_go || memcmp(sdr_watch[w].sid, sdr_watch[w].gone_sid, 4) == 0)
-			sdr_watch[w].armed = sdr_watch[w].lost = sdr_watch[w].injected = FALSE; // the game let go
+			sdr_watch[w].armed = sdr_watch[w].lost = sdr_watch[w].injected = sdr_watch[w].doomed = FALSE; // the game let go
 	}
+	backlog_close(id, w >= 0 && sdr_watch[w].let_go, w >= 0 ? sdr_watch[w].gone_sid : NULL);
 	drop_peer(id);
 	LeaveCriticalSection(&sdr_lock);
 	shim_log("sdr: session with %llu closed by the game (Steam's session kept); sent %lu, failed %lu, received %lu, dropped %lu, auto-accepted %lu",

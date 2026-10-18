@@ -657,6 +657,99 @@ static void check_backlog(read_fn read, avail_fn avail, session_fn close, send_f
 	from = read(buf, sizeof(buf), &len, 0);
 	check(from != NULL && get_uid(from) == DEAD && len == 7 && memcmp(buf, want, 7) == 0, "injected frame [08 00 00 31 00 00 00]");
 	close(uid);
+
+	// Given up while the transport re-dials, and the re-dial then connects:
+	// held messages of the session were destroyed, so its close still comes.
+	{
+		const uint64_t REDIAL = 76561198000000302ULL;
+		const unsigned char sid_r[4] = {0x32, 0, 0, 0}, want_r[7] = {8, 0, 0, 0x32, 0, 0, 0};
+		arm_peer(read, inject, set_state, log, REDIAL, sid_r, "a session that will re-dial is armed");
+		put_uid(uid, REDIAL);
+		set_state(REDIAL, 1, 0);
+		check(wait_log(log, "sdr: session with 76561198000000302: state 1 (connecting) was connected", 4000), "its transport re-dials");
+		set_result(25);
+		check(send(uid, (unsigned char *)"\x05\x02\x00\x32\x00\x00\x00rd", 9, 2, 0) == 1, "held while connecting");
+		set_result(3);
+		avail(&size, 0);
+		set_result(1);
+		set_state(REDIAL, 3, 0);
+		check(wait_log(log, "sdr: reliable messages to 76561198000000302 cannot be delivered (SendMessageToUser = EResult 3): 1 held message(s) dropped; the session counts as lost", 3000),
+			"given up while connecting: the session counts as lost");
+		check(wait_log(log, "sdr: session with 76561198000000302: state 3 (connected) was connecting", 4000), "then the re-dial connects");
+		check(wait_log(log, "sdr: peer lost, injected close for 76561198000000302 sid 50 on channel 0", 8000),
+			"the close is injected anyway: a connected transport does not bring destroyed messages back");
+		check(!log_contains(log, "sdr: session with 76561198000000302 connected again, no close injected"), "the loss was never cancelled");
+		from = read(buf, sizeof(buf), &len, 0);
+		check(from != NULL && get_uid(from) == REDIAL && len == 7 && memcmp(buf, want_r, 7) == 0, "injected frame [08 00 00 32 00 00 00]");
+		close(uid);
+	}
+
+	// Close and rejoin: what was held for the closed session is dropped, its
+	// goodbye (code 8) excepted, and the new session is neither held up by it
+	// nor closed when the old session's backlog cannot be delivered.
+	{
+		const uint64_t REJ = 76561198000000303ULL, REJ2 = 76561198000000304ULL;
+		const unsigned char sid_a[4] = {0x41, 0, 0, 0}, sid_c[4] = {0x43, 0, 0, 0};
+		arm_peer(read, inject, set_state, log, REJ, sid_a, "a session to be reloaded is armed (sid 0x41)");
+		put_uid(uid, REJ);
+		stats(&st);
+		sends = st.sends;
+		set_result(25);
+		check(send(uid, (unsigned char *)"\x05\x03\x00\x41\x00\x00\x00old", 10, 2, 0) == 1 &&
+				send(uid, (unsigned char *)"\x08\x04\x00\x41\x00\x00\x00", 7, 2, 0) == 1,
+			"old session: a data frame and its goodbye are held");
+		check(close(uid) == 1 && wait_log(log, "sdr: session with 76561198000000303 closed by the game: 1 held message(s) of it dropped", 2000),
+			"the close drops the old session's held data, not its goodbye");
+		inject(REJ, 0, "\x03\x00\x00\x42\x00\x00\x00", 7);
+		from = read(buf, sizeof(buf), &len, 0);
+		check(from != NULL && get_uid(from) == REJ && len == 7 && buf[0] == 3, "the peer rejoins with sid 0x42");
+		check(send(uid, (unsigned char *)"\x05\x00\x00\x42\x00\x00\x00new", 10, 2, 0) == 1, "new session frame queued behind the goodbye");
+		set_result(1);
+		size = 0;
+		check(avail(&size, 0) == 1 && size == 10, "room again: the new session's frame is next to read (the goodbye echo is dropped as the old session's)");
+		stats(&st);
+		check(st.sends == sends + 2, "Steam took exactly the goodbye and the new frame: the old data was never sent");
+		from = read(buf, sizeof(buf), &len, 0);
+		check(from != NULL && len == 10 && memcmp(buf + 7, "new", 3) == 0, "the new session's frame arrives");
+		check(read(buf, sizeof(buf), &len, 0) == NULL, "the old session's data never arrives");
+		close(uid);
+
+		arm_peer(read, inject, set_state, log, REJ2, sid_c, "another session to be reloaded is armed (sid 0x43)");
+		put_uid(uid, REJ2);
+		set_result(25);
+		check(send(uid, (unsigned char *)"\x08\x01\x00\x43\x00\x00\x00", 7, 2, 0) == 1, "its goodbye is held");
+		close(uid);
+		inject(REJ2, 0, "\x03\x00\x00\x44\x00\x00\x00", 7);
+		from = read(buf, sizeof(buf), &len, 0);
+		check(from != NULL && get_uid(from) == REJ2 && buf[0] == 3, "the peer rejoins with sid 0x44");
+		set_result(3);
+		avail(&size, 0);
+		set_result(1);
+		check(wait_log(log, "sdr: reliable messages to 76561198000000304 cannot be delivered (SendMessageToUser = EResult 3): 1 held message(s) dropped; not the session the game holds", 3000),
+			"the old session's undeliverable goodbye is dropped as not the current session");
+		Sleep(3500);
+		check(!log_contains(log, "injected close for 76561198000000304"), "the rejoined session is not closed");
+		close(uid);
+	}
+
+	// The backlog is capped by entry count too: zero-length messages are not free.
+	{
+		const uint64_t FLOOD = 76561198000000305ULL;
+		unsigned k, held = 1;
+		put_uid(uid, FLOOD);
+		set_result(25);
+		for (k = 0; k < 65536 && held; k++)
+			held = send(uid, buf, 0, 2, 0) == 1;
+		check(held && k == 65536, "65536 empty reliable messages are held");
+		check(send(uid, buf, 0, 2, 0) == 0, "the 65537th is refused");
+		check(wait_log(log, "sdr: reliable messages to 76561198000000305 cannot be delivered (send backlog over its limit): 65536 held message(s) dropped", 3000),
+			"the over-limit backlog is given up");
+		set_result(1);
+		check(send(uid, (unsigned char *)"ok", 2, 2, 0) == 1, "sends work again afterwards");
+		from = read(buf, sizeof(buf), &len, 0);
+		check(from != NULL && get_uid(from) == FLOOD && len == 2 && memcmp(buf, "ok", 2) == 0, "and arrive");
+		close(uid);
+	}
 }
 
 static void check_sdr(int with_api, int partial, HMODULE steam, HMODULE api, const wchar_t *log, const wchar_t *scratch) {
