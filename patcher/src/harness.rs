@@ -46,6 +46,29 @@
 //                       targetX/Y, followSpeed, targetFollowSpeed, ...).
 //       ud <key>        Storage.setUserData(key, null): drops one user-data
 //                       key (a panel's saved spot or size).
+//       act <sub>       in a place: Element.activate(game.me) (the click's
+//                       path) of the first element whose id contains <sub>;
+//                       `act ?` prints "harness: elem <id>" for each. Ack
+//                       "noelem" when nothing matched.
+//       play <Activity> <sub>  Controller.startActivity(state.player, element,
+//                       activity id, {player: me}, {}, callback), as
+//                       Chest.tryUnlock calls it (run it on the host: a client's
+//                       callback id is unknown to the host, which asserts at
+//                       the activity's end).
+//       welcome         the loaded co-op game's "Waiting for players"
+//                       (WaitConnexionCoop): its Start = Window.close.
+//       choose          the open ChooseUnit: select its first unit with no
+//                       disable reason, validate (Confirm).
+//       tutorial        the open Tutorial: close (Continue, runs its callback).
+//       craft / confirm the open Craft: forgeRecipe(selectedRecipe); the open
+//                       Confirm: onResult(true).
+//       forgehit <k>    the open ForgeAction: validateStep(metalShards[k]).
+//       lpstop          the open LockPick: stopActivity (its Leave button).
+//       song            the open SongRepertoire: onSongChoose (Play).
+//       job <traitId>   the first unit of me with a job (else its first unit):
+//                       removeTrait(old job), addTrait(id), as JobSelector does.
+//       snap <name>     Game.screenshot(dir + name + ".png"): the frame the
+//                       game renders itself (3D + 2D), no window or screen access.
 //     dir+"ack.txt" = "<seq> ok|dispatched|unknown|nogame|nosave|nowindow|noplayer", and
 //     a shim.log line.
 //   An exception: "harness: error <exc>" and ack "<seq> error".
@@ -285,6 +308,77 @@ struct Ctx {
     pick: (RefField, RefType),
     pick_k: (RefField, RefType),
     pick_count: RefField,
+    /// `act`: world.PlaceView.elements, ent.p.Element.id, Element.activate.
+    pv_t: RefType,
+    pv_elements: RefField,
+    pelem_t: RefType,
+    pelem_id: RefField,
+    activate: RefFun,
+    /// `play`: Game.ctrl, Controller.allocCallback / startActivity, the conds
+    /// virtual and its `player`, the callback type.
+    g_ctrl: (RefField, RefType),
+    alloc_cb: RefFun,
+    start_activity: RefFun,
+    conds_t: RefType,
+    conds_player: RefField,
+    cb_t: RefType,
+    dynobj_t: RefType,
+    state_player: (RefField, RefType),
+    /// `welcome`: ui.win.WelcomeMessage and its close (the Start button's call).
+    welcome: (RefType, RefFun),
+    /// `choose`: ui.win.ChooseUnit.
+    cu: Cu,
+    /// `snap`: Game.screenshot(path).
+    screenshot: RefFun,
+    /// `craft` / `confirm` / `forgehit`.
+    craft: Craft,
+    /// `job`.
+    ujob: UJob,
+    /// `tutorial`: ui.win.Tutorial and its close (the Continue button).
+    tutorial: (RefType, RefFun),
+    /// `lpstop`: ui.win.LockPick and its stopActivity (the Leave button's onClick).
+    lpstop: (RefType, RefFun),
+    /// `song`: ui.win.SongRepertoire and its onSongChoose (the Play button).
+    song: (RefType, RefFun),
+}
+
+/// st.Unit.job (its `kind`: the job's trait id), removeTrait, addTrait and
+/// addTrait's argument types.
+struct UJob {
+    job: (RefField, RefType),
+    kind: RefField,
+    remove: RefFun,
+    add: RefFun,
+    trait_t: RefType,
+    ref_bool_t: RefType,
+    null_bool_t: RefType,
+    cb_t: RefType,
+}
+
+/// ui.win.Craft (selectedRecipe, forgeRecipe), ui.win.Confirm.onResult,
+/// ui.win.ForgeAction (metalShards, validateStep).
+struct Craft {
+    t: RefType,
+    rec_t: RefType,
+    selected: RefField,
+    forge: RefFun,
+    confirm_t: RefType,
+    on_result: RefFun,
+    fa_t: RefType,
+    obj3d_t: RefType,
+    shards: RefField,
+    validate: RefFun,
+}
+
+/// ui.win.ChooseUnit: `units` (ArrayProxyData of UInf), getDisableReasons,
+/// select, validate.
+struct Cu {
+    t: RefType,
+    uinf_t: RefType,
+    units: RefField,
+    reasons: RefFun,
+    select: RefFun,
+    validate: RefFun,
 }
 
 /// Game fields the dump reads.
@@ -579,6 +673,19 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
     let f = |t: RefType, n: &str| typed(code, t, n, f64_t);
     let uinv_t = obj_type(code, "ui.comp.Inventory")?;
     let pick = field(code, player_t, "netPickItem")?;
+    let ctrl_t = field(code, game_t, "ctrl")?.1;
+    let sa = method(code, ctrl_t, "startActivity")?;
+    let sa_args = fun_args(code, sa);
+    if sa_args.len() != 7
+        || sa_args[0] != ctrl_t
+        || sa_args[1] != player_t
+        || sa_args[2] != obj_type(code, "ent.p.Element")?
+        || sa_args[3] != str_t
+        || sa_args[5] != dyn_t
+        || sa_args[6] != i32_t
+    {
+        bail!("Controller.startActivity: unexpected signature");
+    }
     Ok(Ctx {
         void_t,
         i32_t,
@@ -750,6 +857,126 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         pick,
         pick_k: field(code, pick.1, "k")?,
         pick_count: typed(code, pick.1, "count", i32_t)?,
+        g_ctrl: field(code, game_t, "ctrl")?,
+        alloc_cb: method(code, field(code, game_t, "ctrl")?.1, "allocCallback")?.findex,
+        start_activity: sa.findex,
+        conds_t: sa_args[4],
+        conds_player: {
+            let p = field_of_virtual(code, sa_args[4], "player")?;
+            if p.1 != player_t {
+                bail!("startActivity conds.player is not a BasePlayer");
+            }
+            p.0
+        },
+        cb_t: {
+            let ac = method(code, field(code, game_t, "ctrl")?.1, "allocCallback")?;
+            let args = fun_args(code, ac);
+            if args.len() != 2 || sig(code, ac.findex)?.1 != i32_t {
+                bail!("Controller.allocCallback: unexpected signature");
+            }
+            args[1]
+        },
+        welcome: {
+            // its Start button's onClick is the window's own close
+            let t = obj_type(code, "ui.win.WaitConnexionCoop")?;
+            if !is_sub(code, t, win_t) {
+                bail!("WaitConnexionCoop is not a ui.Window");
+            }
+            (t, mfn(win_t, "close", &[win_t], void_t)?)
+        },
+        cu: {
+            let t = obj_type(code, "ui.win.ChooseUnit")?;
+            let uinf_t = obj_type(code, "ui.win.UInf")?;
+            let units = typed(code, t, "units", proxy_t)?;
+            Cu {
+                t,
+                uinf_t,
+                units,
+                reasons: mfn(t, "getDisableReasons", &[t, uinf_t], arr_t)?,
+                select: mfn(t, "select", &[t, uinf_t], void_t)?,
+                validate: mfn(t, "validate", &[t], void_t)?,
+            }
+        },
+        screenshot: mfn(game_t, "screenshot", &[game_t, str_t], void_t)?,
+        song: {
+            let t = obj_type(code, "ui.win.SongRepertoire")?;
+            (t, mfn(t, "onSongChoose", &[t], void_t)?)
+        },
+        lpstop: {
+            let t = obj_type(code, "ui.win.LockPick")?;
+            (t, mfn(t, "stopActivity", &[t], void_t)?)
+        },
+        tutorial: {
+            let t = obj_type(code, "ui.win.Tutorial")?;
+            (t, mfn(t, "close", &[t], void_t)?)
+        },
+        ujob: {
+            let job = field(code, unit_t, "job")?;
+            let kind = typed(code, job.1, "kind", str_t)?;
+            let remove = mfn(unit_t, "removeTrait", &[unit_t, str_t], bool_t)?;
+            let add_f = method(code, unit_t, "addTrait")?;
+            let aa = fun_args(code, add_f);
+            let [u0, s1, rb, nbt, u4, cbt] = aa[..] else {
+                bail!("Unit.addTrait: unexpected arity");
+            };
+            if u0 != unit_t
+                || s1 != str_t
+                || u4 != unit_t
+                || !matches!(code.types[rb.0], Type::Ref(x) if x == bool_t)
+                || !matches!(code.types[nbt.0], Type::Null(x) if x == bool_t)
+                || !matches!(&code.types[cbt.0], Type::Fun(f) if f.args == [bool_t] && f.ret == void_t)
+            {
+                bail!("Unit.addTrait: unexpected signature");
+            }
+            UJob {
+                job,
+                kind,
+                remove,
+                add: add_f.findex,
+                trait_t: sig(code, add_f.findex)?.1,
+                ref_bool_t: rb,
+                null_bool_t: nbt,
+                cb_t: cbt,
+            }
+        },
+        craft: {
+            let t = obj_type(code, "ui.win.Craft")?;
+            let selected = field(code, t, "selectedRecipe")?;
+            let forge = mfn(t, "forgeRecipe", &[t, selected.1], void_t)?;
+            let confirm_t = obj_type(code, "ui.win.Confirm")?;
+            let fa_t = obj_type(code, "ui.win.ForgeAction")?;
+            let obj3d_t = obj_type(code, "h3d.scene.Object")?;
+            Craft {
+                t,
+                rec_t: selected.1,
+                selected: selected.0,
+                forge,
+                confirm_t,
+                on_result: mfn(confirm_t, "onResult", &[confirm_t, bool_t], void_t)?,
+                fa_t,
+                obj3d_t,
+                shards: typed(code, fa_t, "metalShards", arr_t)?,
+                validate: mfn(fa_t, "validateStep", &[fa_t, obj3d_t], void_t)?,
+            }
+        },
+        dynobj_t: prim_type(code, "DynObj", |t| matches!(t, Type::DynObj))?,
+        state_player: {
+            let p = field(code, state_t, "player")?;
+            if !is_sub(code, p.1, player_t) {
+                bail!("GameState.player is not a BasePlayer");
+            }
+            p
+        },
+        pv_t: obj_type(code, "world.PlaceView")?,
+        pv_elements: typed(code, obj_type(code, "world.PlaceView")?, "elements", arr_t)?,
+        pelem_t: obj_type(code, "ent.p.Element")?,
+        pelem_id: typed(code, obj_type(code, "ent.p.Element")?, "id", str_t)?,
+        activate: mfn(
+            obj_type(code, "ent.p.Element")?,
+            "activate",
+            &[obj_type(code, "ent.p.Element")?, player_t],
+            void_t,
+        )?,
     })
 }
 
@@ -1045,12 +1272,21 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     // frames left to trace the battle camera (`camtrace <n>`)
     let cam_g = add_global(code, c.i32_t);
     let cam_fn = build_cam(code, c)?;
+    // `play`'s activity callback: nothing to do
+    let play_cb = {
+        let mut r = Regs(vec![c.dyn_t]);
+        let v = r.r(c.void_t);
+        let mut a = Asm::new();
+        a.op(Opcode::Ret { ret: v });
+        push_fn(code, vec![c.dyn_t], c.void_t, r.0, a.finish(), c.dbg)?
+    };
     let k = |code: &mut Bytecode, v: i32| int_const(code, v);
-    let (k0, k1, k2, k3, k5, k6, k7, k8, k9) = (
+    let (k0, k1, k2, k3, k4, k5, k6, k7, k8, k9) = (
         k(code, 0),
         k(code, 1),
         k(code, 2),
         k(code, 3),
+        k(code, 4),
         k(code, 5),
         k(code, 6),
         k(code, 7),
@@ -1077,6 +1313,22 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_noplayer = gs("noplayer");
     let s_camtrace = gs("camtrace ");
     let s_ud = gs("ud ");
+    let s_act = gs("act ");
+    let s_play = gs("play ");
+    let s_welcome = gs("welcome");
+    let s_choose = gs("choose");
+    let s_snap = gs("snap ");
+    let s_craft = gs("craft");
+    let s_confirm = gs("confirm");
+    let s_forgehit = gs("forgehit ");
+    let s_job = gs("job ");
+    let s_tutorial = gs("tutorial");
+    let s_lpstop = gs("lpstop");
+    let s_song = gs("song");
+    let s_png = gs(".png");
+    let s_q = gs("?");
+    let s_elem = gs("harness: elem ");
+    let s_noelem = gs("noelem");
     let s_hostlog = gs("harness: host save ");
     let s_ok = gs("ok");
     let s_dispatched = gs("dispatched");
@@ -1168,6 +1420,32 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let pk = r.r(c.pick.1);
     let hk = r.r(c.pick_k.1);
     let uw = r.r(c.unit_weapon.1);
+    let pv = r.r(c.pv_t);
+    let pe = r.r(c.pelem_t);
+    let eid = r.r(c.str_t);
+    let aid = r.r(c.str_t);
+    let ctrl = r.r(c.g_ctrl.1);
+    let conds = r.r(c.conds_t);
+    let cb = r.r(c.cb_t);
+    let dobj = r.r(c.dynobj_t);
+    let cu = r.r(c.cu.t);
+    let uinf = r.r(c.cu.uinf_t);
+    let list2 = r.r(c.arr_t);
+    let crw = r.r(c.craft.t);
+    let rec = r.r(c.craft.rec_t);
+    let cfw = r.r(c.craft.confirm_t);
+    let faw = r.r(c.craft.fa_t);
+    let sho = r.r(c.craft.obj3d_t);
+    let jb = r.r(c.ujob.job.1);
+    let jb2 = r.r(c.ujob.trait_t);
+    let bref = r.r(c.ujob.ref_bool_t);
+    let nb = r.r(c.ujob.null_bool_t);
+    let unit2 = r.r(c.unit_t);
+    let jcb = r.r(c.ujob.cb_t);
+    let tw = r.r(c.tutorial.0);
+    let lpw = r.r(c.lpstop.0);
+    let sgw = r.r(c.song.0);
+    let sp = r.r(c.state_player.1);
 
     let mut a = Asm::new();
     // --- state machine, outside the trap
@@ -1713,6 +1991,423 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.gg(res, s_ok);
     a.go("ack");
     a.label("not_ud");
+
+    // verb: play <activity> <sub>  (Controller.startActivity(game.me, element,
+    // activity, {player: game.me}, null, callback): what Chest.tryUnlock and the
+    // element scripts call; the element as for `act`)
+    verb(&mut a, s_play, "not_play", Some(k5));
+    a.gg(s2, s_sp);
+    a.call(i, c.index_of, &[s, s2, ni]);
+    a.gg(res, s_unknown);
+    a.int(kk, k1);
+    a.jmp(
+        Opcode::JSLt {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.int(kk, k0);
+    a.op(Opcode::ToDyn { dst: ni, src: i });
+    a.call(aid, c.substr, &[s, kk, ni]);
+    a.op(Opcode::Null { dst: ni });
+    a.op(Opcode::Incr { dst: i });
+    a.call(s, c.substr, &[s, i, ni]);
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.go("act_find");
+    a.label("not_play");
+
+    // verb: act <sub>  (place view: Element.activate(game.me) of the first
+    // element whose id contains <sub>, the click's own path; `act ?` prints
+    // every element id as "harness: elem <id>")
+    verb(&mut a, s_act, "not_act", Some(k4));
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.label("act_find");
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(me, g, c.g.me.0);
+    a.fld(mode, g, c.g.mode.0);
+    a.op(Opcode::SafeCast { dst: pv, src: mode });
+    a.gg(res, s_noelem);
+    a.if_null(pv, "ack");
+    a.fld(list, pv, c.pv_elements);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.loop_head("act_e");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.op(Opcode::SafeCast { dst: pe, src: d });
+    a.if_null(pe, "act_e");
+    a.fld(eid, pe, c.pelem_id);
+    a.if_null(eid, "act_e");
+    a.gg(s2, s_q);
+    a.call(i, c.index_of, &[s, s2, ni]);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JNotEq {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "act_match",
+    );
+    a.gg(s2, s_elem);
+    a.call(s2, c.add, &[s2, eid]);
+    a.op(Opcode::Mov { dst: d, src: s2 });
+    a.call(void, c.println, &[d]);
+    a.gg(res, s_ok);
+    a.go("act_e");
+    a.label("act_match");
+    a.call(i, c.index_of, &[eid, s, ni]);
+    a.jmp(
+        Opcode::JSLt {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "act_e",
+    );
+    a.gg(res, s_ok);
+    a.if_false(b, "act_click");
+    a.fld(ctrl, g, c.g_ctrl.0);
+    a.if_null(ctrl, "ack");
+    a.op(Opcode::New { dst: conds });
+    a.setf(conds, c.conds_player, me);
+    a.op(Opcode::New { dst: dobj });
+    a.op(Opcode::StaticClosure {
+        dst: cb,
+        fun: play_cb,
+    });
+    a.call(i, c.alloc_cb, &[ctrl, cb]);
+    // Chest.tryUnlock's call: (state.player, element, id, {player}, {}, cb)
+    a.fld(gst, g, c.g.state);
+    a.if_null(gst, "ack");
+    a.fld(sp, gst, c.state_player.0);
+    a.call(void, c.start_activity, &[ctrl, sp, pe, aid, conds, dobj, i]);
+    a.go("ack");
+    a.label("act_click");
+    a.call(void, c.activate, &[pe, me]);
+    a.go("ack");
+    a.label("not_act");
+
+    // verb: welcome  (host: the loaded co-op game's "Waiting for players" WaitConnexionCoop; its Start = close)
+    verb(&mut a, s_welcome, "not_welcome", None);
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.welcome.0,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.call(void, c.welcome.1, &[win]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_welcome");
+
+    // verb: choose  (the open ChooseUnit: select its first unit with no disable
+    // reason, then validate, as a click on it and on Confirm)
+    verb(&mut a, s_choose, "not_choose", None);
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.cu.t,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: cu, src: win });
+    a.gg(res, s_noelem);
+    a.fld(proxy, cu, c.cu.units);
+    a.if_null(proxy, "ack");
+    a.fld(parr, proxy, c.proxy_array.0);
+    a.op(Opcode::SafeCast {
+        dst: list,
+        src: parr,
+    });
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.loop_head("cu_u");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.op(Opcode::SafeCast { dst: uinf, src: d });
+    a.if_null(uinf, "cu_u");
+    a.call(list2, c.cu.reasons, &[cu, uinf]);
+    a.if_null(list2, "cu_ok");
+    a.fld(cnt, list2, c.arr_len);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JSGt {
+            a: cnt,
+            b: kk,
+            offset: 0,
+        },
+        "cu_u",
+    );
+    a.label("cu_ok");
+    a.call(void, c.cu.select, &[cu, uinf]);
+    a.call(void, c.cu.validate, &[cu]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_choose");
+
+    // verb: tutorial  (the open ui.win.Tutorial: its close, the Continue button:
+    // runs the tutorial's callback, e.g. a mini-game's window closure)
+    verb(&mut a, s_tutorial, "not_tutorial", None);
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.tutorial.0,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: tw, src: win });
+    a.call(void, c.tutorial.1, &[tw]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_tutorial");
+
+    // verb: song  (the open ui.win.SongRepertoire: onSongChoose, its Play button)
+    verb(&mut a, s_song, "not_song", None);
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.song.0,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: sgw, src: win });
+    a.call(void, c.song.1, &[sgw]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_song");
+
+    // verb: lpstop  (the open ui.win.LockPick: stopActivity, its Leave button)
+    verb(&mut a, s_lpstop, "not_lpstop", None);
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.lpstop.0,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: lpw, src: win });
+    a.call(void, c.lpstop.1, &[lpw]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_lpstop");
+
+    // verb: craft  (the open Craft window: forgeRecipe(selectedRecipe), its Forge button)
+    verb(&mut a, s_craft, "not_craft", None);
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.craft.t,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: crw, src: win });
+    a.fld(rec, crw, c.craft.selected);
+    a.if_null(rec, "ack");
+    a.call(void, c.craft.forge, &[crw, rec]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_craft");
+
+    // verb: confirm  (the open ui.win.Confirm answered yes: onResult(true))
+    verb(&mut a, s_confirm, "not_confirm", None);
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.craft.confirm_t,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: cfw, src: win });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.call(void, c.craft.on_result, &[cfw, b]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_confirm");
+
+    // verb: forgehit <k>  (the open ForgeAction: validateStep(metalShards[k]),
+    // what a click on shard k does)
+    verb(&mut a, s_forgehit, "not_forgehit", Some(k9));
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.craft.fa_t,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: faw, src: win });
+    a.gg(res, s_unknown);
+    a.call(ni, c.parse_int, &[s]);
+    a.if_null(ni, "ack");
+    a.op(Opcode::SafeCast { dst: ix, src: ni });
+    a.op(Opcode::Null { dst: ni });
+    a.fld(list, faw, c.craft.shards);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.fld(arr, list, c.arr_arr.0);
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::SafeCast { dst: sho, src: d });
+    a.call(void, c.craft.validate, &[faw, sho]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_forgehit");
+
+    // verb: job <traitId>  (the first unit of game.me that has a job, else its
+    // first unit, switches to <traitId> (data.cdb trait ids: Thief, Bard,
+    // Blacksmith, Scholar, Woodcutter, Miner, ...), as JobSelector.chooseJob
+    // does it: removeTrait(old job) then addTrait(id, &true, null, null, null),
+    // the `trait` cheat's call. A wrong id throws after the old job is gone.)
+    verb(&mut a, s_job, "not_job", Some(k4));
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(gst, g, c.g.state);
+    a.if_null(gst, "ack");
+    a.fld(me, g, c.g.me.0);
+    a.gg(res, s_noelem);
+    // GameState.getUnits(null): every player's units, as the dump lists them
+    a.op(Opcode::Null { dst: rf });
+    a.call(list, c.get_units, &[gst, rf]);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.op(Opcode::Null { dst: unit2 });
+    a.loop_head("job_u");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "job_none",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.op(Opcode::SafeCast { dst: unit, src: d });
+    a.if_null(unit, "job_u");
+    a.fld(owner, unit, c.unit_owner.0);
+    a.jmp(
+        Opcode::JNotEq {
+            a: owner,
+            b: me,
+            offset: 0,
+        },
+        "job_u",
+    );
+    // remember the first unit of me as the fallback (no unit has a job)
+    a.jmp(
+        Opcode::JNotNull {
+            reg: unit2,
+            offset: 0,
+        },
+        "job_has",
+    );
+    a.op(Opcode::Mov {
+        dst: unit2,
+        src: unit,
+    });
+    a.label("job_has");
+    a.fld(jb, unit, c.ujob.job.0);
+    a.if_null(jb, "job_u");
+    a.fld(s2, jb, c.ujob.kind);
+    a.call(b, c.ujob.remove, &[unit, s2]);
+    a.go("job_add");
+    a.label("job_none");
+    a.if_null(unit2, "ack");
+    a.op(Opcode::Mov {
+        dst: unit,
+        src: unit2,
+    });
+    a.label("job_add");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ref { dst: bref, src: b });
+    a.op(Opcode::Null { dst: nb });
+    a.op(Opcode::Null { dst: unit2 });
+    a.op(Opcode::Null { dst: jcb });
+    a.call(jb2, c.ujob.add, &[unit, s, bref, nb, unit2, jcb]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_job");
+
+    // verb: snap <name>  (Game.screenshot: the rendered 3D + 2D frame, taken by
+    // the game itself, to <harness dir><name>.png; no window or screen access)
+    verb(&mut a, s_snap, "not_snap", Some(k5));
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.gg(dir, dir_g);
+    a.call(path, c.add, &[dir, s]);
+    a.gg(s2, s_png);
+    a.call(path, c.add, &[path, s2]);
+    a.call(void, c.screenshot, &[g, path]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_snap");
 
     // verb: dump
     verb(&mut a, s_dump, "ack", None);
@@ -2282,8 +2977,9 @@ mod tests {
         patch_harness(&mut code);
         let back = read(&write(&code));
         let n = back.functions.len();
-        let [uid, find, cam, tick] = [n - 4, n - 3, n - 2, n - 1].map(|i| &back.functions[i]);
-        for (f, traps) in [(uid, 0), (find, 0), (cam, 1), (tick, 2)] {
+        let [uid, find, cam, cb, tick] =
+            [n - 5, n - 4, n - 3, n - 2, n - 1].map(|i| &back.functions[i]);
+        for (f, traps) in [(uid, 0), (find, 0), (cam, 1), (cb, 0), (tick, 2)] {
             check_flow(f);
             check_types(&back, f, 0..f.ops.len());
             assert_eq!(traps_ok(f), traps);

@@ -181,3 +181,35 @@ Fixed 2026-10-09 (5f4dfd2, 6f1219b, f9047d8; runs and the full pass / feature st
 - Driver: `key -Key W -Hold 900` (focused, held), `drag -Right -HoldKey W [-KeyAt 0|step] [-Lead ms] [-StepMs ms]` (right-button drag with a key held; mouse/key always released). A header double click needs `click -Double -Hold 80` (the default 300 ms hold is past the 0.35 s double-push window).
 - Camera check (R8 `20261009-024815`): the battle camera bounds are ~15 units wide, so pans are kept under ~1 s and the camera is moved back between runs; compare the target speed per 100 ms since the key went down with and without the rotation.
 - Copy A state: restore `D:\WartalesTest\fixtures\A-udat_X19f792402-clean.sav` over `D:\WartalesTest\A\save\udat_X19f792402.sav` (user data carries a salted checksum: copy whole files, never edit them) and the real game's `prefs.sav` over `D:\WartalesTest\A\prefs.sav` if `networkLog` or `admin` got saved on (a `console` command that saves prefs persists the forced `admin=true`; `console networkLog` toggles and saves the trace pref). With the real prefs the window opens at 2070x1208; the lobby Start button is then at 1035,776.
+
+
+### Background-only scenarios (2026-10-26)
+
+Rule: a test never takes the user's screen, focus, mouse or keyboard. `coop.ps1 click`, `drag`, `wheel`, `shot` and `key -Hold` raise the game window and are not used any more; every step below is a harness command (`coop.ps1 cmd`), and pictures come from the game itself (`snap`). The game windows still open on `start` (the OS may focus a new window once).
+
+New verbs (`patcher/src/harness.rs`; each answers `ok` / `nowindow` / `noelem` / `error`):
+
+| verb | what it does (the vanilla call it stands for) |
+| --- | --- |
+| `welcome` | the loaded co-op game's "Waiting for players" (`ui.win.WaitConnexionCoop`): `Window.close`, its Start button |
+| `snap <name>` | `Game.screenshot` (the game renders 3D + 2D into a texture and saves it) to `<run>\<A|B>\wartales-mp\harness\<name>.png`; works with the window in the background |
+| `act <sub>` / `act ?` | in a place: `Element.activate(game.me)` of the first element whose id contains `<sub>` (a click on it); `?` prints `harness: elem <id>` for each element into shim.log |
+| `play <Activity> <sub>` | `Controller.startActivity(state.player, element, activity, {player: me}, {}, cb)` as `Chest.tryUnlock` calls it; run it on the host (a client's callback id is unknown to the host: `assert null` at the end, harness-only) |
+| `choose` | the open `ChooseUnit`: `select` its first unit with no disable reason, `validate` |
+| `job <traitId>` | the first unit of `me` with a job (else its first unit): `removeTrait(old job)`, `addTrait(id)` as `JobSelector.chooseJob`; ids from data.cdb: `Thief`, `Bard`, `Blacksmith`, `Scholar`, `Woodcutter`, `Miner` (a wrong id throws after the old job is gone) |
+| `tutorial` | the open `ui.win.Tutorial`: `close` (Continue; runs the tutorial callback). Seen tutorials do not open again (user data) |
+| `lpstop` | the open `ui.win.LockPick`: `stopActivity` (Leave) |
+| `craft` / `confirm` / `forgehit <k>` | `Craft.forgeRecipe(selectedRecipe)`; `Confirm.onResult(true)`; `ForgeAction.validateStep(metalShards[k])` (a hit on shard k; T2Forge's anvil has 4) |
+
+Console steps that replace clicks: `console quit` (leave the place, Place console), `console goto <placeId>` (teleport on the world map), `console enter <placeId>` (enter it; the first entry may start a fight: `console win`), `console item <Item> <n>`.
+
+Scripts (`tools/harness/scenarios/`): `up.ps1` (start, host the fixture save, slot, join by code, start, `welcome`), `common.ps1` (`T`, `Go-Place`, `Show-Logs`), `spectate.ps1 -Case lockpick|woodcut|ruins|forge|sing` (`Go-Place` waits until both games are in the place view, no fade). `song`: the open `SongRepertoire`'s `onSongChoose` (Play). Spots: TowerBad2 `GearCrate` (LockPick), PoorHamlet `WoodCutting` (WoodCutting), E1Ruins `NinePuzzle` / `CylinderPuzzle` (torches first), T2Forge `Anvil` (Forge), T2Tavern `SingSpot` (Sing, bard job, then `song`). Known: entering T2Tavern by `console goto` / `enter` leaves the guest stuck after `enter client faded` until the host's 30 s barrier asks it to rejoin (runs `20261026-124507`, `-125111`, `-125713`; T2Forge in the same town enters fine), so the sing case does not reach the guest yet.
+
+```powershell
+.\shim\build.ps1 -Release -Test; .\tools\harness\setup.ps1
+.\tools\harness\scenarios\up.ps1
+.\tools\harness\scenarios\spectate.ps1 -Case lockpick   # then -Case forge / ruins / woodcut
+.\tools\harness\coop.ps1 stop
+```
+
+Run 2026-10-26 (`D:\WartalesTest\runs\20261026-115816`, `-120514`, `-121525`): host lock picking seen by the guest (replicated LockPick window, same pick angle) and guest lock picking seen by the host, both cameras back at the end; woodcutting guest keeps its own camera (`spectate WoodCutting 1`); ruins NinePuzzle board seen by the guest (`spectate NinePuzzle 0`); forge: the guest sees the metal pieces on the anvil from the start, hit sparks, and the anvil empty again at the end.
