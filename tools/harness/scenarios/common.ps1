@@ -7,11 +7,13 @@ function T([string]$i, [string]$l) {
     catch { "$i '$l' -> $($_.Exception.Message)" }
 }
 # Leave the current place (Place console `quit`), then teleport both players to
-# <place> on the world map and enter it (World console `goto` / `enter`).
+# <place> on the world map (World console `goto`) and enter it with the harness
+# `enter` verb (GameState.getPlace with cities: a town's sub-place keeps its town;
+# the console `enter` creates a missing one without it, in region Worldwide).
 function Go-Place([string]$place, [int]$wait = 22) {
     T A 'console quit'; Start-Sleep 15
     T A "console goto $place"; T B "console goto $place"; Start-Sleep 5
-    T A "console enter $place"; Start-Sleep $wait
+    T A "enter $place"; Start-Sleep $wait
     # both games in the place view, no fade: a mini-game started while the
     # guest is still switching mode makes the host's barrier ask it to rejoin
     foreach ($i in 'A', 'B') {

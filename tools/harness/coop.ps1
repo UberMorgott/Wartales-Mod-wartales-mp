@@ -30,6 +30,8 @@
 #   coop.ps1 place   [-Inst A,B] [-W 852 -H 480]  windows side by side
 #   coop.ps1 close   -Inst B              WM_CLOSE (Alt+F4, soft)
 #   coop.ps1 kill    -Inst B              TerminateProcess (crash)
+#   coop.ps1 freeze  -Inst B              NtSuspendProcess: the game stops answering (a stalled
+#                                          guest; its helper and connection stay up); thaw resumes it
 #   coop.ps1 stop                          close all harness games (kill after 20 s)
 #   coop.ps1 status | logs [-Inst A] [-Tail 40]
 #
@@ -39,7 +41,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory)]
-    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'drag', 'wheel', 'shot', 'place', 'close', 'kill', 'stop', 'status', 'logs')]
+    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'drag', 'wheel', 'shot', 'place', 'close', 'kill', 'freeze', 'thaw', 'stop', 'status', 'logs')]
     [string]$Action,
     [string[]]$Inst = @('A', 'B'),
     [string]$Line = 'dump',
@@ -88,6 +90,8 @@ Add-Type -Namespace Harness -Name Win -MemberDefinition @'
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
 [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
 [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h);
+[DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);
 public struct RECT { public int Left, Top, Right, Bottom; }
 public struct POINT { public int X, Y; }
 '@
@@ -423,6 +427,16 @@ switch ($Action) {
             if (-not $p) { Write-Host "$i not running"; continue }
             $p.Kill() # TerminateProcess: a crash, no shutdown code runs
             Write-Host "${i}: terminated (pid $($p.Id))"
+        }
+    }
+    { $_ -in 'freeze', 'thaw' } {
+        $run = Run-Dir
+        foreach ($i in $Inst) {
+            $p = Game-Proc $run $i
+            if (-not $p) { Write-Host "$i not running"; continue }
+            $st = if ($Action -eq 'freeze') { [Harness.Win]::NtSuspendProcess($p.Handle) } else { [Harness.Win]::NtResumeProcess($p.Handle) }
+            if ($st -ne 0) { throw "${i}: $Action failed, NTSTATUS 0x{0:X8}" -f $st }
+            Write-Host "${i}: $Action (pid $($p.Id))"
         }
     }
     'stop' {

@@ -45,9 +45,6 @@ switch ($Case) {
     'sing' {
         # the bard's song in Cortia's tavern (T2Tavern): a camera activity, the
         # guest sees the stage; at the end its stage is hidden again (spectEnd)
-        # load the region first (T2Forge, same town): a long teleport + enter can
-        # outlast the host's 30 s mode-switch barrier on the guest
-        Go-Place 'T2Forge'
         Go-Place 'T2Tavern'
         T A 'job Bard'
         T B 'snap sg-before-guest'

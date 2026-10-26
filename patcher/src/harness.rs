@@ -50,6 +50,11 @@
 //                       path) of the first element whose id contains <sub>;
 //                       `act ?` prints "harness: elem <id>" for each. Ack
 //                       "noelem" when nothing matched.
+//       enter <placeId> GameState.getPlace(id, checkCities = true) +
+//                       Place.enter(null, null, null), as the script API's
+//                       enterPlace: a town's sub-place keeps its town (the World
+//                       console `enter` creates a missing one parentless, in
+//                       region Worldwide). dump `place`: {id, parent, region}.
 //       play <Activity> <sub>  Controller.startActivity(state.player, element,
 //                       activity id, {player: me}, {}, callback), as
 //                       Chest.tryUnlock calls it (run it on the host: a client's
@@ -340,6 +345,26 @@ struct Ctx {
     lpstop: (RefType, RefFun),
     /// `song`: ui.win.SongRepertoire and its onSongChoose (the Play button).
     song: (RefType, RefFun),
+    /// dump `place`: Game.getCurrentPlace, Place.id / parent / getRegion, Region.kind.
+    place: PlaceF,
+}
+
+/// The dump's `place`: {id, parent (its id), region (the kind getRegion gives)}.
+struct PlaceF {
+    cur: RefFun,
+    ref_bool_t: RefType,
+    t: RefType,
+    id: RefField,
+    parent: RefField,
+    region: RefFun,
+    region_t: RefType,
+    kind: RefField,
+    /// `enter`: GameState.getPlace(id, checkCities) and Place.enter(onEnd, onReady, force),
+    /// as the script API's enterPlace calls them; enter's two callback types.
+    get_place: RefFun,
+    null_bool_t: RefType,
+    enter: RefFun,
+    enter_cb: (RefType, RefType),
 }
 
 /// st.Unit.job (its `kind`: the job's trait id), removeTrait, addTrait and
@@ -977,6 +1002,59 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             &[obj_type(code, "ent.p.Element")?, player_t],
             void_t,
         )?,
+        place: {
+            let t = obj_type(code, "ent.Place")?;
+            let region_t = obj_type(code, "st.Region")?;
+            let cp = method(code, game_t, "getCurrentPlace")?;
+            let ref_bool_t = *fun_args(code, cp)
+                .get(1)
+                .context("getCurrentPlace: no arg")?;
+            if !matches!(code.types[ref_bool_t.0], Type::Ref(x) if x == bool_t) {
+                bail!("getCurrentPlace: arg is not a ref<bool>");
+            }
+            want_sig(code, cp.findex, &[game_t, ref_bool_t], t, "getCurrentPlace")?;
+            let gp = method(code, state_t, "getPlace")?;
+            let null_bool_t = *fun_args(code, gp)
+                .get(2)
+                .context("getPlace: no checkCities")?;
+            if !matches!(code.types[null_bool_t.0], Type::Null(x) if x == bool_t) {
+                bail!("getPlace: checkCities is not a Null<Bool>");
+            }
+            want_sig(
+                code,
+                gp.findex,
+                &[state_t, str_t, null_bool_t],
+                t,
+                "getPlace",
+            )?;
+            let en = method(code, t, "enter")?;
+            let ea = fun_args(code, en);
+            if ea.len() != 4 || ea[3] != ref_bool_t {
+                bail!("Place.enter: unexpected signature");
+            }
+            let enter_cb = (ea[1], ea[2]);
+            want_sig(
+                code,
+                en.findex,
+                &[t, ea[1], ea[2], ref_bool_t],
+                void_t,
+                "Place.enter",
+            )?;
+            PlaceF {
+                get_place: gp.findex,
+                null_bool_t,
+                enter: en.findex,
+                enter_cb,
+                cur: cp.findex,
+                ref_bool_t,
+                t,
+                id: typed(code, t, "id", str_t)?,
+                parent: typed(code, t, "parent", t)?,
+                region: mfn(t, "getRegion", &[t], region_t)?,
+                region_t,
+                kind: typed(code, region_t, "kind", str_t)?,
+            }
+        },
     })
 }
 
@@ -1314,6 +1392,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_camtrace = gs("camtrace ");
     let s_ud = gs("ud ");
     let s_act = gs("act ");
+    let s_enter = gs("enter ");
     let s_play = gs("play ");
     let s_welcome = gs("welcome");
     let s_choose = gs("choose");
@@ -1385,6 +1464,17 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let host = r.r(c.g.host.1);
     let me = r.r(c.g.me.1);
     let oth = r.r(c.g.me.1);
+    let (pl, pl2, plref, reg) = (
+        r.r(c.place.t),
+        r.r(c.place.t),
+        r.r(c.place.ref_bool_t),
+        r.r(c.place.region_t),
+    );
+    let (pnb, pcb1, pcb2) = (
+        r.r(c.place.null_bool_t),
+        r.r(c.place.enter_cb.0),
+        r.r(c.place.enter_cb.1),
+    );
     let cnt = r.r(c.i32_t);
     let rf = r.r(c.ref_i32_t);
     let lcls = r.r(c.lobby.1);
@@ -2021,6 +2111,32 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("act_find");
     a.label("not_play");
 
+    // verb: enter <placeId>  (the script API's enterPlace: GameState.getPlace(id,
+    // checkCities = true) finds a town's sub-place under its town, then
+    // Place.enter(null, null, null); the World console `enter` looks at top-level
+    // places only and creates a missing one without its town: parent null,
+    // region Worldwide, no region script globals)
+    verb(&mut a, s_enter, "not_enter", Some(k6));
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(gst, g, c.g.state);
+    a.if_null(gst, "ack");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::ToDyn { dst: pnb, src: b });
+    a.call(pl, c.place.get_place, &[gst, s, pnb]);
+    a.op(Opcode::Null { dst: pcb1 });
+    a.op(Opcode::Null { dst: pcb2 });
+    a.op(Opcode::Null { dst: plref });
+    a.call(void, c.place.enter, &[pl, pcb1, pcb2, plref]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_enter");
+
     // verb: act <sub>  (place view: Element.activate(game.me) of the first
     // element whose id contains <sub>, the click's own path; `act ?` prints
     // every element id as "harness: elem <id>")
@@ -2466,6 +2582,34 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.lit(code, ",\"me\":");
     w.a.fld(me, g, c.g.me.0);
     w.player(code, me, s);
+    // the current place: id, its parent's id, the region kind getRegion gives
+    // (the region whose script globals the place's element scripts see)
+    w.lit(code, ",\"place\":");
+    w.a.op(Opcode::Null { dst: plref });
+    w.a.call(pl, c.place.cur, &[g, plref]);
+    w.a.if_set(pl, "has_place");
+    w.lit(code, "null");
+    w.a.go("place_end");
+    w.a.label("has_place");
+    w.lit(code, "{\"id\":");
+    w.a.fld(s, pl, c.place.id);
+    w.str_q(s);
+    w.lit(code, ",\"parent\":");
+    w.a.fld(pl2, pl, c.place.parent);
+    w.a.op(Opcode::Null { dst: s });
+    w.a.if_null(pl2, "place_par");
+    w.a.fld(s, pl2, c.place.id);
+    w.a.label("place_par");
+    w.str_q(s);
+    w.lit(code, ",\"region\":");
+    w.a.call(reg, c.place.region, &[pl]);
+    w.a.op(Opcode::Null { dst: s });
+    w.a.if_null(reg, "place_reg");
+    w.a.fld(s, reg, c.place.kind);
+    w.a.label("place_reg");
+    w.str_q(s);
+    w.lit(code, "}");
+    w.a.label("place_end");
     // the local player's own inventory: item stack count
     w.lit(code, ",\"items\":");
     w.a.if_null(me, "no_items");
