@@ -6,7 +6,7 @@
 // leaves the image untouched and reports it (`skipped`), and `patch_image` then refuses
 // the whole image: a game build the co-op set does not fully match runs unpatched,
 // never half-patched. Only the print-only diagnostics (diag, activity_diag,
-// debrief_diag, camp_choice) are skipped alone. What each pass does: patcher/README.md.
+// camp_choice) are skipped alone. What each pass does: patcher/README.md.
 
 mod activity_diag;
 mod activity_injury;
@@ -27,9 +27,7 @@ mod chest_buttons;
 mod coop_gates;
 mod coop_spectate;
 mod customize_slots;
-mod debrief_cure;
-mod debrief_diag;
-mod debrief_enable;
+mod debrief;
 mod diag;
 mod direct_lobby;
 mod reload_route;
@@ -205,9 +203,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     party_inventory::patch_party_recipes(&mut code);
     party_inventory::patch_party_activities(&mut code);
     loot_all::patch_loot_all(&mut code);
-    debrief_cure::patch_debrief_cure(&mut code);
-    debrief_diag::patch(&mut code);
-    debrief_enable::patch_debrief_enable(&mut code);
+    debrief::patch_debrief(&mut code);
     window_close::patch_window_close(&mut code);
     stale_lobby::patch_stale_lobby(&mut code);
     log_error_cast::patch_log_error_cast(&mut code);

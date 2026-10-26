@@ -11,6 +11,8 @@ use std::collections::HashMap;
 /// goes to a Dyn register or argument as is. `ToDyn` on it would allocate a
 /// box around the pointer itself, which Std.string / Sys.println then read as
 /// garbage. `ToDyn` is only for plain values (Int, Float, Bool, Bytes, ...).
+/// `testutil::check_types` enforces it on every pass's new ops.
+#[cfg(test)]
 pub(crate) fn self_describing(t: &Type) -> bool {
     matches!(
         t,

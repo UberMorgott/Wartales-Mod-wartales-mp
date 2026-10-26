@@ -18,8 +18,8 @@ small functions (`ItemTip(icon.item)`, a vertical `Flow` of `SkillTip` per
 untouched and logs `<pass> skipped: <why>`; `wartales_tips_patch` then refuses
 the whole image, naming every mismatching pass, and the shim serves the game
 unpatched: a build the co-op set does not fully fit never runs half-patched.
-Only the print-only diagnostics (`diag`, `activity_diag`, `debrief_diag`,
-`camp_choice`) are skipped alone. "Skipped (logged)" below means exactly that.
+Only the print-only diagnostics (`diag`, `activity_diag`, `camp_choice`) are
+skipped alone. "Skipped (logged)" below means exactly that.
 
 It also carries one gameplay patch, **enemy friendly fire**: an area attack
 cast by a non-player unit also hits that unit's own allies (never the caster),
@@ -269,12 +269,15 @@ shim copies the game's stdout (`hl_sys_print`) into `shim.log` as `game:`
 lines (buffered in memory, written by a background thread every 500 ms), so a stuck black screen shows which step never came. Skipped (logged) on
 mismatch.
 
-**Post-battle input diagnostics** (`src/debrief_diag.rs`): records availability
-checks that rebuild the Debrief, their counts and button states, and the hovered,
-clicked and topmost UI elements after a tooltip opens. Lines start with
-`[mp debrief]`. Each window has separate limits for rebuild and input messages.
-This distinguishes repeated window rebuilds from a tooltip intercepting input;
-the probes themselves do not change input behavior.
+**Post-battle availability check** (`src/debrief.rs`): the co-op
+`Debrief.update` compares the repair / cure availability with each button's
+`enable` every frame and called `rebuild()` (the whole window) on a mismatch, so
+hover and clicks in the loot never landed while it disagreed. Its cure count
+walked `getUnitsToRepair()` where `init` and `cureAll` use `getUnitsToHeal()`
+(a vanilla mismatch that disagreed for good), and the party-wide counts change
+under the open window. One pass, three one-op edits in `update`: the cure loop
+reads `getUnitsToHeal()`, and both `rebuild()` calls become
+`set_enable(button, desired)`. Skipped (logged) on mismatch.
 
 **Transient tooltip input** (`src/tooltip_input.rs`): the helper-column screen
 clamp can move an item tooltip over the hovered slot. Decorative tooltip Icons
