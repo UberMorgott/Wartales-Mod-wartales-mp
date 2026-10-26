@@ -32,6 +32,17 @@
 // i.e. the joining guest rebuilds the inf exactly the way a guest present at
 // the start has it. A found id runs the vanilla line alone. One log line on the
 // miss path. Validated before editing; a mismatch skips the pass (logged).
+//
+// Both the vanilla line and the rebuild replace the inf Element.initData just
+// normalized with a raw copy of an allNpcs prefab inf, which can have no
+// `props` (Element.initData ends with `if (inf.props == null) inf.props = {}`;
+// the copy undoes it). Any filter over all Elements that reads `inf.props`
+// then throws on the guest: BeastTrack.init (`e.inf.props.elementType`, in
+// GameState.initSystems from Game.start) gave `Null access .elementType` and an
+// endless load for a guest joining a save with a confession running (issue #9).
+// So after `SetThis inf`, the client path also runs Element.initData's line:
+//
+//   if (inf != null && inf.props == null) inf.props = {};
 
 use super::*;
 use crate::diag::static_fn;
@@ -46,6 +57,11 @@ struct Plan {
     nc: usize,
     /// The final `Ret`, right after `SetThis inf`.
     ret: usize,
+    /// The register `SetThis inf` stores (the parsed copy).
+    inf: Reg,
+    f_props: RefField,
+    props_t: RefType,
+    dynobj_t: RefType,
     map: Reg,
     got: Reg,
     v: Reg,
@@ -127,10 +143,19 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     {
         bail!("FakeNpc.initData: unexpected shape");
     }
+    let Opcode::SetThis { src: inf, .. } = f.ops[n - 2] else {
+        unreachable!()
+    };
+    let (f_props, props_t) = field_of_virtual(code, f.regs[inf.0 as usize], "props")?;
+    let dynobj_t = prim_type(code, "dynobj", |t| matches!(t, Type::DynObj))?;
     Ok(Plan {
         fi: fun_index(code, f.findex)?,
         nc: i + 2,
         ret: n - 1,
+        inf,
+        f_props,
+        props_t,
+        dynobj_t,
         map,
         got,
         v,
@@ -151,6 +176,8 @@ fn plan(code: &Bytecode) -> Result<Plan> {
 /// Ops of the miss path inserted before the NullCheck (`to_ret`: offset base
 /// of the final Ret from the block's start).
 const MISS_LEN: usize = 14;
+/// Ops inserted after `SetThis inf` (props default, confession dialog).
+const TAIL_LEN: usize = 8;
 
 fn apply(code: &mut Bytecode, p: &Plan) {
     let setup = str_global(code, p.str_t, SETUP);
@@ -161,18 +188,25 @@ fn apply(code: &mut Bytecode, p: &Plan) {
     let key = new_reg(f, p.str_t);
     let msg = new_reg(f, p.str_t);
     let v0 = new_reg(f, p.void_t);
+    let props = new_reg(f, p.props_t);
+    let obj = new_reg(f, p.dynobj_t);
 
-    // After `SetThis inf`: the confession dialog, when this was a miss.
-    insert_ops(
-        f,
-        p.ret,
-        vec![
-            Opcode::JNull { reg: conf, offset: 1 },
-            Opcode::Call2 { dst: v0, fun: p.make, arg0: Reg(0), arg1: conf },
-        ],
-    );
-    // The Ret is now at p.ret + 2 + MISS_LEN; op k of the block is at p.nc + k.
-    let to_ret = |k: usize| (p.ret + 2 + MISS_LEN - (p.nc + k) - 1) as i32;
+    // After `SetThis inf`: Element.initData's props default, then the
+    // confession dialog when this was a miss.
+    let tail = vec![
+        Opcode::JNull { reg: p.inf, offset: 5 },
+        Opcode::Field { dst: props, obj: p.inf, field: p.f_props },
+        Opcode::JNotNull { reg: props, offset: 3 },
+        Opcode::New { dst: obj },
+        Opcode::ToVirtual { dst: props, src: obj },
+        Opcode::SetField { obj: p.inf, field: p.f_props, src: props },
+        Opcode::JNull { reg: conf, offset: 1 },
+        Opcode::Call2 { dst: v0, fun: p.make, arg0: Reg(0), arg1: conf },
+    ];
+    assert_eq!(tail.len(), TAIL_LEN);
+    insert_ops(f, p.ret, tail);
+    // The Ret is now at p.ret + TAIL_LEN + MISS_LEN; op k of the block is at p.nc + k.
+    let to_ret = |k: usize| (p.ret + TAIL_LEN + MISS_LEN - (p.nc + k) - 1) as i32;
     let ops = vec![
         Opcode::Null { dst: conf },
         Opcode::JNotNull { reg: p.v, offset: (MISS_LEN - 2) as i32 },
@@ -192,7 +226,7 @@ fn apply(code: &mut Bytecode, p: &Plan) {
     assert_eq!(ops.len(), MISS_LEN);
     insert_ops(f, p.nc, ops);
     eprintln!(
-        "patched fake npc fn@{} op {}: a joining guest rebuilds a running confession NPC instead of a null access",
+        "patched fake npc fn@{} op {}: a joining guest rebuilds a running confession NPC instead of a null access; a copied inf gets Element.initData's props default",
         f.findex.0, p.nc
     );
 }
@@ -228,9 +262,9 @@ mod tests {
             assert_eq!(same(a, b), i != p.fi, "fn #{i}");
         }
         let (a, b) = (&orig.functions[p.fi], &back.functions[p.fi]);
-        assert_eq!(b.ops.len(), a.ops.len() + MISS_LEN + 2);
+        assert_eq!(b.ops.len(), a.ops.len() + MISS_LEN + TAIL_LEN);
         let map = |t: usize| {
-            t + if t >= p.nc { MISS_LEN } else { 0 } + if t >= p.ret { 2 } else { 0 }
+            t + if t >= p.nc { MISS_LEN } else { 0 } + if t >= p.ret { TAIL_LEN } else { 0 }
         };
         for i in 0..a.ops.len() {
             let want: Vec<usize> = jump_targets(a, i).into_iter().map(map).collect();
@@ -245,8 +279,13 @@ mod tests {
         }
         assert_eq!(jump_targets(b, p.nc + 1), [p.nc + MISS_LEN]);
         assert_eq!(jump_targets(b, ret - 2), [ret]);
+        // The props default: a null inf or a present props skip to the dialog step.
+        let tail = ret - TAIL_LEN;
+        assert!(matches!(b.ops[tail - 1], Opcode::SetThis { .. }));
+        assert_eq!(jump_targets(b, tail), [ret - 2]);
+        assert_eq!(jump_targets(b, tail + 2), [ret - 2]);
         check_types(&back, b, p.nc..p.nc + MISS_LEN);
-        check_types(&back, b, ret - 2..ret);
+        check_types(&back, b, tail..ret);
         check_flow(b);
 
         let mut again = read(&patched);
@@ -296,19 +335,25 @@ mod tests {
             ref o => panic!("{o:?}"),
         };
         let (println, str_add) = (p.println, p.str_add);
+        let f_props = p.f_props;
 
         struct Case {
             id: &'static str,
             last: bool,
             setup: bool,
+            /// The allNpcs prefab infs carry `props`.
+            props: bool,
             want_inf: &'static str,
             made: bool,
         }
         let cases = [
-            Case { id: "Npc1", last: false, setup: true, want_inf: "copy:Npc1", made: false },
-            Case { id: "ConfX", last: true, setup: true, want_inf: "copy:ConfessionSetup", made: true },
-            Case { id: "ConfX", last: false, setup: true, want_inf: "placeholder", made: false },
-            Case { id: "ConfX", last: true, setup: false, want_inf: "placeholder", made: false },
+            Case { id: "Npc1", last: false, setup: true, props: true, want_inf: "copy:Npc1", made: false },
+            // issue #9: a prefab inf without props must not leave a props-less copy
+            Case { id: "Npc1", last: false, setup: true, props: false, want_inf: "copy:Npc1", made: false },
+            Case { id: "ConfX", last: true, setup: true, props: true, want_inf: "copy:ConfessionSetup", made: true },
+            Case { id: "ConfX", last: true, setup: true, props: false, want_inf: "copy:ConfessionSetup", made: true },
+            Case { id: "ConfX", last: false, setup: true, props: true, want_inf: "placeholder", made: false },
+            Case { id: "ConfX", last: true, setup: false, props: true, want_inf: "placeholder", made: false },
         ];
         for c in cases {
             let mut sim = Sim::new(
@@ -323,9 +368,10 @@ mod tests {
                         return Some(core.map("all", k));
                     }
                     if f == print_fn {
-                        // Json.stringify(inf): the inf's tag
+                        // Json.stringify(inf): the inf's tag, "+p" when it has props
                         let V::S(t) = core.key_get(&args[0], "tag") else { panic!() };
-                        return Some(V::S(t));
+                        let p = core.get(&args[0], f_props) != V::Null;
+                        return Some(V::S(if p { format!("{t}+p") } else { t }));
                     }
                     if f == parser_ctor {
                         core.key_set(&args[0], "src".into(), args[1].clone());
@@ -333,7 +379,14 @@ mod tests {
                     }
                     if f == parse {
                         let V::S(t) = core.key_get(&args[0], "src") else { panic!() };
-                        return Some(V::S(format!("copy:{t}")));
+                        let (t, p) = match t.strip_suffix("+p") {
+                            Some(t) => (t.to_string(), true),
+                            None => (t, false),
+                        };
+                        let props = if p { core.obj(&[]) } else { V::Null };
+                        let copy = core.obj(&[(f_props, props)]);
+                        core.key_set(&copy, "tag".into(), V::S(format!("copy:{t}")));
+                        return Some(copy);
                     }
                     if f == make {
                         core.log.push(("make", args.to_vec()));
@@ -356,7 +409,8 @@ mod tests {
             );
             for (k, present) in [("Npc1", true), (SETUP, c.setup)] {
                 if present {
-                    let inf = sim.c.obj(&[]);
+                    let props = if c.props { sim.c.obj(&[]) } else { V::Null };
+                    let inf = sim.c.obj(&[(f_props, props)]);
                     sim.c.key_set(&inf, "tag".into(), V::S(k.to_string()));
                     let e = sim.c.obj(&[(v_inf, inf)]);
                     sim.c.put("all", k, e);
@@ -366,14 +420,20 @@ mod tests {
             let game = sim.c.obj(&[(f_auth, V::B(false)), (f_all, all)]);
             let conf = if c.last { sim.c.obj(&[]) } else { V::Null };
             let dd = sim.c.obj(&[(p.f_last, conf.clone())]);
+            // Element.initData's inf: always has props.
+            let pp = sim.c.obj(&[]);
+            let placeholder = sim.c.obj(&[(f_props, pp)]);
+            sim.c.key_set(&placeholder, "tag".into(), V::S("placeholder".into()));
             let this = sim.c.obj(&[
                 (f_game, game),
                 (p.f_id, V::S(c.id.into())),
                 (p.f_dialog, dd),
-                (f_inf, V::S("placeholder".into())),
+                (f_inf, placeholder),
             ]);
             sim.run(fun, vec![this.clone()]);
-            assert_eq!(sim.c.get(&this, f_inf), V::S(c.want_inf.into()), "{}", c.id);
+            let inf = sim.c.get(&this, f_inf);
+            assert_eq!(sim.c.key_get(&inf, "tag"), V::S(c.want_inf.into()), "{}", c.id);
+            assert_ne!(sim.c.get(&inf, f_props), V::Null, "{} props", c.id);
             let made = sim.c.take("make");
             if c.made {
                 assert_eq!(made, [vec![this.clone(), conf.clone()]]);
