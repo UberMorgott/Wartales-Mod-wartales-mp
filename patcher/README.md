@@ -453,6 +453,15 @@ before it threw is kept. Not covered, still vanilla: argument decoding,
 property sync, object registration, full sync, RPC result callbacks, protocol
 errors. Skipped (logged) on mismatch.
 
+**Battle entity batch** (`src/alive_bind.rs`, issue #8): a guest receiving
+several new battle entities in one flush ran their inits one by one while the
+whole batch was already in `allUnits`, so the first init (HUD, guard lookup)
+hit `Null access .grid` on a later entity whose `battle` was still unset.
+`Game.initAlive` now binds every pending `battle.Entity` with no battle to
+`Game.battle` before its vanilla loop (only what each init assigns first), so
+every init runs once, unchanged, on a consistent batch. Skipped (logged) on
+mismatch.
+
 **Cancelled RPC results** (`src/rpc_cancel.rs`): when the host gets a call with
 a result for an object it does not know, hxbit answers `CANCEL_RPC` (12) and
 the caller's `processMessage` only removes the waiting callback, so it never

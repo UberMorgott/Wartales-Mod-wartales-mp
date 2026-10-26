@@ -63,7 +63,8 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | take_all | unit | |
 | tavern_resume | unit | |
 | mod_version | unit | |
-| net_guard | unit | |
+| net_guard | unit | part B moved to `alive_bind` (2026-10-26) |
+| alive_bind (net_guard part B, 2026-10-26) | unit | patched image byte-identical to before the split |
 | tip_overflow | unit | |
 | tooltip_input | unit | |
 | censer_tip | unit | |

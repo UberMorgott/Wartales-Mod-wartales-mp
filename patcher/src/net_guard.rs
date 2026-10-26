@@ -53,21 +53,8 @@
 //      feedbackDamages / battleNextTurn then hit `Null access .grid`. initAlive
 //      is a few length checks when nothing is pending; GameUI.netUpdatePick
 //      already calls makeAlive on demand the same way. lockAlives is honoured
-//      by initAlive itself.
-//   B. `Game.initAlive` (host and guests) first binds every pending
-//      battle.Entity of aliveStates whose `battle` is still null to
-//      `Game.battle`, then runs its vanilla loop (one shift + init per state).
-//      Vanilla sets `battle.Entity.battle` only in that entity's own init
-//      (Entity.hx:22), one state at a time, while the whole batch is already in
-//      `battle.state.allUnits`: e.g. a guest receiving several summoned rats in
-//      one flush inits rat 1 -> genHud -> HealthBars.rebuild -> Unit.get_guard
-//      -> hasSkills walks allUnits -> getDistance on rat 2 (battle null) ->
-//      `Null access .grid`; rat 1 stays half-initialised and every later
-//      update / battleNextTurn throws the same (issue #8, battle hangs). The
-//      host never queues such a batch: a unit it creates runs init right away,
-//      before the next one joins allUnits. Binding only what init itself would
-//      assign first (Game.inst.battle; initAlive runs on Game.inst) leaves init
-//      running once, unchanged.
+//      by initAlive itself. It sits inside the trap, so it is part of this
+//      pass; the order-safe init of such a batch is alive_bind.rs.
 // Everything else stays vanilla: argument decode errors, property sync, object
 // registration, full sync, RPC result callbacks, protocol errors.
 //
@@ -178,34 +165,8 @@ struct Guarded {
     gen_bump: bool,
 }
 
-/// B: Game.initAlive's pre-bind of pending battle entities.
-struct PreBind {
-    /// Game.initAlive's function index.
-    fi: usize,
-    /// Its loop head (a Label), where the block goes.
-    at: usize,
-    /// The `lockAlives` test that jumps to the loop head (now to the block).
-    lock_jump: usize,
-    /// Game.aliveStates, Game.battle (and its type), battle.Entity.battle.
-    alive_states: RefField,
-    g_battle: RefField,
-    battle_t: RefType,
-    e_battle: RefField,
-    /// battle.Entity and its class global (type `battle.$Entity`).
-    ent_t: RefType,
-    ent_cls: RefGlobal,
-    ent_cls_t: RefType,
-    /// hl.BaseType.check (`Std.isOfType` for a class), as initAlive uses it.
-    check: RefFun,
-    /// hl.types.ArrayObj.length / .array (and the array's type).
-    a_len: RefField,
-    a_raw: RefField,
-    a_raw_t: RefType,
-}
-
 struct Plan {
     c: Common,
-    pre_bind: PreBind,
     guarded: Vec<Guarded>,
     /// (function index, op where +1 goes, Ret ops where -1 goes)
     counted: Vec<(usize, Option<usize>, Vec<usize>)>,
@@ -354,191 +315,6 @@ fn common(code: &Bytecode) -> Result<Common> {
         s_in_pos: typed(ser_t, "inPos", i32_t)?,
         s_input: typed(ser_t, "input", bytes_t)?,
     })
-}
-
-/// B. Validates Game.initAlive (`if (aliveStates == null || lockAlives) return;`
-/// then a Label-headed shift/init loop) and battle.Entity.init (sets
-/// `this.battle` from `Game.inst.battle`).
-fn pre_bind_plan(code: &Bytecode, c: &Common) -> Result<PreBind> {
-    let f = method(code, c.game_t, "initAlive")?;
-    let fi = fun_index(code, f.findex)?;
-    let o = &f.ops;
-    let at = o
-        .iter()
-        .position(|op| matches!(op, Opcode::Label))
-        .context("initAlive: no loop head")?;
-    let (alive_states, as_t) = field(code, c.game_t, "aliveStates")?;
-    if as_t != c.arr_t {
-        bail!("Game.aliveStates is not an ArrayObj");
-    }
-    let lock = typed(code, c.game_t, "lockAlives", c.bool_t)?;
-    let shape = at >= 5
-        && matches!(o[at - 5], Opcode::GetThis { field, .. } if field == alive_states)
-        && matches!(o[at - 4], Opcode::JNull { .. })
-        && jump_targets(f, at - 4) == [at - 1]
-        && matches!(o[at - 3], Opcode::GetThis { field, .. } if field == lock)
-        && matches!(o[at - 2], Opcode::JFalse { .. })
-        && jump_targets(f, at - 2) == [at]
-        && matches!(o[at - 1], Opcode::Ret { .. });
-    if !shape {
-        bail!("initAlive: unexpected aliveStates / lockAlives test");
-    }
-    // Only the lockAlives test enters the loop head from before it; the
-    // loop's own jumps come back from after it.
-    if (0..at).any(|i| i != at - 2 && jump_targets(f, i).contains(&at)) || !no_switch_to(f, at) {
-        bail!("initAlive: another jump enters the loop");
-    }
-    // The loop: aliveStates.shift() and `check(cls, st)` before init.
-    let shift = o[at..]
-        .iter()
-        .any(|op| matches!(op, Opcode::Call1 { fun, .. } if fname(code, *fun) == "shift"));
-    let checks: Vec<RefFun> = o[at..]
-        .iter()
-        .filter_map(|op| match op {
-            Opcode::Call2 { fun, .. } if fname(code, *fun) == "check" => Some(*fun),
-            _ => None,
-        })
-        .collect();
-    let [check] = checks[..] else {
-        bail!(
-            "initAlive: expected one class check, found {}",
-            checks.len()
-        );
-    };
-    let (ca, cr) = sig(code, check)?;
-    if !shift || ca.len() != 2 || ca[1] != c.dyn_t || cr != c.bool_t {
-        bail!("initAlive: unexpected loop");
-    }
-    let ent_t = obj_type(code, "battle.Entity")?;
-    let (ent_cls, ent_cls_t) = class_global(code, "battle.Entity")?;
-    if !is_sub(code, ent_cls_t, ca[0]) {
-        bail!("battle.$Entity is not a {}", ca[0].0);
-    }
-    let (g_battle, battle_t) = field(code, c.game_t, "battle")?;
-    let e_battle = typed(code, ent_t, "battle", battle_t)?;
-    // battle.Entity.init: `this.battle = Game.inst.battle` first.
-    let init = method(code, ent_t, "init")?;
-    let io = &init.ops;
-    let binds = io.len() > 4
-        && matches!(io[0], Opcode::GetGlobal { global, .. } if global == c.g_cls)
-        && matches!(io[1], Opcode::Field { field, .. } if field == c.g_inst)
-        && matches!(io[3], Opcode::Field { field, .. } if field == g_battle)
-        && matches!(io[4], Opcode::SetThis { field, .. } if field == e_battle);
-    if !binds {
-        bail!("battle.Entity.init does not start with this.battle = Game.inst.battle");
-    }
-    let (a_len, len_t) = field(code, c.arr_t, "length")?;
-    let (a_raw, a_raw_t) = field(code, c.arr_t, "array")?;
-    if len_t != c.i32_t || !matches!(code.types[a_raw_t.0], Type::Array) {
-        bail!("unexpected ArrayObj fields");
-    }
-    Ok(PreBind {
-        fi,
-        at,
-        lock_jump: at - 2,
-        alive_states,
-        g_battle,
-        battle_t,
-        e_battle,
-        ent_t,
-        ent_cls,
-        ent_cls_t,
-        check,
-        a_len,
-        a_raw,
-        a_raw_t,
-    })
-}
-
-/// B. `if (this.battle != null) for (st in aliveStates) if (check(battle.Entity, st)
-/// && st.battle == null) st.battle = this.battle;` through new registers of `f`.
-fn pre_bind_ops(f: &mut Function, c: &Common, p: &PreBind, zero: RefInt) -> Vec<Opcode> {
-    let bt = new_reg(f, p.battle_t);
-    let cur = new_reg(f, p.battle_t);
-    let arr = new_reg(f, c.arr_t);
-    let raw = new_reg(f, p.a_raw_t);
-    let len = new_reg(f, c.i32_t);
-    let i = new_reg(f, c.i32_t);
-    let d = new_reg(f, c.dyn_t);
-    let cls = new_reg(f, p.ent_cls_t);
-    let ok = new_reg(f, c.bool_t);
-    let e = new_reg(f, p.ent_t);
-    let mut a = Asm::new();
-    a.op(Opcode::Field {
-        dst: bt,
-        obj: Reg(0),
-        field: p.g_battle,
-    });
-    a.jmp(Opcode::JNull { reg: bt, offset: 0 }, "done");
-    a.op(Opcode::Field {
-        dst: arr,
-        obj: Reg(0),
-        field: p.alive_states,
-    });
-    a.op(Opcode::Field {
-        dst: len,
-        obj: arr,
-        field: p.a_len,
-    });
-    a.op(Opcode::Field {
-        dst: raw,
-        obj: arr,
-        field: p.a_raw,
-    });
-    a.op(Opcode::Int { dst: i, ptr: zero });
-    a.loop_head("next");
-    a.jmp(
-        Opcode::JSGte {
-            a: i,
-            b: len,
-            offset: 0,
-        },
-        "done",
-    );
-    a.op(Opcode::GetArray {
-        dst: d,
-        array: raw,
-        index: i,
-    });
-    a.op(Opcode::Incr { dst: i });
-    a.op(Opcode::GetGlobal {
-        dst: cls,
-        global: p.ent_cls,
-    });
-    a.op(Opcode::Call2 {
-        dst: ok,
-        fun: p.check,
-        arg0: cls,
-        arg1: d,
-    });
-    a.jmp(
-        Opcode::JFalse {
-            cond: ok,
-            offset: 0,
-        },
-        "next",
-    );
-    a.op(Opcode::SafeCast { dst: e, src: d });
-    a.op(Opcode::Field {
-        dst: cur,
-        obj: e,
-        field: p.e_battle,
-    });
-    a.jmp(
-        Opcode::JNotNull {
-            reg: cur,
-            offset: 0,
-        },
-        "next",
-    );
-    a.op(Opcode::SetField {
-        obj: e,
-        field: p.e_battle,
-        src: bt,
-    });
-    a.jmp(Opcode::JAlways { offset: 0 }, "next");
-    a.label("done");
-    a.finish()
 }
 
 /// "Class.method" of the function a call op reaches (direct, or a CallThis
@@ -752,7 +528,6 @@ fn rets(f: &Function) -> Vec<usize> {
 
 fn plan(code: &Bytecode) -> Result<Plan> {
     let c = common(code)?;
-    let pre_bind = pre_bind_plan(code, &c)?;
     let mut guarded = rpc_fns(code, &c)?;
     let mut n_msg = 0;
     for (fi, f) in code.functions.iter().enumerate() {
@@ -799,7 +574,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     counted.push((fun_index(code, start.findex)?, Some(0), r));
     Ok(Plan {
         c,
-        pre_bind,
         guarded,
         counted,
     })
@@ -1309,7 +1083,6 @@ fn bump(f: &mut Function, c: &Common, g: RefGlobal, delta: RefInt) -> Vec<Opcode
 fn apply(code: &mut Bytecode, p: Plan) {
     let Plan {
         c,
-        pre_bind,
         guarded,
         counted,
     } = p;
@@ -1333,18 +1106,6 @@ fn apply(code: &mut Bytecode, p: Plan) {
         cap: int_const(code, LOG_CAP),
         fzero: float_const(code, 0.0),
     };
-
-    // B. The pre-bind before initAlive's loop head; the lockAlives test (the
-    // only way in from above) now lands on it, the loop's own jumps still on
-    // the head.
-    let f = &mut code.functions[pre_bind.fi];
-    let ops = pre_bind_ops(f, &c, &pre_bind, k.zero);
-    insert_ops(f, pre_bind.at, ops);
-    retarget(
-        &mut f.ops[pre_bind.lock_jump],
-        pre_bind.lock_jump,
-        pre_bind.at,
-    );
 
     // W. Writer depth: -1 before each return (highest first), then +1 at entry.
     for (fi, enter, leaves) in &counted {
@@ -1644,30 +1405,6 @@ mod tests {
             check_types(&back, b, 0..b.ops.len().min(BUMP));
             check_flow(b);
         }
-        // B. The pre-bind block sits at initAlive's loop head.
-        let pb = &p.pre_bind;
-        touched.insert(pb.fi);
-        let (a, b) = (&orig.functions[pb.fi], &back.functions[pb.fi]);
-        let n = b.ops.len() - a.ops.len();
-        assert_eq!(n, 18);
-        let map = |i: usize| if i < pb.at { i } else { i + n };
-        for i in 0..a.ops.len() {
-            let want: Vec<usize> = if i == pb.lock_jump {
-                vec![pb.at]
-            } else {
-                jump_targets(a, i).into_iter().map(map).collect()
-            };
-            assert_eq!(jump_targets(b, map(i)), want, "initAlive op {i}");
-        }
-        for j in pb.at..pb.at + n {
-            for t in jump_targets(b, j) {
-                assert!(t >= pb.at && t <= pb.at + n, "initAlive op {j}");
-            }
-        }
-        assert!(matches!(b.ops[pb.at + n], Opcode::Label));
-        check_types(&back, b, pb.at..pb.at + n);
-        check_flow(b);
-
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
             assert_eq!(
@@ -1683,126 +1420,6 @@ mod tests {
         assert!(plan(&again).is_err());
         patch_net_guard(&mut again);
         assert!(write(&again) == patched);
-    }
-
-    /// Issue #8: Game.initAlive with a batch of pending battle entities. Each
-    /// entity's init sees every other pending entity already bound to the
-    /// battle (vanilla: the later ones still have `battle == null`); the pre-bind
-    /// leaves an already-bound entity's battle untouched (checked before any
-    /// init runs: the real init overwrites it), a non-entity state is left alone, and every
-    /// entity is still initialised exactly once, in queue order.
-    #[test]
-    fn init_alive_binds_the_whole_batch_first() {
-        use crate::testsim::{Core, Sim, V};
-        let Some(image) = game() else { return };
-        let orig = read(&image);
-        let mut code = read(&image);
-        let pb = plan(&code).expect("plan").pre_bind;
-        patch_net_guard(&mut code);
-        let init_alive = code.functions[pb.fi].findex;
-
-        let run = |code: &Bytecode| -> (Vec<Vec<V>>, Vec<V>, V, Vec<V>) {
-            let ents = std::cell::RefCell::new(Vec::<V>::new());
-            // Battles of every entity as the first init starts (= right after the pre-bind).
-            let pre = std::cell::RefCell::new(None::<Vec<V>>);
-            let f = &code.functions[pb.fi];
-            let (a_len, a_raw, e_battle) = (pb.a_len, pb.a_raw, pb.e_battle);
-            let stub = |core: &mut Core, fun: RefFun, args: &[V]| -> Option<V> {
-                if fun == pb.check {
-                    return Some(V::B(core.key_get(&args[1], "xent") == V::B(true)));
-                }
-                if fname(code, fun) == "shift" {
-                    let a = &args[0];
-                    let V::I(n) = core.get(a, a_len) else {
-                        panic!("len")
-                    };
-                    let raw = core.get(a, a_raw);
-                    if n == 0 {
-                        return Some(V::Null);
-                    }
-                    let first = core.key_get(&raw, "i0");
-                    for k in 1..n {
-                        let v = core.key_get(&raw, &format!("i{k}"));
-                        core.key_set(&raw, format!("i{}", k - 1), v);
-                    }
-                    core.set(a, a_len, V::I(n - 1));
-                    return Some(first);
-                }
-                None
-            };
-            let method = |core: &mut Core, _field: usize, args: &[V]| -> V {
-                let me = args[0].clone();
-                let bound = ents
-                    .borrow()
-                    .iter()
-                    .filter(|e| **e != me)
-                    .all(|e| core.get(e, e_battle) != V::Null);
-                if pre.borrow().is_none() {
-                    let snap = ents
-                        .borrow()
-                        .iter()
-                        .map(|e| core.get(e, e_battle))
-                        .collect();
-                    *pre.borrow_mut() = Some(snap);
-                }
-                core.log.push(("init", vec![me.clone(), V::B(bound)]));
-                // Entity.init@8545 ops 0-4: this.battle = Game.inst.battle, unconditionally.
-                let bt = core.map("t", "bt");
-                core.set(&me, e_battle, bt);
-                V::Null
-            };
-            let mut sim = Sim::new(code, code.functions.len(), stub, method);
-            // The loop skips a state whose persist equals a vanilla enum global.
-            for w in f.ops.windows(3) {
-                if let [Opcode::Field { .. }, Opcode::GetGlobal { global, .. }, Opcode::JNotEq { .. }] =
-                    w
-                {
-                    sim.c.globals.insert(global.0, V::I(-7));
-                }
-            }
-            let bt = sim.c.obj(&[]);
-            let other = sim.c.obj(&[]);
-            sim.c.put("t", "bt", bt.clone());
-            let mk = |c: &mut Core, ent: bool, battle: V| {
-                let o = c.obj(&[(e_battle, battle)]);
-                c.key_set(&o, "xent".into(), V::B(ent));
-                o
-            };
-            let ea = mk(&mut sim.c, true, V::Null);
-            let x = mk(&mut sim.c, false, V::Null);
-            let eb = mk(&mut sim.c, true, V::Null);
-            let ec = mk(&mut sim.c, true, other.clone());
-            *ents.borrow_mut() = vec![ea.clone(), eb.clone(), ec.clone()];
-            let states = vec![ea.clone(), x.clone(), eb.clone(), ec.clone()];
-            let arr = sim.c.arr(a_len, a_raw, states);
-            let game = sim
-                .c
-                .obj(&[(pb.alive_states, arr), (pb.g_battle, bt.clone())]);
-            sim.run(init_alive, vec![game]);
-            let inits = sim.c.take("init");
-            let after = [ea, x, eb, ec]
-                .iter()
-                .map(|o| sim.c.get(o, e_battle))
-                .collect();
-            let pre = pre.borrow_mut().take().expect("no init ran");
-            (inits, after, other, pre)
-        };
-
-        let (inits, after, other, pre) = run(&code);
-        // ents = [ea, eb, ec]: the pre-bind bound the null ones, left ec's own battle.
-        assert_eq!(
-            pre[2], other,
-            "pre-bind leaves an already-bound entity's battle"
-        );
-        assert!(pre[0] != V::Null && pre[0] == pre[1], "{pre:?}");
-        assert_eq!(inits.len(), 3, "{inits:?}");
-        assert!(inits.iter().all(|i| i[1] == V::B(true)), "{inits:?}");
-        assert_eq!(after[1], V::Null, "non-entity state untouched");
-        assert!(after[0] != V::Null && after[0] == after[2]);
-        // Vanilla: the first init sees a later entity of the batch unbound.
-        let (inits, _, _, _) = run(&orig);
-        assert_eq!(inits.len(), 3);
-        assert_eq!(inits[0][1], V::B(false));
     }
 
     /// Distinct impl names (each a new String global unless the pool had it).
