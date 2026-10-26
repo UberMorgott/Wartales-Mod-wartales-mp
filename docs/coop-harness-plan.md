@@ -222,3 +222,17 @@ T2Tavern freeze (runs `20261026-124507`, `-125111`, `-125713`, repro `20261026-1
 ```
 
 Run 2026-10-26 (`D:\WartalesTest\runs\20261026-115816`, `-120514`, `-121525`): host lock picking seen by the guest (replicated LockPick window, same pick angle) and guest lock picking seen by the host, both cameras back at the end; woodcutting guest keeps its own camera (`spectate WoodCutting 1`); ruins NinePuzzle board seen by the guest (`spectate NinePuzzle 0`); forge: the guest sees the metal pieces on the anvil from the start, hit sparks, and the anvil empty again at the end.
+### Release regression verbs (2026-10-26, v0.2.15)
+
+| verb | what it does (the vanilla call it stands for) |
+| --- | --- |
+| `put <idx> <n>` / `take <idx> <n>` | own inventory slot idx -> the chest panel's inventory / chest slot idx -> own inventory: `inv._networkOperation(idx, MoveTo(dst, n), false)`, the slot api's authority branch (a drag or right-click move); `noauth` when this game has no authority on the source, `refused` when the operation returns false |
+| `endturn` | `Battle.endTurn` (the HUD's End Turn button; a client asks the host). Run it on the game that owns `battle.currentUnit` |
+| `camp` | `GameUI.toggleCamp` (the camp button: make / leave camp) |
+| `talk` | camp: `Controller.playCampConfession(Confession.getPending().unit)` (the right click on the speaker); `noelem` when no confession is pending |
+
+`console battle b RatInvasion` starts the Rat Matriarch fight (`b <Data.battle id>`). `console confession <id>` often fails silently (cooldowns / conditions, reported on the console only): `talk` answers `noelem` then; `ConfessionHate` worked on the fixture. Tutorials pause a battle (`tutorial` on both games each step). `Go-Place` waits on the dump's `place.id` (ruins run in `world.Ruins`, not PlaceView). Forge: `craft` / `confirm` may answer `nowindow` when the anvil opens the forge directly; the hits still run.
+
+Script `scenarios/regress.ps1 -Case chest|rats|confession` (each after `up.ps1`).
+
+Run 2026-10-26 (main 570c8c2 + these verbs; runs `20261026-145107`, `-150901`, `-151632`, `-152657`, `-153355`, `-153742`): start-up lines of `consolidation-verify.md` on both, no `skipped`, no `[mp debrief]`; plain join PASS; spectate lockpick / woodcut / ruins / forge / sing PASS (guest `spectate <id> 0|1`, `forge recv` per hit, `work recv`); T2Tavern enter + leave PASS; chest guest -> chest -> host PASS (Apple 12 -> 9 on the guest, 3 in the chest on both, then on the host; guest `invOp op=5`, host `invNetAdd count=3` + `invOp op=5`); Rat Matriarch PASS (host `3v8` -> `3v20` -> `2v34` units, guest turns go on, no `Null access` / `threw` on either); battle end (`console win`) PASS, debrief loot equal on both (24 stacks), no exception; issue #9 PASS (save taken in `world.Confession` of ConfessionHate, reload, guest joins by code into `world.camp.CampMode`, guest log `Enter DialogOut(ConfessionHate)`, no `Null access .elementType`). Debrief hover / Cure all toggling (consolidation-verify 1.1-1.5) not driven: needs inventory moves under an open Debrief and a curable injury; left for the live test.

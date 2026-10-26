@@ -70,6 +70,14 @@
 //       forgehit <k>    the open ForgeAction: validateStep(metalShards[k]).
 //       lpstop          the open LockPick: stopActivity (its Leave button).
 //       song            the open SongRepertoire: onSongChoose (Play).
+//       endturn         Battle.endTurn (the End Turn button).
+//       camp            GameUI.toggleCamp (the camp button: make / leave camp).
+//       talk            camp: Controller.playCampConfession(the pending
+//                       confession's unit), the talk on the speaker; noelem if none.
+//       put <idx> <n>   own inventory slot idx -> the chest panel's inventory;
+//       take <idx> <n>  chest panel slot idx -> own inventory: MoveTo(dst, n) run
+//                       as the slot api's authority branch (_networkOperation);
+//                       "noauth" when this game has no authority on the source.
 //       job <traitId>   the first unit of me with a job (else its first unit):
 //                       removeTrait(old job), addTrait(id), as JobSelector does.
 //       snap <name>     Game.screenshot(dir + name + ".png"): the frame the
@@ -95,7 +103,7 @@ use super::asm::{push_fn, Asm, Regs};
 use super::diag::static_fn;
 use super::job_xp::str_global;
 use super::*;
-use hlbc::types::{RefInt, ValBool};
+use hlbc::types::{RefEnumConstruct, RefInt, ValBool};
 
 /// Short forms of the ops the harness emits.
 trait Ops {
@@ -343,6 +351,22 @@ struct Ctx {
     tutorial: (RefType, RefFun),
     /// `lpstop`: ui.win.LockPick and its stopActivity (the Leave button's onClick).
     lpstop: (RefType, RefFun),
+    /// `put` / `take`: st.Inventory.hasAuthority, _networkOperation (the slot
+    /// api's authority branch), ui.comp.SlotOperation and its MoveTo(Inventory, Int).
+    inv_auth: RefFun,
+    inv_netop: RefFun,
+    /// `endturn`: Battle.endTurn (the HUD's End Turn button).
+    end_turn: RefFun,
+    /// `camp`: GameUI.toggleCamp (the HUD's camp button).
+    toggle_camp: RefFun,
+    /// `talk`: GameState.get_confession, Confession.getPending, its `unit`,
+    /// Controller.playCampConfession (the camp talk on the speaker).
+    get_confession: (RefFun, RefType),
+    get_pending: (RefFun, RefType),
+    pending_unit: RefField,
+    play_camp_conf: RefFun,
+    slot_op_t: RefType,
+    move_to: RefEnumConstruct,
     /// `song`: ui.win.SongRepertoire and its onSongChoose (the Play button).
     song: (RefType, RefFun),
     /// dump `place`: Game.getCurrentPlace, Place.id / parent / getRegion, Region.kind.
@@ -931,6 +955,44 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             let t = obj_type(code, "ui.win.LockPick")?;
             (t, mfn(t, "stopActivity", &[t], void_t)?)
         },
+        inv_auth: mfn(inv_t, "hasAuthority", &[inv_t], bool_t)?,
+        end_turn: mfn(battle_t, "endTurn", &[battle_t], void_t)?,
+        toggle_camp: mfn(game_ui.1, "toggleCamp", &[game_ui.1], void_t)?,
+        get_confession: {
+            let conf_t = obj_type(code, "st.player.Confession")?;
+            (mfn(state_t, "get_confession", &[state_t], conf_t)?, conf_t)
+        },
+        get_pending: {
+            let conf_t = obj_type(code, "st.player.Confession")?;
+            let ld_t = obj_type(code, "st.player.ConfessionLogData")?;
+            (mfn(conf_t, "getPending", &[conf_t], ld_t)?, ld_t)
+        },
+        pending_unit: typed(code, obj_type(code, "st.player.ConfessionLogData")?, "unit", unit_t)?,
+        play_camp_conf: mfn(field(code, game_t, "ctrl")?.1, "playCampConfession", &[field(code, game_t, "ctrl")?.1, unit_t], void_t)?,
+        inv_netop: {
+            let m = method(code, inv_t, "_networkOperation")?;
+            let op_t = *fun_args(code, m).get(2).context("_networkOperation: no op")?;
+            mfn(inv_t, "_networkOperation", &[inv_t, i32_t, op_t, bool_t], bool_t)?
+        },
+        slot_op_t: {
+            let m = method(code, inv_t, "_networkOperation")?;
+            *fun_args(code, m).get(2).context("_networkOperation: no op")?
+        },
+        move_to: {
+            let m = method(code, inv_t, "_networkOperation")?;
+            let op_t = *fun_args(code, m).get(2).context("_networkOperation: no op")?;
+            let Type::Enum { constructs, .. } = &code.types[op_t.0] else {
+                bail!("SlotOperation is not an enum");
+            };
+            let mi = constructs
+                .iter()
+                .position(|c| s(code, c.name) == "MoveTo")
+                .context("SlotOperation.MoveTo not found")?;
+            if constructs[mi].params != [inv_t, i32_t] {
+                bail!("SlotOperation.MoveTo is not (Inventory, Int)");
+            }
+            RefEnumConstruct(mi)
+        },
         tutorial: {
             let t = obj_type(code, "ui.win.Tutorial")?;
             (t, mfn(t, "close", &[t], void_t)?)
@@ -1404,6 +1466,13 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_tutorial = gs("tutorial");
     let s_lpstop = gs("lpstop");
     let s_song = gs("song");
+    let s_endturn = gs("endturn");
+    let s_camp = gs("camp");
+    let s_talk = gs("talk");
+    let s_put = gs("put ");
+    let s_take = gs("take ");
+    let s_noauth = gs("noauth");
+    let s_refused = gs("refused");
     let s_png = gs(".png");
     let s_q = gs("?");
     let s_elem = gs("harness: elem ");
@@ -1536,6 +1605,8 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let lpw = r.r(c.lpstop.0);
     let sgw = r.r(c.song.0);
     let sp = r.r(c.state_player.1);
+    let (msrc, mdst, sop) = (r.r(c.loot.1), r.r(c.loot.1), r.r(c.slot_op_t));
+    let (cnf, pnd) = (r.r(c.get_confession.1), r.r(c.get_pending.1));
 
     let mut a = Asm::new();
     // --- state machine, outside the trap
@@ -2347,6 +2418,141 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.gg(res, s_ok);
     a.go("ack");
     a.label("not_lpstop");
+
+    // verb: endturn  (Battle.endTurn, the HUD's End Turn button: the current
+    // unit's turn ends if this game may end it; a client asks the host)
+    verb(&mut a, s_endturn, "not_endturn", None);
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(battle, g, c.g.battle);
+    a.if_null(battle, "ack");
+    a.call(void, c.end_turn, &[battle]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_endturn");
+
+    // verb: camp  (GameUI.toggleCamp, the HUD's camp button: make / leave camp)
+    verb(&mut a, s_camp, "not_camp", None);
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(gui, g, c.game_ui.0);
+    a.if_null(gui, "ack");
+    a.call(void, c.toggle_camp, &[gui]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_camp");
+
+    // verb: talk  (camp: Controller.playCampConfession(pending.unit), the right
+    // click on the speaker of the pending confession; noelem when none)
+    verb(&mut a, s_talk, "not_talk", None);
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(gst, g, c.g.state);
+    a.if_null(gst, "ack");
+    a.fld(ctrl, g, c.g_ctrl.0);
+    a.if_null(ctrl, "ack");
+    a.gg(res, s_noelem);
+    a.call(cnf, c.get_confession.0, &[gst]);
+    a.if_null(cnf, "ack");
+    a.call(pnd, c.get_pending.0, &[cnf]);
+    a.if_null(pnd, "ack");
+    a.fld(unit, pnd, c.pending_unit);
+    a.if_null(unit, "ack");
+    a.call(void, c.play_camp_conf, &[ctrl, unit]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_talk");
+
+    // verbs: put <idx> <n> (own inventory -> chest panel), take <idx> <n> (chest
+    // panel -> own inventory): MoveTo(dst, n) as the slot api's authority
+    // branch, inv._networkOperation(idx, MoveTo(dst, n), false)
+    verb(&mut a, s_put, "not_put", Some(k4));
+    a.op(Opcode::Bool {
+        dst: old,
+        value: ValBool(true),
+    });
+    a.go("mv");
+    a.label("not_put");
+    verb(&mut a, s_take, "not_take", Some(k5));
+    a.op(Opcode::Bool {
+        dst: old,
+        value: ValBool(false),
+    });
+    a.label("mv");
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(me, g, c.g.me.0);
+    a.if_null(me, "ack");
+    a.fld(mdst, me, c.player_inv);
+    a.if_null(mdst, "ack");
+    a.gg(res, s_nowindow);
+    a.fld(gui, g, c.game_ui.0);
+    a.if_null(gui, "ack");
+    a.fld(ginv, gui, c.game_inv.0);
+    a.if_null(ginv, "ack");
+    a.fld(icr, ginv, c.chest_content);
+    a.if_null(icr, "ack");
+    a.call(uinv, c.get_inventory, &[icr]);
+    a.if_null(uinv, "ack");
+    a.fld(msrc, uinv, c.uinv_inv);
+    a.if_null(msrc, "ack");
+    // put: own inventory -> chest (swap the two)
+    a.if_false(old, "mv_args");
+    a.op(Opcode::Mov { dst: inv, src: msrc });
+    a.op(Opcode::Mov { dst: msrc, src: mdst });
+    a.op(Opcode::Mov { dst: mdst, src: inv });
+    a.label("mv_args");
+    a.gg(res, s_unknown);
+    a.gg(s2, s_sp);
+    a.call(i, c.index_of, &[s, s2, ni]);
+    a.int(kk, k1);
+    a.jmp(
+        Opcode::JSLt {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.int(kk, k0);
+    a.op(Opcode::ToDyn { dst: ni, src: i });
+    a.call(aid, c.substr, &[s, kk, ni]);
+    a.op(Opcode::Null { dst: ni });
+    a.op(Opcode::Incr { dst: i });
+    a.call(s, c.substr, &[s, i, ni]);
+    a.call(ni, c.parse_int, &[aid]);
+    a.if_null(ni, "ack");
+    a.op(Opcode::SafeCast { dst: ix, src: ni });
+    a.call(ni, c.parse_int, &[s]);
+    a.if_null(ni, "ack");
+    a.op(Opcode::SafeCast { dst: cnt, src: ni });
+    a.op(Opcode::Null { dst: ni });
+    a.gg(res, s_noauth);
+    a.call(b, c.inv_auth, &[msrc]);
+    a.if_false(b, "ack");
+    a.op(Opcode::MakeEnum {
+        dst: sop,
+        construct: c.move_to,
+        args: vec![mdst, cnt],
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.call(b, c.inv_netop, &[msrc, ix, sop, b]);
+    a.gg(res, s_refused);
+    a.if_false(b, "ack");
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_take");
 
     // verb: craft  (the open Craft window: forgeRecipe(selectedRecipe), its Forge button)
     verb(&mut a, s_craft, "not_craft", None);

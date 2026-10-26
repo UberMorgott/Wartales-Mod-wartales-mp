@@ -15,9 +15,11 @@ function Go-Place([string]$place, [int]$wait = 22) {
     T A "console goto $place"; T B "console goto $place"; Start-Sleep 5
     T A "enter $place"; Start-Sleep $wait
     # both games in the place view, no fade: a mini-game started while the
-    # guest is still switching mode makes the host's barrier ask it to rejoin
+    # guest is still switching mode makes the host's barrier ask it to rejoin.
+    # Not only PlaceView: ruins run in world.Ruins, so match the dump's place id.
+    $until = '$s.place.id -eq "' + $place + '" -and $s.mode -ne "world.World" -and -not $s.fading -and -not $s.isLoading'
     foreach ($i in 'A', 'B') {
-        try { & $script:c wait -Inst $i -Until '$s.mode -eq "world.PlaceView" -and -not $s.fading -and -not $s.isLoading' -TimeoutSec 90 | Select-Object -Last 1 }
+        try { & $script:c wait -Inst $i -Until $until -TimeoutSec 90 | Select-Object -Last 1 }
         catch { "$i not in the place: $($_.Exception.Message)" }
     }
 }
