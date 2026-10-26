@@ -29,6 +29,15 @@
 //       leave host faded / all clients ready / client alive / client faded
 //       enter client alive / enter client faded (a client that never answers an
 //       enter shows where it stopped: parked in waitAlive, or its fade never ended)
+//   - Game.fadeTo (entry): fading, busy (fadeParams set), onBreak set. Vanilla
+//     drops a fade asked for while one without onBreak is up ("Interrupted
+//     fade"): its onEnd never runs, that screen stays black;
+//   - st.Inventory._networkOperation (entry, the slot operation run on this
+//     machine): op (SlotOperation constructor index), idx, owned (owner set:
+//     a player inventory; false for chests / loot);
+//     st.Inventory.netAddItem__impl (entry, an add another machine asked for:
+//     a client's drop into the host's chest): count, owned.
+//     Shared-chest moves (issue #6, the chest-move black screen) show on both ends.
 //     Every read is guarded against null (prints -1 / false).
 // `Sys.println` ends in the libhl native `hl_sys_print`, which the winmm shim
 // copies into shim.log as "game:" lines, timestamped (buffered: the game thread
@@ -63,6 +72,10 @@ enum Leaf {
     Set,
     /// Whether a field of the object is set (Bool); the field's type.
     FieldSet(RefField, RefType),
+    /// An I32 argument register of the probed function (empty path).
+    Arg(Reg),
+    /// The constructor index of an enum argument register (-1 when null).
+    ArgEnum(Reg),
 }
 
 /// `label` followed by a value read from `this.<path...>.<leaf>`.
@@ -408,6 +421,51 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         ]
     };
 
+    // A fade asked for while another one without onBreak is up is dropped by
+    // vanilla ("Interrupted fade"): its onEnd never runs and the screen stays
+    // black. Every fade request, with what is up at that moment.
+    let fade_to = fun_index(code, method(code, game_t, "fadeTo")?.findex)?;
+    let fade_parts = vec![
+        Part {
+            label: " fading=",
+            path: vec![],
+            leaf: Leaf::Field(fading, bool_t),
+        },
+        Part {
+            label: " busy=",
+            path: vec![(fade_params, fp_t)],
+            leaf: Leaf::Set,
+        },
+        Part {
+            label: " onBreak=",
+            path: vec![(fade_params, fp_t)],
+            leaf: Leaf::FieldSet(on_break, on_break_t),
+        },
+    ];
+    // Inventory moves (shared chest: issue #6 and the chest-move black screen):
+    // a slot operation run on this machine, and an add another machine asked for.
+    let inv_t = obj_type(code, "st.Inventory")?;
+    let (inv_owner, inv_owner_t) = field(code, inv_t, "owner")?;
+    let inv_op = fun_index(code, method(code, inv_t, "_networkOperation")?.findex)?;
+    let net_add = fun_index(code, method(code, inv_t, "netAddItem__impl")?.findex)?;
+    {
+        let (a, b) = (&code.functions[inv_op], &code.functions[net_add]);
+        if a.regs.get(1) != Some(&i32_t)
+            || !matches!(
+                a.regs.get(2).map(|t| &code.types[t.0]),
+                Some(Type::Enum { .. })
+            )
+            || b.regs.get(2) != Some(&i32_t)
+        {
+            bail!("st.Inventory._networkOperation / netAddItem__impl: unexpected arguments");
+        }
+    }
+    let owner_part = || Part {
+        label: " owned=",
+        path: vec![],
+        leaf: Leaf::FieldSet(inv_owner, inv_owner_t),
+    };
+
     let tag_only = |fi: usize, tag: &'static str| Probe {
         fi,
         at: 0,
@@ -470,6 +528,43 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         tag_only(client_faded, "mp: leave client faded"),
         tag_only(enter_alive, "mp: enter client alive"),
         tag_only(enter_faded, "mp: enter client faded"),
+        Probe {
+            fi: fade_to,
+            at: 0,
+            tag: "mp: fadeTo",
+            parts: fade_parts,
+        },
+        Probe {
+            fi: inv_op,
+            at: 0,
+            tag: "mp: invOp",
+            parts: vec![
+                Part {
+                    label: " op=",
+                    path: vec![],
+                    leaf: Leaf::ArgEnum(Reg(2)),
+                },
+                Part {
+                    label: " idx=",
+                    path: vec![],
+                    leaf: Leaf::Arg(Reg(1)),
+                },
+                owner_part(),
+            ],
+        },
+        Probe {
+            fi: net_add,
+            at: 0,
+            tag: "mp: invNetAdd",
+            parts: vec![
+                Part {
+                    label: " count=",
+                    path: vec![],
+                    leaf: Leaf::Arg(Reg(2)),
+                },
+                owner_part(),
+            ],
+        },
     ];
     for p in &probes {
         let g = f(p.fi);
@@ -589,6 +684,7 @@ fn apply(code: &mut Bytecode, p: Plan) {
             let out_t = match part.leaf {
                 Leaf::Field(_, t) => t,
                 Leaf::Set | Leaf::FieldSet(..) => types.bool_t,
+                Leaf::Arg(_) | Leaf::ArgEnum(_) => types.i32_t,
             };
             let out = reg(out_t);
             ops.push(if out_t == types.i32_t {
@@ -642,6 +738,12 @@ fn apply(code: &mut Bytecode, p: Plan) {
                         dst: out,
                         value: ValBool(true),
                     });
+                }
+                Leaf::Arg(r) => ops.push(Opcode::Mov { dst: out, src: r }),
+                Leaf::ArgEnum(r) => {
+                    skips.push(ops.len());
+                    ops.push(Opcode::JNull { reg: r, offset: 0 });
+                    ops.push(Opcode::EnumIndex { dst: out, value: r });
                 }
             }
             let end = ops.len();
@@ -736,6 +838,7 @@ mod tests {
                 format!("{:?}", &b.ops[pos + n..]),
                 format!("{:?}", &a.ops[pos..])
             );
+            crate::asm::testutil::check_types(&back, b, pos..pos + n);
             // The probe writes only its own (new) registers.
             for op in &b.ops[pos..pos + n] {
                 let w = match op {
@@ -745,6 +848,8 @@ mod tests {
                     | Opcode::Int { dst, .. }
                     | Opcode::Bool { dst, .. }
                     | Opcode::ToDyn { dst, .. }
+                    | Opcode::Mov { dst, .. }
+                    | Opcode::EnumIndex { dst, .. }
                     | Opcode::Call1 { dst, .. }
                     | Opcode::Call2 { dst, .. } => Some(*dst),
                     Opcode::JNull { .. } | Opcode::JFalse { .. } => None,
