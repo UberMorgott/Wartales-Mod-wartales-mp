@@ -52,9 +52,9 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | camp_chest (+ 5f4dfd2) | PASS | R3 world-map chest; R4 first dump chest 71x57, R6 first dump 331x281 (A and B) |
 | party_inventory / counts / lists / recipes / activities (5) | unit | |
 | loot_all | unit | Take all not clicked |
-| debrief_cure | unit | |
-| debrief_diag | unit | |
-| debrief_enable | unit | |
+| debrief_cure | unit | merged into `debrief` (2026-10-26, patch consolidation) |
+| debrief_diag | unit | removed (2026-10-26): print-only, the rebuild churn it traced is gone with `debrief` |
+| debrief_enable | unit | merged into `debrief` (2026-10-26, patch consolidation) |
 | window_close | unit | |
 | stale_lobby | unit | needs a lobby left mid-connect |
 | log_error_cast | PASS | R1 S1 (relay connect failure path) |
@@ -63,7 +63,8 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | take_all | unit | |
 | tavern_resume | unit | |
 | mod_version | unit | |
-| net_guard | unit | |
+| net_guard | unit | part B moved to `alive_bind` (2026-10-26) |
+| alive_bind (net_guard part B, 2026-10-26) | unit | patched image byte-identical to before the split |
 | tip_overflow | unit | |
 | tooltip_input | unit | |
 | censer_tip | unit | |
