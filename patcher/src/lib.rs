@@ -25,6 +25,7 @@ mod camp_talk;
 mod career_plan;
 mod censer_tip;
 mod chest_buttons;
+mod colorblind_load;
 mod coop_gates;
 mod coop_spectate;
 mod customize_slots;
@@ -234,6 +235,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     battle_camera::patch_battle_camera(&mut code);
     title_version::patch_title_version(&mut code);
     loading_draw::patch_loading_draw(&mut code);
+    colorblind_load::patch_colorblind_load(&mut code);
     scroll_hit::patch_scroll_hit(&mut code);
     save_kind::patch_save_kind(&mut code);
     save_order::patch_save_order(&mut code);

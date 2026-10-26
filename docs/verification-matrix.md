@@ -80,6 +80,7 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | battle_camera | PASS | R8 `camtrace` (per-frame `battle.state.camera`): target speed per 100 ms since the pan key went down is the same with and without a right-button rotation (S only 8.9/5.8/8.8/10.4/11.3/11.7/12.2/13.2; S then RMB 8.5/5.8/8.4/10.5/11.0/12.1/12.0/13.1; RMB then W 8.6/6.2/8.6/10.0/11.0/12.1/12.3/12.6), `targetFollowSpeed` stays 20 (the pan's) during `DragRotateCamera`; ticks `camtest-ticks.json`, `A-025436-camtest.png` |
 | title_version | PASS | R6 `B-*-jflk1.png`: "Co-op Fix v0.2.8" on the title screen |
 | loading_draw (#3) | PASS | R6 bursts at ~0.4 s: S2 reload (54 frames) and rejoin (65 frames), mean brightness monotonic world -> loading -> game, no flash back |
+| colorblind_load | PASS | run `20261026-235054`, colour-blind on: host load save006 + guest join, GPU dedicated max 1205 MB (vanilla 583 -> 11427 MB in 25 s, run `20261026-232135`); filter visible in world (`cb-world-A*.png`, modes 1 vs 2 differ) |
 | scroll_hit | unit | |
 | save_kind | unit | in-game: load list shows "Name (Autosave/Quicksave/Manual)" |
 | jit_names | PASS | every run: the patched image starts (the JIT crash it prevents is at startup) |
