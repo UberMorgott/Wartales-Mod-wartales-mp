@@ -671,7 +671,11 @@ A/B/C = perfect/good/bad, b = 1 + the shard's child index), `endActivity` the
 end (2; a = ActivityResult index); co-op only, under a trap. `ping__impl` starts
 with `if (forgeRecv(this, x, y, z, player)) return;`: any other x is a vanilla
 ping; a sentinel one never shows a marker. Skipped for the sender itself and
-outside a PlaceView; start remembers the worker's current anim as its idle;
+outside a PlaceView; in a PlaceView, before the worker lookup (at the end the
+worker is often gone already), start shows the scene's `allShards` (the metal
+pieces on the anvil) as `ForgeAction.init` does on the forging machine
+(`flags |= 2`, the visible bit of `h3d.scene.Object.set_visible`) and end hides
+them; start remembers the worker's current anim as its idle;
 a hit plays ForgeAction's `animHit` ("Forge") once, back to idle on its end,
 and 0.4 s later the grade's sound (`game.ui.sfx`) and the vanilla particle
 prefabs at the shard (scene `allShards` child), else the `anvil`, else the

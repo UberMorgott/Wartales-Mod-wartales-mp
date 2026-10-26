@@ -548,7 +548,9 @@ init / update / setActionDone (реплика сама бросала бы ша�
 среди детей его родителя), `endActivity` (2, конец: a = индекс ActivityResult). Приём: вход
 `Controller.ping__impl` — `if (forgeRecv(...)) return;`; не-SENTINEL — ванильный пинг дальше,
 SENTINEL — никогда не маркер/звук пинга; свой же отправитель (`player == game.me`) и не-PlaceView
-пропускаются; элемент = `__host.ctx.refs.get(y)`, работник = `activityUnits.get(element).unitView`.
+пропускаются; в PlaceView до поиска работника (в конце его часто уже нет) старт показывает
+`allShards` сцены (заготовки на наковальне), как `ForgeAction.init` у кующего (`flags |= 2` — бит
+видимости `h3d.scene.Object.set_visible`), конец снова скрывает; элемент = `__host.ctx.refs.get(y)`, работник = `activityUnits.get(element).unitView`.
 Старт запоминает текущую анимацию работника как idle (пропущенный старт — берётся при первом
 ударе); удар — один раз `animHit` ("Forge") с `onEnd` -> `forgeIdle` (idle в цикле, если работник ещё
 в сцене) и через 0.4 с (тайминг ванили) `forgeFx`: звук степени через `game.ui.sfx` и ванильные

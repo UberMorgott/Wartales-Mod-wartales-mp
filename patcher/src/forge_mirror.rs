@@ -45,6 +45,10 @@
 //     forgeRecv: false unless x == SENTINEL (the vanilla ping goes on); true
 //     otherwise (never a marker or ping sound for these). Under a trap, skipped
 //     for the sender itself (`player == game.me`) or outside a PlaceView:
+//     in a PlaceView, before the worker lookup (at the end the worker is often
+//     gone already): start shows the scene's `allShards` (the metal pieces on
+//     the anvil), as ForgeAction.init does on the forging machine (`flags |=
+//     2`, the visible bit of h3d.scene.Object.set_visible), end hides them;
 //     element = __host.ctx.refs.get(y) (hxbit uid), entity =
 //     activityUnits.get(element).unitView; start: remember its current anim
 //     as that worker's idle (`forgeIdleOf`, per worker, see mirror.rs); hit:
@@ -106,6 +110,8 @@ pub(crate) struct Plan {
     pub(crate) w_game: RefField,
     pub(crate) w_act: RefField,
     pub(crate) m_s3d: RefField,
+    /// h3d.scene.Object.flags (bit 2: visible, what ForgeAction.init sets on allShards).
+    o_flags: RefField,
     m41: RefField,
     m42: RefField,
     m43: RefField,
@@ -238,6 +244,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     let w_game = typed(code, fa_t, "game", b.game_t)?;
     let w_act = typed(code, fa_t, "activity", b.act_t)?;
     let m_s3d = typed(code, b.mode_t, "s3d", scene_t)?;
+    let o_flags = typed(code, obj_t, "flags", b.i32_)?;
     let m41 = typed(code, mat_t, "_41", f64_)?;
     let m42 = typed(code, mat_t, "_42", f64_)?;
     let m43 = typed(code, mat_t, "_43", f64_)?;
@@ -393,6 +400,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         w_game,
         w_act,
         m_s3d,
+        o_flags,
         m41,
         m42,
         m43,
@@ -1083,6 +1091,67 @@ fn add_recv(
         r.r(p.void_),
     );
     let k2 = r.r(p.i32_);
+    let (s3d, nm, sh, fl, km) = (
+        r.r(p.scene_t),
+        r.r(p.str_t),
+        r.r(p.obj_t),
+        r.r(p.i32_),
+        r.r(p.i32_),
+    );
+    // mode.s3d.getObjectByName("allShards").flags: |= 2 (show) or &= ~2 (hide)
+    let shards_g = st.shards;
+    let (m_s3d, by_name, o_flags) = (p.m_s3d, p.by_name, p.o_flags);
+    let shards = move |a: &mut Asm, code: &mut Bytecode, show: bool| {
+        let skip = if show { "sh_show" } else { "sh_hide" };
+        a.op(Opcode::Field {
+            dst: s3d,
+            obj: mode,
+            field: m_s3d,
+        });
+        a.jmp(
+            Opcode::JNull {
+                reg: s3d,
+                offset: 0,
+            },
+            skip,
+        );
+        a.op(Opcode::GetGlobal {
+            dst: nm,
+            global: shards_g,
+        });
+        a.op(Opcode::Call2 {
+            dst: sh,
+            fun: by_name,
+            arg0: s3d,
+            arg1: nm,
+        });
+        a.jmp(Opcode::JNull { reg: sh, offset: 0 }, skip);
+        a.op(Opcode::Field {
+            dst: fl,
+            obj: sh,
+            field: o_flags,
+        });
+        int(a, code, km, if show { 2 } else { !2 });
+        a.op(if show {
+            Opcode::Or {
+                dst: fl,
+                a: fl,
+                b: km,
+            }
+        } else {
+            Opcode::And {
+                dst: fl,
+                a: fl,
+                b: km,
+            }
+        });
+        a.op(Opcode::SetField {
+            obj: sh,
+            field: o_flags,
+            src: fl,
+        });
+        a.label(skip);
+    };
     let sent = float_const(code, SENTINEL);
     let delay = float_const(code, FX_DELAY);
     let (ku, ke, kg, ka, kb) = (
@@ -1202,6 +1271,32 @@ fn add_recv(
     );
     a.op(Opcode::UnsafeCast { dst: pv, src: mode });
     int(&mut a, code, stage, 2);
+    // the metal shards on the anvil, whether or not the worker is still there
+    // (at the end it is often gone already): start shows them as
+    // ForgeAction.init does on the forging machine (allShards.flags |= 2, the
+    // visible bit of h3d.scene.Object.set_visible), end hides them again
+    int(&mut a, code, k, 0);
+    a.jmp(
+        Opcode::JNotEq {
+            a: kind,
+            b: k,
+            offset: 0,
+        },
+        "sh_notstart",
+    );
+    shards(&mut a, code, true);
+    a.label("sh_notstart");
+    int(&mut a, code, k, 2);
+    a.jmp(
+        Opcode::JNotEq {
+            a: kind,
+            b: k,
+            offset: 0,
+        },
+        "sh_notend",
+    );
+    shards(&mut a, code, false);
+    a.label("sh_notend");
     let get = |a: &mut Asm, dst: Reg, obj: Reg, field: RefField| {
         a.op(Opcode::Field { dst, obj, field });
         a.jmp(
@@ -1896,6 +1991,10 @@ mod tests {
                         self.globals.insert(global.0, r[rr(src)].clone());
                     }
                     Opcode::Field { dst, obj, field } => r[rr(dst)] = self.get(&r[rr(obj)], *field),
+                    Opcode::SetField { obj, field, src } => {
+                        let (o, v) = (r[rr(obj)].clone(), r[rr(src)].clone());
+                        self.key_set(&o, format!("f{}", field.0), v)
+                    }
                     Opcode::DynGet { dst, obj, field } => {
                         r[rr(dst)] = self
                             .key_get(&r[rr(obj)], &format!("d{}", code.strings[field.0].as_str()))
@@ -1913,6 +2012,7 @@ mod tests {
                     Opcode::Add { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) + num(&r[rr(b)])),
                     Opcode::Sub { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) - num(&r[rr(b)])),
                     Opcode::And { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) & num(&r[rr(b)])),
+                    Opcode::Or { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) | num(&r[rr(b)])),
                     Opcode::Shl { dst, a, b } => {
                         r[rr(dst)] = V::I(num(&r[rr(a)]) << num(&r[rr(b)]))
                     }
@@ -2079,7 +2179,8 @@ mod tests {
             items.push(sh);
         }
         let ch = sim.arr(items);
-        let shards = sim.obj(&[(p.o_children, ch.clone())]);
+        // hidden as in the scene before ForgeAction.init (bit 2 off, bit 1 on)
+        let shards = sim.obj(&[(p.o_children, ch.clone()), (p.o_flags, V::I(1))]);
         for sh in (0..3)
             .map(|k| {
                 sim.key_get(
@@ -2152,6 +2253,11 @@ mod tests {
         assert_eq!(ev(&mut sim, SENTINEL, z(0, 0, 0), &w.other), V::B(true));
         assert!(sim.take("play").is_empty());
         assert_eq!(sim.take("println"), vec![vec![s("mp: forge recv 0 0 0 5")]]);
+        // ... and the shards on the anvil shown (visible bit, as the forging machine)
+        assert_eq!(
+            sim.key_get(&w.shards, &format!("f{}", p.o_flags.0)),
+            V::I(1 | 2)
+        );
 
         // hit, Perfect on shard index 2: "Forge" once, then idle; fx 0.4 s later
         assert_eq!(ev(&mut sim, SENTINEL, z(1, 0, 3), &w.other), V::B(true));
@@ -2222,7 +2328,30 @@ mod tests {
                 sim.take("println"),
                 vec![vec![s(&format!("mp: forge recv 2 {a} 0 6"))]]
             );
+            // the shards hidden again, the other bits kept
+            assert_eq!(
+                sim.key_get(&w.shards, &format!("f{}", p.o_flags.0)),
+                V::I(1)
+            );
         }
+
+        // the end arriving after the worker left the anvil (its activityUnits
+        // entry gone, stage 2): no anim, but the shards are still hidden
+        sim.key_set(&w.shards, format!("f{}", p.o_flags.0), V::I(3));
+        let elt = sim.refs[&77].clone();
+        let V::O(ek) = elt else { unreachable!() };
+        let units = sim.get(&sim.get(&w.game, p.g_mode), p.pv_units);
+        let keep = sim.key_get(&units, &format!("k{ek}"));
+        sim.key_set(&units, format!("k{ek}"), V::Null);
+        sim.log.clear();
+        ev(&mut sim, SENTINEL, z(2, p.success, 0), &w.other);
+        assert!(sim.take("play").is_empty());
+        assert_eq!(
+            sim.key_get(&w.shards, &format!("f{}", p.o_flags.0)),
+            V::I(1)
+        );
+        sim.take("println");
+        sim.key_set(&units, format!("k{ek}"), keep);
 
         // outside a PlaceView: nothing played, the stage says where it stopped
         let mode = sim.get(&w.game, p.g_mode);
