@@ -574,17 +574,23 @@ RPC `setUnit` / `start` идут на все машины, а `start__impl` -> `
 зрителями (ввод только у `unit.owner == game.me`, анимации/реквизит/эффекты работника из
 реплицированного состояния), а на хосте их логика авторитетна. Зритель = `spect(act)`: активность
 реплицирована (`__host != null`), есть `unit`, `unit.owner != game.me`. `_start`: вход
-`m = spectPre(this)` (зритель: `changeCamera = false` — без fade и смены камеры; m = 1 | старый
-lockCamera << 1 | старый padCursor.locked << 2), её Ret -> `spectPost(this, m)`: старые lockCamera /
-padCursor.locked, `cameraSave = null` (`_cancel` не двигает камеру), `showInventory(prevInventory)`,
-снят полноэкранный Interactive ожидания из `chooseUnit`. Остальное в `_start` (оплата старта на
-хосте, GC, уровень черты) — ваниль. onReady: `showTutorial` -> `spectTut` (зрителю без туториала,
+`g = spectPre(this)` (зритель со своей камерой: `changeCamera = false` — без fade и смены камеры; снят
+полноэкранный Interactive ожидания из `chooseUnit`). Ванильные записи, которые такой зритель получать
+не должен, пропускаются, а не откатываются: `prevInventory = s ? spectInv(this) :
+ui.showInventory(false)` (spectInv — текущая видимость панели, поэтому `showInventory(prevInventory)`
+в конце её не меняет; для любого зрителя, `s = spect(this)`: клиент-зритель этот конец не выполняет), `if (!g)` перед `mode.lockCamera = true`, `padCursor.locked = true` и
+`this.cameraSave = ...` (`_cancel` не двигает камеру). Остальное в `_start` (оплата старта на
+хосте, GC, уровень черты, звук старта) — ваниль. onReady: `showTutorial` -> `spectTut` (зрителю без туториала,
 cb сразу); замыкание окна: `setWindow` -> `spectWin` (окно и его windowRoot невидимы — без отрисовки и
 событий Interactive, не текущее окно режима, но в списке окон, обновляется и синхронизируется),
 `addHelpIcon` -> `spectHelp` (зритель не вызывает); `addHelpIcon__impl` у зрителя сразу return;
 конец `onActionDone`: `netFade` -> `spectFade` (без реплицированного затемнения, если есть unit с
-owner). Лог: `mp: spectate <id> <m>` у каждого зрителя. Безюнитные (BoardPuzzle, решённая
-NinePuzzle) остаются общими как в ванили. Не сделано: выбор юнита до старта (общий ChooseUnit на
+owner). Лог: `mp: spectate <id> 1` у каждого зрителя со своей камерой. Безюнитные (BoardPuzzle, решённая
+NinePuzzle) остаются общими как в ванили. Мини-игры, видимые только через камеру активности
+(LockPick — 3D-замок перед ней; NinePuzzle, CylinderPuzzle — доска; Sing — сцена барда, её показывает
+смена камеры), дают зрителю ванильный старт (`g = false`, `mp: spectate <id> 0`); правила окна и
+туториала те же (у клиента-зрителя LockPick — реплицированное окно, его `init` строит замок из
+синхронного lockData). `_cancel__impl` (конец на каждой машине) начинается с `spectEnd(this)`: у зрителя Sing — вторая половина ванильной пары сцены (fade-in показывает `target.obj` и прячет его HandTool; замыкание onActionDone, которое клиент-зритель не выполняет, возвращает их). Не сделано: выбор юнита до старта (общий ChooseUnit на
 хосте, Interactive ожидания у клиентов) — кто начал, знает только хост (`conds` не синхронизируется).
 Нужна эта сборка у всех. При несовпадении проход пропускается (лог).
 Работа у других игроков (`src/work_mirror.rs`, общие части — `src/mirror.rs`): стрельба из лука и

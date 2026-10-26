@@ -30,18 +30,32 @@
 // unit is set and `unit.owner != game.me` (the player the windows give the
 // input to). Unit-less activities (BoardPuzzle, a solved NinePuzzle) keep the
 // vanilla shared window: every player plays those.
-//   _start: entry `m = spectPre(this)`: spectator -> `changeCamera = false`
-//     (no fade, no camera move, onReady runs at once) and m = 1 | old
-//     lockCamera << 1 | old padCursor.locked << 2; its Ret -> spectPost(this,
-//     m): lockCamera / padCursor.locked back to their old values, cameraSave =
-//     null (_cancel restores no camera), ui.showInventory(prevInventory), the
-//     chooseUnit full-screen Interactive (added on every client) removed.
-//     The rest of _start (start cost on the host, GC entry, trait level) runs.
+//   _start: entry `g = spectPre(this)`: a spectator -> g, `changeCamera =
+//     false` (no fade, no camera move, onReady runs at once), the chooseUnit
+//     full-screen wait Interactive (added on every client before the start)
+//     removed. The vanilla writes a spectator must not get are skipped, not
+//     undone: `prevInventory = s ? spectInv(this) : ui.showInventory(false)`
+//     for every spectator (s = spect(this); spectInv: the panel's current
+//     visibility, so the end's showInventory(prevInventory) keeps it, and a
+//     client spectator, which never runs that end, keeps its panel;
+//     showInventory(false) would also drop an item held in the hand), and
+//     `if (!g)` before `mode.lockCamera = true`, `padCursor.locked = true` and
+//     `this.cameraSave = ...` (so _cancel restores no camera). The rest of
+//     _start (start cost on the host, GC entry, trait level, the start sound)
+//     runs as is.
+//   _cancel__impl (every machine's end): `spectEnd(this)` first: on a
+//     spectator of Sing the end half of the vanilla stage pair (the fade-in
+//     shows `target.obj`, hides its HandTool; onActionDone's closure, which a
+//     client spectator never runs, hides / shows them back).
+//     Exception (CAMERA_ACTIVITIES: LockPick, NinePuzzle, CylinderPuzzle,
+//     Sing): seen only through the activity camera (the lock in front of it,
+//     the puzzle board; the bard, whose stage the camera switch shows), so
+//     spectPre gives false and the spectator gets the vanilla start.
 //   onReady closure: showTutorial(..., cb) -> spectTut: a spectator gets no
 //     tutorial; cb (the window closure) runs at once on the host and not at
 //     all on a client spectator: the mini-game windows are built for the
 //     host and the acting player only. On a client spectator their
-//     constructor / netSharing threw out of _start (before spectPost, so the
+//     constructor / netSharing threw out of _start (before the old restore, so the
 //     camera and input stayed locked): GatherAction `Can't register ...
 //     without ownership` (networkAllow(Ownership) needs player == me),
 //     FishingAction `keepOnGathered on a not allowed object`, LockPick
@@ -53,7 +67,8 @@
 //   addHelpIcon__impl: returns at once on a spectator (the player's icon RPC).
 //   onActionDone's end fade: netFade(coop) -> spectFade: no replicated fade
 //     when spectators are not in the activity camera (unit + owner set).
-// shim.log: `mp: spectate <activity id> <m>` on each spectator.
+// shim.log: `mp: spectate <activity id> 1` on each watching spectator, `0` on a
+// spectator of a camera activity.
 // Not covered: the host's unit choice (a shared ChooseUnit, chooseUnit's
 // full-screen wait Interactive on clients) before the start: which player
 // starts it is known on the host only (`conds`, not synced).
@@ -67,12 +82,16 @@ use super::ping_cell::vproto;
 use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
+/// Activities whose mini-game is only seen through the activity camera (the
+/// ruins puzzle boards, the bard's stage that the camera switch shows): their
+/// spectators keep the vanilla camera move, locks and inventory; the rest of
+/// the pass (no tutorial, no client window, hidden host window) still applies.
+const CAMERA_ACTIVITIES: [&str; 4] = ["LockPick", "NinePuzzle", "CylinderPuzzle", "Sing"];
+
 pub(crate) struct Plan {
     act_t: RefType,
     game_t: RefType,
     mode_t: RefType,
-    gui_t: RefType,
-    pad_t: RefType,
     ui_t: RefType,
     unit_t: RefType,
     player_t: RefType,
@@ -81,7 +100,6 @@ pub(crate) struct Plan {
     win_t: RefType,
     flow_t: RefType,
     ctrl_t: RefType,
-    cam_t: RefType,
     inf_t: RefType,
     cb_t: RefType,
     tut_t: RefType,
@@ -95,21 +113,25 @@ pub(crate) struct Plan {
     a_unit: RefField,
     a_int: RefField,
     a_cc: RefField,
-    a_cam: RefField,
+    #[cfg_attr(not(test), allow(dead_code))]
     a_prev: RefField,
     a_inf: RefField,
     i_id: RefField,
     u_owner: RefField,
     g_me: RefField,
     g_auth: RefField,
+    #[cfg_attr(not(test), allow(dead_code))]
     g_mode: RefField,
+    #[cfg_attr(not(test), allow(dead_code))]
     g_gui: RefField,
     g_ui: RefField,
+    #[cfg_attr(not(test), allow(dead_code))]
     m_lock: RefField,
+    #[cfg_attr(not(test), allow(dead_code))]
     gui_pad: RefField,
+    #[cfg_attr(not(test), allow(dead_code))]
     pad_locked: RefField,
     w_root: RefField,
-    show_inv: RefFun,
     set_window: RefFun,
     add_help: RefFun,
     show_tut: RefFun,
@@ -120,8 +142,26 @@ pub(crate) struct Plan {
     println: RefFun,
     std_string: RefFun,
     str_add: RefFun,
+    str_cmp: RefFun,
     start_fi: usize,
-    start_ret: usize,
+    si_at: usize,
+    ent_t: RefType,
+    obj3_t: RefType,
+    a_target: RefField,
+    e_obj: RefField,
+    o3_flags: RefField,
+    /// h3d.scene.Object.cullingCollider, as onActionDone's Sing block calls it.
+    cull_pi: RefField,
+    cancel_fi: usize,
+    lock_at: usize,
+    pad_at: usize,
+    cam_at: usize,
+    /// spectInv: GameUI.getGameInventory, GameInventory.inventory (h2d.Object), Object.visible.
+    ginv_t: RefType,
+    obj2_t: RefType,
+    get_ginv: RefFun,
+    gi_inv: RefField,
+    o_visible: RefField,
     ready_fi: usize,
     tut_at: usize,
     make_fi: usize,
@@ -148,6 +188,11 @@ pub(crate) fn dst_of(op: &Opcode) -> Option<Reg> {
     let i = d.find("dst: Reg(")? + "dst: Reg(".len();
     let n: String = d[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
     n.parse().ok().map(Reg)
+}
+
+/// Some op of `f` jumps to op `at`.
+fn jump_targets_any(f: &Function, at: usize) -> bool {
+    (0..f.ops.len()).any(|i| jump_targets(f, i).contains(&at))
 }
 
 /// The only op of `f` calling `fun`.
@@ -208,6 +253,14 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     let pad_locked = typed(code, pad_t, "locked", bool_)?;
     let w_root = typed(code, win_t, "windowRoot", flow_t)?;
 
+    let get_ginv = method(code, ui_t, "getGameInventory")?.findex;
+    let ginv_t = obj_type(code, "ui.comp.gameUIComp.GameInventory")?;
+    want(code, get_ginv, "GameUI.getGameInventory", &[ui_t], ginv_t)?;
+    let (gi_inv, gi_inv_t) = field(code, ginv_t, "inventory")?;
+    if !is_sub(code, gi_inv_t, obj2_t) {
+        bail!("GameInventory.inventory is not an h2d.Object");
+    }
+    let o_visible = typed(code, obj2_t, "visible", bool_)?;
     let show_inv = method(code, ui_t, "showInventory")?.findex;
     want(
         code,
@@ -271,6 +324,12 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     want(code, std_string, "Std.string", &[dyn_t], str_t)?;
     let str_add = static_fn(code, "$String", "__add__")?.findex;
     want(code, str_add, "String.__add__", &[str_t, str_t], str_t)?;
+    let str_cmp = method(code, str_t, "__compare")?.findex;
+    match sig(code, str_cmp)? {
+        (a, r)
+            if r == i32_ && a.len() == 2 && a[0] == str_t && (a[1] == str_t || a[1] == dyn_t) => {}
+        _ => bail!("unexpected String.__compare signature"),
+    }
 
     // _start: one Ret; the vanilla prefix (start cost) is untouched.
     let start = method(code, act_t, "_start")?;
@@ -283,49 +342,53 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
     if !matches!(start.ops.first(), Some(Opcode::GetThis { .. })) {
         bail!("Activity._start: unexpected first op");
     }
-    let rets: Vec<usize> = (0..start.ops.len())
-        .filter(|&i| matches!(start.ops[i], Opcode::Ret { .. }))
-        .collect();
-    let [start_ret] = rets[..] else {
-        bail!("Activity._start: {} Rets, want 1", rets.len());
-    };
-    if start_ret + 1 != start.ops.len() {
-        bail!("Activity._start: the Ret is not the last op");
-    }
-    // the vanilla start does the three things a spectator undoes
-    for (what, ok) in [
-        (
-            "showInventory",
-            start
-                .ops
-                .iter()
-                .any(|o| call_of(o).is_some_and(|(g, _)| g == show_inv)),
-        ),
-        (
-            "lockCamera",
-            start
-                .ops
-                .iter()
-                .any(|o| matches!(o, Opcode::SetField { field, .. } if *field == m_lock)),
-        ),
-        (
-            "padCursor.locked",
-            start
-                .ops
-                .iter()
-                .any(|o| matches!(o, Opcode::SetField { field, .. } if *field == pad_locked)),
-        ),
-        (
-            "changeCamera",
-            start
-                .ops
-                .iter()
-                .any(|o| matches!(o, Opcode::GetThis { field, .. } if *field == a_cc)),
-        ),
-    ] {
-        if !ok {
-            bail!("Activity._start: no {what}");
+    // The four writes a watching spectator skips, each the only one of its kind
+    // in _start and not a jump target (a gate inserted before it is never jumped
+    // over): `prevInventory = ui.showInventory(false)` (the Call2 and the SetThis
+    // right after it), `mode.lockCamera = ...`, `padCursor.locked = ...`,
+    // `this.cameraSave = ...`.
+    let only = |what: &str, hit: &dyn Fn(&Opcode) -> bool| -> Result<usize> {
+        let at: Vec<usize> = (0..start.ops.len())
+            .filter(|&i| hit(&start.ops[i]))
+            .collect();
+        match at[..] {
+            [i] if jump_targets_any(start, i) => {
+                bail!("Activity._start: {what} is a jump target")
+            }
+            [i] => Ok(i),
+            _ => bail!("Activity._start: {} {what}, want 1", at.len()),
         }
+    };
+    let si_at = only(
+        "showInventory",
+        &|o| matches!(o, Opcode::Call2 { fun, .. } if *fun == show_inv),
+    )?;
+    let Opcode::Call2 { dst: si_dst, .. } = start.ops[si_at] else {
+        unreachable!()
+    };
+    if !matches!(start.ops[si_at + 1], Opcode::SetThis { field, src } if field == a_prev && src == si_dst)
+        || jump_targets_any(start, si_at + 1)
+    {
+        bail!("Activity._start: showInventory's result is not stored in prevInventory");
+    }
+    let lock_at = only(
+        "lockCamera",
+        &|o| matches!(o, Opcode::SetField { obj, field, .. } if *field == m_lock && start.regs[obj.0 as usize] == mode_t),
+    )?;
+    let pad_at = only(
+        "padCursor.locked",
+        &|o| matches!(o, Opcode::SetField { obj, field, .. } if *field == pad_locked && start.regs[obj.0 as usize] == pad_t),
+    )?;
+    let cam_at = only(
+        "cameraSave",
+        &|o| matches!(o, Opcode::SetThis { field, .. } if *field == a_cam),
+    )?;
+    if !start
+        .ops
+        .iter()
+        .any(|o| matches!(o, Opcode::GetThis { field, .. } if *field == a_cc))
+    {
+        bail!("Activity._start: no changeCamera");
     }
     let start_fi = fun_index(code, start.findex)?;
 
@@ -421,12 +484,61 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         );
     };
 
+    // spectEnd: the Sing stage's end half, as onActionDone's closure has it:
+    // `target.obj.flags &= ~2`, then `obj.cullingCollider("HandTool")` (a
+    // CallMethod on h3d.scene.Object) `.flags |= 2`. Exactly one Activity.hx
+    // function calls cullingCollider("HandTool") and then sets a flag with Or.
+    let ent_t = obj_type(code, "ent.Entity")?;
+    let obj3_t = obj_type(code, "h3d.scene.Object")?;
+    let a_target = typed(code, act_t, "target", ent_t)?;
+    let e_obj = typed(code, ent_t, "obj", obj3_t)?;
+    let o3_flags = typed(code, obj3_t, "flags", i32_)?;
+    let act_dbg = debug_file(code, "src/ui/win/Activity.hx")?;
+    let mut culls = vec![];
+    for f in &code.functions {
+        if !f
+            .debug_info
+            .as_ref()
+            .is_some_and(|d| d.first().is_some_and(|(file, _)| *file == act_dbg))
+        {
+            continue;
+        }
+        for (i, op) in f.ops.iter().enumerate() {
+            let Opcode::CallMethod { dst, field, args } = op else {
+                continue;
+            };
+            let [o, s] = args[..] else { continue };
+            if f.regs[o.0 as usize] != obj3_t {
+                continue;
+            }
+            let hand = f.ops[..i].iter().rev().find(|w| dst_of(w) == Some(s));
+            let is_hand = matches!(hand, Some(Opcode::GetGlobal { global, .. })
+                if super::job_xp::const_str(code, *global) == Some("HandTool"));
+            let or_after = f.ops[i + 1..(i + 8).min(f.ops.len())]
+                .iter()
+                .any(|w| matches!(w, Opcode::Or { .. }))
+                && matches!(f.ops.get(i + 1), Some(Opcode::JNull { reg, .. }) if reg == dst);
+            if is_hand && or_after {
+                culls.push(*field);
+            }
+        }
+    }
+    let [cull_pi] = culls[..] else {
+        bail!(
+            "Activity.hx: {} cullingCollider(\"HandTool\") calls before an Or, want 1",
+            culls.len()
+        );
+    };
+    let cancel = method(code, act_t, "_cancel__impl")?;
+    if fun_args(code, cancel) != [act_t] || jump_targets_any(cancel, 0) {
+        bail!("Activity._cancel__impl: unexpected shape");
+    }
+    let cancel_fi = fun_index(code, cancel.findex)?;
+
     Ok(Plan {
         act_t,
         game_t,
         mode_t,
-        gui_t,
-        pad_t,
         ui_t,
         unit_t,
         player_t,
@@ -435,7 +547,6 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         win_t,
         flow_t,
         ctrl_t,
-        cam_t,
         inf_t,
         cb_t,
         tut_t,
@@ -449,7 +560,6 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         a_unit,
         a_int,
         a_cc,
-        a_cam,
         a_prev,
         a_inf,
         i_id,
@@ -463,7 +573,6 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         gui_pad,
         pad_locked,
         w_root,
-        show_inv,
         set_window,
         add_help,
         show_tut,
@@ -474,8 +583,24 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         println,
         std_string,
         str_add,
+        str_cmp,
         start_fi,
-        start_ret,
+        si_at,
+        ent_t,
+        obj3_t,
+        a_target,
+        e_obj,
+        o3_flags,
+        cull_pi,
+        cancel_fi,
+        lock_at,
+        pad_at,
+        cam_at,
+        ginv_t,
+        obj2_t,
+        get_ginv,
+        gi_inv,
+        o_visible,
         ready_fi,
         tut_at,
         make_fi,
@@ -553,139 +678,53 @@ fn add_spect(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     push_fn(code, vec![p.act_t], p.bool_, r.0, a.finish(), p.dbg_file)
 }
 
-/// `spectPre(act) -> Int`: 0 when not watching; else changeCamera = false and
-/// 1 | lockCamera << 1 | padCursor.locked << 2 as they were.
+/// `spectPre(act) -> Bool`: true when this machine watches `act` from its own
+/// camera (a spectator, not a CAMERA_ACTIVITIES one): changeCamera = false, the
+/// chooseUnit full-screen wait Interactive (added on every client before the
+/// start) removed, `mp: spectate <id> 1`. A spectator of a camera activity
+/// logs `<id> 0` and gets false (vanilla start). Everyone else: false, no log.
+/// _start then skips its own camera / input / inventory writes when true.
 fn add_pre(
     code: &mut Bytecode,
     p: &Plan,
     spect: RefFun,
     tag: RefGlobal,
     sp: RefGlobal,
+    cam_ids: &[RefGlobal],
 ) -> Result<RefFun> {
     let mut r = Regs(vec![p.act_t]);
     let act = Reg(0);
-    let (m, b, exc, k, game, mode, lk, gui, pad, pl) = (
-        r.r(p.i32_),
+    let (g, b, exc, k, z, it, v) = (
+        r.r(p.bool_),
         r.r(p.bool_),
         r.r(p.dyn_t),
         r.r(p.i32_),
-        r.r(p.game_t),
-        r.r(p.mode_t),
-        r.r(p.bool_),
-        r.r(p.gui_t),
-        r.r(p.pad_t),
-        r.r(p.bool_),
+        r.r(p.i32_),
+        r.r(p.int_t),
+        r.r(p.void_),
     );
-    let (inf, id, acc, t, d, v) = (
+    let (inf, id, acc, t, d, m) = (
         r.r(p.inf_t),
         r.r(p.str_t),
         r.r(p.str_t),
         r.r(p.str_t),
         r.r(p.dyn_t),
-        r.r(p.void_),
+        r.r(p.i32_),
     );
     let mut a = Asm::new();
-    int(&mut a, code, m, 0);
+    a.op(Opcode::Bool {
+        dst: g,
+        value: ValBool(false),
+    });
     a.op(Opcode::Call1 {
         dst: b,
         fun: spect,
         arg0: act,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ret");
-    int(&mut a, code, m, 1);
     a.jmp(Opcode::Trap { exc, offset: 0 }, "ret");
-    a.op(Opcode::Bool {
-        dst: b,
-        value: ValBool(false),
-    });
-    a.op(Opcode::SetField {
-        obj: act,
-        field: p.a_cc,
-        src: b,
-    });
-    a.op(Opcode::Field {
-        dst: game,
-        obj: act,
-        field: p.a_game,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: game,
-            offset: 0,
-        },
-        "untrap",
-    );
-    a.op(Opcode::Field {
-        dst: mode,
-        obj: game,
-        field: p.g_mode,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: mode,
-            offset: 0,
-        },
-        "pad",
-    );
-    a.op(Opcode::Field {
-        dst: lk,
-        obj: mode,
-        field: p.m_lock,
-    });
-    a.jmp(
-        Opcode::JFalse {
-            cond: lk,
-            offset: 0,
-        },
-        "pad",
-    );
-    int(&mut a, code, k, 2);
-    a.op(Opcode::Or { dst: m, a: m, b: k });
-    a.label("pad");
-    a.op(Opcode::Field {
-        dst: gui,
-        obj: game,
-        field: p.g_gui,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: gui,
-            offset: 0,
-        },
-        "log",
-    );
-    a.op(Opcode::Field {
-        dst: pad,
-        obj: gui,
-        field: p.gui_pad,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: pad,
-            offset: 0,
-        },
-        "log",
-    );
-    a.op(Opcode::Field {
-        dst: pl,
-        obj: pad,
-        field: p.pad_locked,
-    });
-    a.jmp(
-        Opcode::JFalse {
-            cond: pl,
-            offset: 0,
-        },
-        "log",
-    );
-    int(&mut a, code, k, 4);
-    a.op(Opcode::Or { dst: m, a: m, b: k });
-    // println("mp: spectate " + inf.id + " " + m)
-    a.label("log");
-    a.op(Opcode::GetGlobal {
-        dst: acc,
-        global: tag,
-    });
+    int(&mut a, code, m, 0);
+    a.op(Opcode::Null { dst: id });
     a.op(Opcode::Field {
         dst: inf,
         obj: act,
@@ -696,12 +735,74 @@ fn add_pre(
             reg: inf,
             offset: 0,
         },
-        "num",
+        "watch",
     );
     a.op(Opcode::Field {
         dst: id,
         obj: inf,
         field: p.i_id,
+    });
+    a.jmp(Opcode::JNull { reg: id, offset: 0 }, "watch");
+    // a mini-game seen only through the activity camera: vanilla start
+    int(&mut a, code, z, 0);
+    for gl in cam_ids {
+        a.op(Opcode::GetGlobal {
+            dst: t,
+            global: *gl,
+        });
+        a.op(Opcode::Call2 {
+            dst: k,
+            fun: p.str_cmp,
+            arg0: id,
+            arg1: t,
+        });
+        a.jmp(
+            Opcode::JEq {
+                a: k,
+                b: z,
+                offset: 0,
+            },
+            "log",
+        );
+    }
+    // watching from its own camera: no camera change, the wait Interactive gone
+    a.label("watch");
+    int(&mut a, code, m, 1);
+    a.op(Opcode::Bool {
+        dst: g,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::SetField {
+        obj: act,
+        field: p.a_cc,
+        src: b,
+    });
+    a.op(Opcode::Field {
+        dst: it,
+        obj: act,
+        field: p.a_int,
+    });
+    a.jmp(Opcode::JNull { reg: it, offset: 0 }, "log");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.obj_remove,
+        arg0: it,
+    });
+    a.op(Opcode::Null { dst: it });
+    a.op(Opcode::SetField {
+        obj: act,
+        field: p.a_int,
+        src: it,
+    });
+    // println("mp: spectate " + inf.id + " " + m)
+    a.label("log");
+    a.op(Opcode::GetGlobal {
+        dst: acc,
+        global: tag,
     });
     a.jmp(Opcode::JNull { reg: id, offset: 0 }, "num");
     a.op(Opcode::Call2 {
@@ -735,50 +836,33 @@ fn add_pre(
         fun: p.println,
         arg0: acc,
     });
-    a.label("untrap");
     a.op(Opcode::EndTrap { exc });
     a.label("ret");
-    a.op(Opcode::Ret { ret: m });
-    push_fn(code, vec![p.act_t], p.i32_, r.0, a.finish(), p.dbg_file)
+    a.op(Opcode::Ret { ret: g });
+    push_fn(code, vec![p.act_t], p.bool_, r.0, a.finish(), p.dbg_file)
 }
 
-/// `spectPost(act, m)`: undo what _start did to a spectator's camera, input and inventory.
-fn add_post(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
-    let mut r = Regs(vec![p.act_t, p.i32_]);
-    let (act, m) = (Reg(0), Reg(1));
-    let (exc, k, z, t, b, game, cam, mode, ui, pv, gui, pad, it, v) = (
+/// `spectInv(act) -> Bool`: whether this machine's inventory panel is shown now
+/// (`game.ui.getGameInventory().inventory.visible`, what showInventory would
+/// return as the previous state); false when unknown. A gated spectator's
+/// `prevInventory`, so the vanilla end (`showInventory(prevInventory)`) keeps it.
+fn add_inv(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
+    let mut r = Regs(vec![p.act_t]);
+    let act = Reg(0);
+    let (res, exc, game, ui, gi, inv) = (
+        r.r(p.bool_),
         r.r(p.dyn_t),
-        r.r(p.i32_),
-        r.r(p.i32_),
-        r.r(p.i32_),
-        r.r(p.bool_),
         r.r(p.game_t),
-        r.r(p.cam_t),
-        r.r(p.mode_t),
         r.r(p.ui_t),
-        r.r(p.bool_),
-        r.r(p.gui_t),
-        r.r(p.pad_t),
-        r.r(p.int_t),
-        r.r(p.void_),
+        r.r(p.ginv_t),
+        r.r(p.obj2_t),
     );
     let mut a = Asm::new();
-    int(&mut a, code, z, 0);
-    a.jmp(
-        Opcode::JEq {
-            a: m,
-            b: z,
-            offset: 0,
-        },
-        "ret",
-    );
-    a.jmp(Opcode::Trap { exc, offset: 0 }, "ret");
-    a.op(Opcode::Null { dst: cam });
-    a.op(Opcode::SetField {
-        obj: act,
-        field: p.a_cam,
-        src: cam,
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(false),
     });
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "ret");
     a.op(Opcode::Field {
         dst: game,
         obj: act,
@@ -789,128 +873,42 @@ fn add_post(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
             reg: game,
             offset: 0,
         },
-        "int",
+        "untrap",
     );
-    // bit `bit` of m as a Bool in b
-    let bit = |a: &mut Asm, code: &mut Bytecode, n: i32, l1: &'static str| {
-        int(a, code, k, n);
-        a.op(Opcode::And { dst: t, a: m, b: k });
-        a.op(Opcode::Bool {
-            dst: b,
-            value: ValBool(false),
-        });
-        a.jmp(
-            Opcode::JEq {
-                a: t,
-                b: z,
-                offset: 0,
-            },
-            l1,
-        );
-        a.op(Opcode::Bool {
-            dst: b,
-            value: ValBool(true),
-        });
-        a.label(l1);
-    };
-    a.op(Opcode::Field {
-        dst: mode,
-        obj: game,
-        field: p.g_mode,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: mode,
-            offset: 0,
-        },
-        "inv",
-    );
-    bit(&mut a, code, 2, "lk");
-    a.op(Opcode::SetField {
-        obj: mode,
-        field: p.m_lock,
-        src: b,
-    });
-    a.label("inv");
     a.op(Opcode::Field {
         dst: ui,
         obj: game,
         field: p.g_ui,
     });
-    a.jmp(Opcode::JNull { reg: ui, offset: 0 }, "pad");
-    a.op(Opcode::Field {
-        dst: pv,
-        obj: act,
-        field: p.a_prev,
-    });
-    a.op(Opcode::Call2 {
-        dst: pv,
-        fun: p.show_inv,
-        arg0: ui,
-        arg1: pv,
-    });
-    a.label("pad");
-    a.op(Opcode::Field {
-        dst: gui,
-        obj: game,
-        field: p.g_gui,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: gui,
-            offset: 0,
-        },
-        "int",
-    );
-    a.op(Opcode::Field {
-        dst: pad,
-        obj: gui,
-        field: p.gui_pad,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: pad,
-            offset: 0,
-        },
-        "int",
-    );
-    bit(&mut a, code, 4, "pl");
-    a.op(Opcode::SetField {
-        obj: pad,
-        field: p.pad_locked,
-        src: b,
-    });
-    // chooseUnit's full-screen wait Interactive
-    a.label("int");
-    a.op(Opcode::Field {
-        dst: it,
-        obj: act,
-        field: p.a_int,
-    });
-    a.jmp(Opcode::JNull { reg: it, offset: 0 }, "untrap");
+    a.jmp(Opcode::JNull { reg: ui, offset: 0 }, "untrap");
     a.op(Opcode::Call1 {
-        dst: v,
-        fun: p.obj_remove,
-        arg0: it,
+        dst: gi,
+        fun: p.get_ginv,
+        arg0: ui,
     });
-    a.op(Opcode::Null { dst: it });
-    a.op(Opcode::SetField {
-        obj: act,
-        field: p.a_int,
-        src: it,
+    a.jmp(Opcode::JNull { reg: gi, offset: 0 }, "untrap");
+    a.op(Opcode::Field {
+        dst: inv,
+        obj: gi,
+        field: p.gi_inv,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: inv,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Field {
+        dst: res,
+        obj: inv,
+        field: p.o_visible,
     });
     a.label("untrap");
     a.op(Opcode::EndTrap { exc });
     a.label("ret");
-    a.op(Opcode::Ret { ret: v });
-    push_fn(
-        code,
-        vec![p.act_t, p.i32_],
-        p.void_,
-        r.0,
-        a.finish(),
-        p.dbg_file,
-    )
+    a.op(Opcode::Ret { ret: res });
+    push_fn(code, vec![p.act_t], p.bool_, r.0, a.finish(), p.dbg_file)
 }
 
 /// `spectTut(ui, id, opts, cb, act) -> Bool`: a spectator gets no tutorial
@@ -1062,6 +1060,148 @@ fn add_help(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
     push_fn(code, vec![p.act_t], p.void_, r.0, a.finish(), p.dbg_file)
 }
 
+/// `spectEnd(act)`, at `_cancel__impl` entry (the end every machine runs): on a
+/// spectator of the bard's song, the end half of vanilla's Sing stage pair. The
+/// fade-in of `_start` shows the stage (`target.obj.flags |= 2`) and hides its
+/// `HandTool`; the reverse (`target.obj.flags &= ~2`, HandTool shown) sits in
+/// onActionDone's closure, which a client spectator never runs (no window).
+/// Idempotent where that closure runs as well (the host).
+fn add_end(
+    code: &mut Bytecode,
+    p: &Plan,
+    spect: RefFun,
+    sing: RefGlobal,
+    hand: RefGlobal,
+) -> Result<RefFun> {
+    let mut r = Regs(vec![p.act_t]);
+    let act = Reg(0);
+    let (b, exc, inf, id, t, k, z, tgt, o, h, fl, m, v) = (
+        r.r(p.bool_),
+        r.r(p.dyn_t),
+        r.r(p.inf_t),
+        r.r(p.str_t),
+        r.r(p.str_t),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.ent_t),
+        r.r(p.obj3_t),
+        r.r(p.obj3_t),
+        r.r(p.i32_),
+        r.r(p.i32_),
+        r.r(p.void_),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: spect,
+        arg0: act,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ret");
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "ret");
+    a.op(Opcode::Field {
+        dst: inf,
+        obj: act,
+        field: p.a_inf,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: inf,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Field {
+        dst: id,
+        obj: inf,
+        field: p.i_id,
+    });
+    a.jmp(Opcode::JNull { reg: id, offset: 0 }, "untrap");
+    a.op(Opcode::GetGlobal {
+        dst: t,
+        global: sing,
+    });
+    a.op(Opcode::Call2 {
+        dst: k,
+        fun: p.str_cmp,
+        arg0: id,
+        arg1: t,
+    });
+    int(&mut a, code, z, 0);
+    a.jmp(
+        Opcode::JNotEq {
+            a: k,
+            b: z,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Field {
+        dst: tgt,
+        obj: act,
+        field: p.a_target,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: tgt,
+            offset: 0,
+        },
+        "untrap",
+    );
+    a.op(Opcode::Field {
+        dst: o,
+        obj: tgt,
+        field: p.e_obj,
+    });
+    a.jmp(Opcode::JNull { reg: o, offset: 0 }, "untrap");
+    a.op(Opcode::Field {
+        dst: fl,
+        obj: o,
+        field: p.o3_flags,
+    });
+    int(&mut a, code, m, !2);
+    a.op(Opcode::And {
+        dst: fl,
+        a: fl,
+        b: m,
+    });
+    a.op(Opcode::SetField {
+        obj: o,
+        field: p.o3_flags,
+        src: fl,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: t,
+        global: hand,
+    });
+    a.op(Opcode::CallMethod {
+        dst: h,
+        field: p.cull_pi,
+        args: vec![o, t],
+    });
+    a.jmp(Opcode::JNull { reg: h, offset: 0 }, "untrap");
+    a.op(Opcode::Field {
+        dst: fl,
+        obj: h,
+        field: p.o3_flags,
+    });
+    int(&mut a, code, m, 2);
+    a.op(Opcode::Or {
+        dst: fl,
+        a: fl,
+        b: m,
+    });
+    a.op(Opcode::SetField {
+        obj: h,
+        field: p.o3_flags,
+        src: fl,
+    });
+    a.label("untrap");
+    a.op(Opcode::EndTrap { exc });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.act_t], p.void_, r.0, a.finish(), p.dbg_file)
+}
+
 /// `spectFade(ctrl, replicated, cb, act)`: no replicated fade when the others
 /// watch from their own camera (the activity has a unit with an owner).
 fn add_fade(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
@@ -1120,55 +1260,91 @@ fn add_fade(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     push_fn(code, args, p.void_, r.0, a.finish(), p.dbg_file)
 }
 
-/// New functions, in this order: spect, spectPre, spectPost, spectTut,
-/// spectWin, spectHelp, spectFade.
-fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 7]> {
+/// New functions, in this order: spect, spectPre, spectInv, spectTut,
+/// spectWin, spectHelp, spectFade, spectEnd.
+fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 8]> {
     let tag = str_global(code, p.str_t, "mp: spectate ");
     let sp = str_global(code, p.str_t, " ");
     let spect = add_spect(code, p)?;
-    let pre = add_pre(code, p, spect, tag, sp)?;
-    let post = add_post(code, p)?;
+    let cam_ids: Vec<RefGlobal> = CAMERA_ACTIVITIES
+        .iter()
+        .map(|s| str_global(code, p.str_t, s))
+        .collect();
+    let pre = add_pre(code, p, spect, tag, sp, &cam_ids)?;
+    let inv = add_inv(code, p)?;
     let tut = add_tut(code, p, spect)?;
     let win = add_win(code, p, spect)?;
     let help = add_help(code, p, spect)?;
     let fade = add_fade(code, p)?;
+    let sing = str_global(code, p.str_t, "Sing");
+    let hand = str_global(code, p.str_t, "HandTool");
+    let end = add_end(code, p, spect, sing, hand)?;
 
-    // _start: m = spectPre(this) ... Ret -> JAlways tail; tail: spectPost(this, m); Ret
+    // _cancel__impl: spectEnd(this) first (a spectator's end of the Sing stage)
     {
-        let f = &mut code.functions[p.start_fi];
-        let Opcode::Ret { ret } = f.ops[p.start_ret] else {
-            unreachable!()
-        };
-        f.regs.push(p.i32_);
-        let m = Reg((f.regs.len() - 1) as u32);
+        let f = &mut code.functions[p.cancel_fi];
         f.regs.push(p.void_);
         let v = Reg((f.regs.len() - 1) as u32);
         insert_ops(
             f,
             0,
             vec![Opcode::Call1 {
-                dst: m,
-                fun: pre,
+                dst: v,
+                fun: end,
                 arg0: Reg(0),
             }],
         );
-        let at = p.start_ret + 1;
-        let n = f.ops.len();
-        f.ops[at] = Opcode::JAlways {
-            offset: (n - at - 1) as i32,
+    }
+    // _start: s = spect(this), g = spectPre(this) at entry; the vanilla writes
+    // a spectator must not get are skipped, the rest of _start runs as is:
+    //   prevInventory = s ? spectInv(this) : ui.showInventory(false)
+    //     (every spectator: a client spectator of a camera activity never runs
+    //     the end that shows the inventory again, onActionDone's closure)
+    //   if (!g) mode.lockCamera = true; if (!g) padCursor.locked = true;
+    //   if (!g) this.cameraSave = <camera snapshot>   (g: watching from its
+    //     own camera; a camera activity's spectator gets the vanilla camera)
+    // Inserted from the last site up, so every earlier index still holds.
+    {
+        let f = &mut code.functions[p.start_fi];
+        f.regs.push(p.bool_);
+        let s = Reg((f.regs.len() - 1) as u32);
+        f.regs.push(p.bool_);
+        let g = Reg((f.regs.len() - 1) as u32);
+        let Opcode::Call2 { dst: si_dst, .. } = f.ops[p.si_at] else {
+            unreachable!()
         };
-        f.ops.push(Opcode::Call2 {
-            dst: v,
-            fun: post,
-            arg0: Reg(0),
-            arg1: m,
-        });
-        f.ops.push(Opcode::Ret { ret });
-        if let Some(d) = &mut f.debug_info {
-            let line = d[at];
-            d.push(line);
-            d.push(line);
+        for at in [p.cam_at, p.pad_at, p.lock_at] {
+            insert_ops(f, at, vec![Opcode::JTrue { cond: g, offset: 1 }]);
         }
+        insert_ops(
+            f,
+            p.si_at,
+            vec![
+                Opcode::JFalse { cond: s, offset: 2 },
+                Opcode::Call1 {
+                    dst: si_dst,
+                    fun: inv,
+                    arg0: Reg(0),
+                },
+                Opcode::JAlways { offset: 1 },
+            ],
+        );
+        insert_ops(
+            f,
+            0,
+            vec![
+                Opcode::Call1 {
+                    dst: s,
+                    fun: spect,
+                    arg0: Reg(0),
+                },
+                Opcode::Call1 {
+                    dst: g,
+                    fun: pre,
+                    arg0: Reg(0),
+                },
+            ],
+        );
     }
     // onReady: showTutorial(ui, id, opts, cb) -> spectTut(ui, id, opts, cb, this)
     {
@@ -1259,13 +1435,13 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 7]> {
         };
     }
     eprintln!(
-        "patched coop spectate: Activity._start fn@{} (pre fn@{}, post fn@{}), onReady fn@{} \
+        "patched coop spectate: Activity._start fn@{} (gate fn@{}, inventory fn@{}), onReady fn@{} \
          tutorial -> fn@{}, window closure fn@{} setWindow -> fn@{} / addHelpIcon -> fn@{}, \
-         addHelpIcon__impl gated (spect fn@{}), end fade fn@{} -> fn@{}: other players keep \
+         addHelpIcon__impl gated (spect fn@{}), end fade fn@{} -> fn@{}, _cancel__impl -> spectEnd fn@{}: other players keep \
          their scene and watch the worker",
         code.functions[p.start_fi].findex.0,
         pre.0,
-        post.0,
+        inv.0,
         code.functions[p.ready_fi].findex.0,
         tut.0,
         code.functions[p.make_fi].findex.0,
@@ -1273,9 +1449,10 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 7]> {
         help.0,
         spect.0,
         code.functions[p.fade_fi].findex.0,
-        fade.0
+        fade.0,
+        end.0
     );
-    Ok([spect, pre, post, tut, win, help, fade])
+    Ok([spect, pre, inv, tut, win, help, fade, end])
 }
 
 /// Keeps shared mini-game windows off the other players' screens, or leaves
@@ -1308,8 +1485,15 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 7);
-        let sites = [p.start_fi, p.ready_fi, p.make_fi, p.help_fi, p.fade_fi];
+        assert_eq!(back.functions.len(), n + 8);
+        let sites = [
+            p.start_fi,
+            p.ready_fi,
+            p.make_fi,
+            p.help_fi,
+            p.fade_fi,
+            p.cancel_fi,
+        ];
         for i in 0..n {
             assert_eq!(
                 !same(&orig.functions[i], &back.functions[i]),
@@ -1318,8 +1502,8 @@ mod tests {
             );
         }
         let nf = |k: usize| back.functions[n + k].findex;
-        let (spect, pre, post, tut, win, help, fade) =
-            (nf(0), nf(1), nf(2), nf(3), nf(4), nf(5), nf(6));
+        let (spect, pre, inv, tut, win, help, fade, end) =
+            (nf(0), nf(1), nf(2), nf(3), nf(4), nf(5), nf(6), nf(7));
         for &fi in &sites {
             let f = &back.functions[fi];
             check_types(&back, f, 0..f.ops.len());
@@ -1329,24 +1513,54 @@ mod tests {
             check_types(&back, f, 0..f.ops.len());
             check_flow(f);
         }
-        // _start: one op in front, the old Ret jumps to spectPost + Ret
+        // _start: s = spect(this), g = spectPre(this) in front; before
+        // showInventory a 3-op `s ? spectInv(this) : ...` into the same register;
+        // a JTrue g over each of lockCamera / padCursor.locked / cameraSave
         let (a, b) = (&orig.functions[p.start_fi], &back.functions[p.start_fi]);
-        assert!(matches!(b.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == pre));
-        let k = b.ops.len();
-        assert_eq!(k, a.ops.len() + 3);
-        assert!(matches!(b.ops[k - 2], Opcode::Call2 { fun, arg0: Reg(0), .. } if fun == post));
-        assert_eq!(
-            format!("{:?}", b.ops[k - 1]),
-            format!("{:?}", a.ops[p.start_ret])
+        let g = Reg((b.regs.len() - 1) as u32);
+        let sr = Reg((b.regs.len() - 2) as u32);
+        assert_eq!(b.regs[g.0 as usize], p.bool_);
+        assert_eq!(b.regs[sr.0 as usize], p.bool_);
+        assert!(
+            matches!(b.ops[0], Opcode::Call1 { dst, fun, arg0: Reg(0) } if fun == spect && dst == sr)
         );
-        assert_eq!(jump_targets(b, p.start_ret + 1), vec![k - 2]);
-        for i in 0..p.start_ret {
-            let want: Vec<usize> = jump_targets(a, i).into_iter().map(|t| t + 1).collect();
-            assert_eq!(jump_targets(b, i + 1), want, "_start op {i}");
+        assert!(
+            matches!(b.ops[1], Opcode::Call1 { dst, fun, arg0: Reg(0) } if fun == pre && dst == g)
+        );
+        assert_eq!(b.ops.len(), a.ops.len() + 8);
+        // where original op i went
+        let at = |i: usize| -> usize {
+            2 + i
+                + 3 * usize::from(i >= p.si_at)
+                + usize::from(i >= p.lock_at)
+                + usize::from(i >= p.pad_at)
+                + usize::from(i >= p.cam_at)
+        };
+        let s = at(p.si_at);
+        assert!(matches!(b.ops[s - 3], Opcode::JFalse { cond, offset: 2 } if cond == sr));
+        let Opcode::Call2 { dst: si_dst, .. } = a.ops[p.si_at] else {
+            panic!()
+        };
+        assert!(
+            matches!(b.ops[s - 2], Opcode::Call1 { dst, fun, arg0: Reg(0) } if fun == inv && dst == si_dst)
+        );
+        assert!(matches!(b.ops[s - 1], Opcode::JAlways { offset: 1 }));
+        for site in [p.lock_at, p.pad_at, p.cam_at] {
+            assert!(matches!(b.ops[at(site) - 1], Opcode::JTrue { cond, offset: 1 } if cond == g));
+        }
+        for i in 0..a.ops.len() {
+            let want: Vec<usize> = jump_targets(a, i).into_iter().map(at).collect();
+            assert_eq!(jump_targets(b, at(i)), want, "_start op {i}");
             if want.is_empty() {
-                assert_eq!(format!("{:?}", b.ops[i + 1]), format!("{:?}", a.ops[i]));
+                assert_eq!(format!("{:?}", b.ops[at(i)]), format!("{:?}", a.ops[i]));
             }
         }
+        // _cancel__impl: spectEnd(this) in front, the rest shifted by one
+        let (ca, cb) = (&orig.functions[p.cancel_fi], &back.functions[p.cancel_fi]);
+        assert!(matches!(cb.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == end));
+        let mut want = ca.clone();
+        want.regs = cb.regs.clone();
+        shifted(&want, cb, 0, 1);
         // the three call sites keep their registers, plus this
         let ready = &back.functions[p.ready_fi];
         assert!(matches!(&ready.ops[p.tut_at],
@@ -1391,7 +1605,7 @@ mod tests {
         assert_eq!(jump_targets(hf, 1), vec![3]);
         // every vanilla call made by the new functions is one the plan validated
         let allowed = [
-            p.show_inv,
+            p.get_ginv,
             p.set_window,
             p.add_help,
             p.show_tut,
@@ -1401,6 +1615,7 @@ mod tests {
             p.println,
             p.std_string,
             p.str_add,
+            p.str_cmp,
             spect,
         ];
         for f in &back.functions[n..] {
@@ -1409,7 +1624,7 @@ mod tests {
                     assert!(allowed.contains(&g), "fn@{} calls fn@{}", f.findex.0, g.0);
                 }
                 if let Opcode::CallMethod { field, .. } = op {
-                    assert_eq!(field.0 as i32, p.set_vis_pi);
+                    assert!(field.0 as i32 == p.set_vis_pi || *field == p.cull_pi);
                 }
             }
         }
@@ -1446,11 +1661,17 @@ mod tests {
                 }),
             ),
             (
-                "two Rets",
+                "two lockCamera writes",
                 Box::new(move |c: &mut Bytecode| {
                     let f = &mut c.functions[p.start_fi];
-                    let r = f.ops[p.start_ret].clone();
-                    f.ops[p.start_ret - 1] = r;
+                    let w = f.ops[p.lock_at].clone();
+                    f.ops[p.lock_at - 1] = w;
+                }),
+            ),
+            (
+                "showInventory result not kept",
+                Box::new(move |c: &mut Bytecode| {
+                    c.functions[p.start_fi].ops[p.si_at + 1] = Opcode::Nop;
                 }),
             ),
             (
@@ -1495,8 +1716,9 @@ mod tests {
                     c.log.push((k, a.to_vec()));
                     Some(v)
                 };
-                if f == p.show_inv {
-                    log(c, "showInventory", V::B(true))
+                if f == p.get_ginv {
+                    // the GameInventory the test put on the ui object
+                    Some(c.key_get(&a[0], "ginv"))
                 } else if f == p.set_window {
                     log(c, "setWindow", V::Null)
                 } else if f == p.add_help {
@@ -1521,11 +1743,23 @@ mod tests {
                         (V::S(x), V::S(y)) => Some(V::S(format!("{x}{y}"))),
                         o => panic!("String add {o:?}"),
                     }
+                } else if f == p.str_cmp {
+                    match (&a[0], &a[1]) {
+                        (V::S(x), V::S(y)) => Some(V::I(i32::from(x != y))),
+                        o => panic!("String compare {o:?}"),
+                    }
                 } else {
                     None
                 }
             },
             move |c: &mut Core, pi: usize, a: &[V]| {
+                if pi == p.cull_pi.0 {
+                    // obj.cullingCollider(name): the child the test hung on obj
+                    let V::S(name) = &a[1] else {
+                        panic!("collider name")
+                    };
+                    return c.key_get(&a[0], name);
+                }
                 assert_eq!(pi as i32, p.set_vis_pi);
                 c.log.push(("visible", a.to_vec()));
                 V::B(false)
@@ -1604,51 +1838,98 @@ mod tests {
         assert!(s.c.log.is_empty());
     }
 
-    /// _start's pre / post on a spectator: no camera change, old locks and
-    /// inventory back, the chooseUnit wait Interactive gone; nothing for the player.
+    /// spectPre on a watching spectator: true, no camera change, the chooseUnit
+    /// wait Interactive gone; on a camera-activity spectator and on the player:
+    /// false and nothing changed. spectInv: the inventory panel's visibility.
     #[test]
-    fn start_pre_post() {
+    fn start_gate() {
         let Some((code, n, p)) = patched() else {
             eprintln!("skipped: {HLBOOT} not found");
             return;
         };
-        let (pre, post) = (code.functions[n + 1].findex, code.functions[n + 2].findex);
+        let (pre, inv) = (code.functions[n + 1].findex, code.functions[n + 2].findex);
         let mut s = sim(&code, n, &p);
         let w = world(&mut s, &p);
         let it = s.c.obj(&[]);
         s.c.set(&w.act, p.a_int, it.clone());
-        let cam = s.c.obj(&[]);
-        s.c.set(&w.act, p.a_cam, cam);
-        // the padCursor was locked before (bit 2), the camera not
-        s.c.set(&w.pad, p.pad_locked, V::B(true));
-        assert_eq!(s.run(pre, vec![w.act.clone()]), V::I(1 | 4));
+        assert_eq!(s.run(pre, vec![w.act.clone()]), V::B(true));
         assert_eq!(s.c.get(&w.act, p.a_cc), V::B(false));
+        assert_eq!(s.c.get(&w.act, p.a_int), V::Null);
+        assert_eq!(s.c.take("remove"), vec![vec![it.clone()]]);
         assert_eq!(
             s.c.take("println"),
-            vec![vec![V::S("mp: spectate Fish 5".into())]]
+            vec![vec![V::S("mp: spectate Fish 1".into())]]
         );
-        // vanilla _start ran in between
-        s.c.set(&w.mode, p.m_lock, V::B(true));
-        s.c.set(&w.pad, p.pad_locked, V::B(true));
-        s.c.set(&w.act, p.a_prev, V::B(true));
-        s.run(post, vec![w.act.clone(), V::I(5)]);
+        // the locks and the inventory are not touched by the gate itself
         assert_eq!(s.c.get(&w.mode, p.m_lock), V::B(false));
-        assert_eq!(s.c.get(&w.pad, p.pad_locked), V::B(true));
-        assert_eq!(s.c.get(&w.act, p.a_cam), V::Null);
-        assert_eq!(s.c.get(&w.act, p.a_int), V::Null);
-        let ui = s.c.get(&w.game, p.g_ui);
-        assert_eq!(s.c.take("showInventory"), vec![vec![ui, V::B(true)]]);
-        assert_eq!(s.c.take("remove"), vec![vec![it]]);
+        assert_eq!(s.c.get(&w.pad, p.pad_locked), V::B(false));
         assert!(s.c.log.is_empty());
 
-        // the player doing it: pre says 0, post does nothing
+        // a spectator of a camera-only mini-game keeps the vanilla start
+        for id in CAMERA_ACTIVITIES {
+            let inf = s.c.get(&w.act, p.a_inf);
+            s.c.set(&inf, p.i_id, V::S(id.into()));
+            s.c.set(&w.act, p.a_cc, V::B(true));
+            s.c.set(&w.act, p.a_int, it.clone());
+            assert_eq!(s.run(pre, vec![w.act.clone()]), V::B(false));
+            assert_eq!(s.c.get(&w.act, p.a_cc), V::B(true));
+            assert_eq!(s.c.get(&w.act, p.a_int), it);
+            assert_eq!(
+                s.c.take("println"),
+                vec![vec![V::S(format!("mp: spectate {id} 0"))]]
+            );
+            assert!(s.c.log.is_empty());
+        }
+
+        // the player doing it: false, nothing changed, no log
         s.c.set(&w.unit, p.u_owner, w.me.clone());
-        s.c.set(&w.act, p.a_cc, V::B(true));
-        assert_eq!(s.run(pre, vec![w.act.clone()]), V::I(0));
+        assert_eq!(s.run(pre, vec![w.act.clone()]), V::B(false));
         assert_eq!(s.c.get(&w.act, p.a_cc), V::B(true));
-        s.c.set(&w.mode, p.m_lock, V::B(true));
-        s.run(post, vec![w.act.clone(), V::I(0)]);
-        assert_eq!(s.c.get(&w.mode, p.m_lock), V::B(true));
+        assert!(s.c.log.is_empty());
+
+        // spectInv: GameInventory.inventory.visible, false when unknown
+        let ui = s.c.get(&w.game, p.g_ui);
+        assert_eq!(s.run(inv, vec![w.act.clone()]), V::B(false));
+        for vis in [true, false] {
+            let panel = s.c.obj(&[(p.o_visible, V::B(vis))]);
+            let gi = s.c.obj(&[(p.gi_inv, panel)]);
+            s.c.key_set(&ui, "ginv".into(), gi);
+            assert_eq!(s.run(inv, vec![w.act.clone()]), V::B(vis));
+        }
+        assert!(s.c.log.is_empty());
+    }
+
+    /// spectEnd at _cancel: a spectator of the song hides the stage again and
+    /// shows its HandTool (the other bits kept); nothing for the player or
+    /// another activity.
+    #[test]
+    fn cancel_end() {
+        let Some((code, n, p)) = patched() else {
+            eprintln!("skipped: {HLBOOT} not found");
+            return;
+        };
+        let end = code.functions[n + 7].findex;
+        let mut s = sim(&code, n, &p);
+        let w = world(&mut s, &p);
+        let hand = s.c.obj(&[(p.o3_flags, V::I(1))]);
+        let obj = s.c.obj(&[(p.o3_flags, V::I(3))]);
+        s.c.key_set(&obj, "HandTool".into(), hand.clone());
+        let tgt = s.c.obj(&[(p.e_obj, obj.clone())]);
+        s.c.set(&w.act, p.a_target, tgt);
+        let inf = s.c.get(&w.act, p.a_inf);
+        // another activity: untouched
+        s.run(end, vec![w.act.clone()]);
+        assert_eq!(s.c.get(&obj, p.o3_flags), V::I(3));
+        s.c.set(&inf, p.i_id, V::S("Sing".into()));
+        // the player: untouched
+        s.c.set(&w.unit, p.u_owner, w.me.clone());
+        s.run(end, vec![w.act.clone()]);
+        assert_eq!(s.c.get(&obj, p.o3_flags), V::I(3));
+        // a spectator of the song
+        s.c.set(&w.unit, p.u_owner, w.other.clone());
+        s.run(end, vec![w.act.clone()]);
+        assert_eq!(s.c.get(&obj, p.o3_flags), V::I(1));
+        assert_eq!(s.c.get(&hand, p.o3_flags), V::I(3));
         assert!(s.c.log.is_empty());
     }
 

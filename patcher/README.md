@@ -698,21 +698,33 @@ already support spectators (input only for `unit.owner == game.me`; the
 worker's anims / props / effects come from replicated state; the host's copy
 stays authoritative), so they are kept but hidden. A spectator is a machine
 where `spect(act)`: the activity is replicated (`__host != null`), has a unit,
-and `unit.owner != game.me`. `_start` gets `m = spectPre(this)` at its entry
-(spectator: `changeCamera = false`, so no fade or camera move;
-m = 1 | old lockCamera << 1 | old padCursor.locked << 2) and `spectPost(this,
-m)` before its Ret (old lockCamera / padCursor.locked back, `cameraSave =
-null` so `_cancel` moves no camera, `showInventory(prevInventory)`, chooseUnit's
-full-screen wait Interactive removed); the start cost, GC entry and trait
-level stay vanilla. onReady's `showTutorial` -> `spectTut` (no tutorial, the
+and `unit.owner != game.me`. `_start` gets `g = spectPre(this)` at its entry
+(a spectator watching from its own camera: `changeCamera = false`, so no fade or
+camera move, and chooseUnit's full-screen wait Interactive removed), and the
+vanilla writes such a spectator must not get are skipped, not undone:
+`prevInventory = s ? spectInv(this) : ui.showInventory(false)` for every
+spectator (`s = spect(this)`; spectInv: the panel's current visibility, so the
+end's `showInventory(prevInventory)` keeps it and a client spectator, which
+never runs that end, keeps its panel), `if (!g)` before `mode.lockCamera = true`, `padCursor.locked = true` and
+`this.cameraSave = ...` (`_cancel` then moves no camera); the start cost, GC
+entry, trait level and start sound stay vanilla. onReady's `showTutorial` ->
+`spectTut` (no tutorial, the
 callback runs at once); the window closure's `setWindow` -> `spectWin` (the
 window and its windowRoot invisible: not drawn, no Interactive events, not the
 mode's current window, still updated and networked) and `addHelpIcon` ->
 `spectHelp` (not sent); `addHelpIcon__impl` returns at once on a spectator;
 onActionDone's end `netFade` -> `spectFade` (not replicated when the activity
-has a unit with an owner). shim.log: `mp: spectate <id> <m>` on each spectator.
-Unit-less activities (BoardPuzzle, a solved NinePuzzle) stay shared as in
-vanilla. Not covered: the unit choice before the start (the host's shared
+has a unit with an owner). shim.log: `mp: spectate <id> 1` on each watching
+spectator. Unit-less activities (BoardPuzzle, a solved NinePuzzle) stay shared
+as in vanilla. Mini-games seen only through the activity camera (LockPick: the
+3D lock in front of it; NinePuzzle, CylinderPuzzle: the board; Sing: the bard's
+stage, shown by the camera switch) give a spectator the vanilla start
+(`g = false`, `mp: spectate <id> 0`); the window and tutorial rules above still
+apply (a client spectator's LockPick is the replicated window, whose `init`
+builds the lock from the synced lockData). `_cancel__impl` (every machine's end)
+starts with `spectEnd(this)`: on a spectator of Sing, the end half of the vanilla
+stage pair (the fade-in shows `target.obj` and hides its HandTool; onActionDone's
+closure, which a client spectator never runs, reverts it). Not covered: the unit choice before the start (the host's shared
 ChooseUnit, the clients' wait Interactive): which player starts it is known on
 the host only (`conds` is not synced). All players need this build. Skipped
 (logged) on mismatch.
