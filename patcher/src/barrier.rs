@@ -35,6 +35,18 @@
 //       battle: Battle.onEndGeneration waits while clients reconnect);
 //     waitLocks still not empty TIMEOUT s after the phase began: each late
 //       client is removed and soft-kicked (rejoin; c.stop() if refused);
+//     a dead switch (lockSyncMode held, waitLockCallbs empty): at once, each
+//       client in waitLocks is removed and soft-kicked as above, then
+//       lockSyncMode = false and `if (!processSyncMode()) game.safeFadeOut()`,
+//       the way a switch's last step ends it. Only the two vanilla switch
+//       steps take the lock (syncEnterMode's onEnd step, syncLeaveMode's
+//       leaveMode step), each parks its next step right after (checked in
+//       plan), and only the last step releases it; so a lock with nothing
+//       parked is a step that threw in between (onEnd -> Place.doEnter ->
+//       PlaceView.onSwitched -> an element script; inside onClientReady,
+//       net_guard logs and swallows it). Before, the client got no
+//       onServerReady and stayed black, the lock parked every Join (its own
+//       rejoin too) until JOIN_CAP disconnected it, every later switch queued;
 //     anything removed: release(ctrl).
 //
 //   rejoin(ctrl, game, host, c): the vanilla client reload, sent to c alone.
@@ -76,6 +88,9 @@
 // host's own fade callback lost, the host itself black): the parked client is
 // disconnected rather than full-synced into a half-done switch.
 //
+// A step that throws before taking the lock (syncLeaveMode's leaveMode) leaves
+// it free: its clients wait TIMEOUT and rejoin, Joins are not parked.
+//
 // Not handled: the host's own fade callback lost before its first parked step
 // (`Game.fadeTo` drops a fade): every list is empty, the host stays black, and
 // after PHASE_GRACE a Join goes in. That host is broken with or without it.
@@ -99,6 +114,8 @@ const LOG_STOP: &str = "mp: barrier: disconnected: ";
 const LOG_JOINING: &str = "mp: barrier: a client whose Join waits is not waited for";
 const LOG_PARK: &str = "mp: barrier: a Join waits for the mode switch to end";
 const LOG_REPLAY: &str = "mp: barrier: a parked Join goes ahead";
+const LOG_DEAD: &str =
+    "mp: barrier: a mode switch whose step failed can never end: its clients rejoin, the switch is ended";
 
 type F = (RefField, RefType);
 
@@ -159,6 +176,10 @@ struct Plan {
     std_string: RefFun,
     str_add: RefFun,
     new_arr: NewArr,
+    /// Controller.processSyncMode (the next queued switch) and Game.safeFadeOut:
+    /// the tail of every switch, run when a dead switch is ended.
+    process_sync: RefFun,
+    safe_fade: RefFun,
     update_fi: usize,
     clients_fi: usize,
     ready_fi: usize,
@@ -468,6 +489,55 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let new_arr = plan_new_arr(code, ready, tail_at, callbs)?;
     let (join_fi, msg_t) = plan_join(code, game_t, nc_t)?;
 
+    // A dead switch: lockSyncMode is held only by a switch step that parks its
+    // next step (waitForUnlock) after taking it; every step that takes it must
+    // do so, else `lockSyncMode && waitLockCallbs empty` is not "dead".
+    let process_sync = method(code, ctrl_t, "processSyncMode")?.findex;
+    if sig(code, process_sync)? != (vec![ctrl_t], bool_t) {
+        bail!("unexpected Controller.processSyncMode signature");
+    }
+    let safe_fade = method(code, game_t, "safeFadeOut")?.findex;
+    if sig(code, safe_fade)? != (vec![game_t], void_t) {
+        bail!("unexpected Game.safeFadeOut signature");
+    }
+    let wfu = method(code, ctrl_t, "waitForUnlock")?.findex;
+    let mut takers = 0;
+    for f in &code.functions {
+        for (i, op) in f.ops.iter().enumerate() {
+            let src = match op {
+                Opcode::SetField { obj, field, src }
+                    if *field == lock_sync && f.regs[obj.0 as usize] == ctrl_t =>
+                {
+                    *src
+                }
+                Opcode::SetThis { field, src } if *field == lock_sync && f.regs[0] == ctrl_t => {
+                    *src
+                }
+                _ => continue,
+            };
+            let set_true = f.ops[..i].iter().rev().find_map(|o| match o {
+                Opcode::Bool { dst, value } if *dst == src => Some(value.0),
+                _ => None,
+            });
+            if set_true != Some(true) {
+                continue;
+            }
+            takers += 1;
+            let parks = f.ops[i..]
+                .iter()
+                .any(|o| matches!(o, Opcode::Call2 { fun, .. } if *fun == wfu));
+            if !parks {
+                bail!(
+                    "fn@{} takes lockSyncMode without parking its next step",
+                    f.findex.0
+                );
+            }
+        }
+    }
+    if takers == 0 {
+        bail!("no switch step takes lockSyncMode");
+    }
+
     Ok(Plan {
         void_t,
         bool_t,
@@ -514,6 +584,8 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         std_string,
         str_add,
         new_arr,
+        process_sync,
+        safe_fade,
         update_fi: fun_index(code, update.findex)?,
         clients_fi: fun_index(code, wfc.findex)?,
         ready_fi: fun_index(code, ready.findex)?,
@@ -1096,6 +1168,8 @@ fn add_tick(
     let pend = r.r(p.arr_t);
     let (times, cap) = (r.r(p.arr_t), r.r(p.f64_t));
     let log_joining = str_global(code, p.str_t, LOG_JOINING);
+    let log_dead = str_global(code, p.str_t, LOG_DEAD);
+    let (dead, cbs) = (r.r(p.bool_t), r.r(p.arr_t));
     let mut a = Asm::new();
     let log = |a: &mut Asm, g: RefGlobal, tail: Option<Reg>| {
         a.op(Opcode::GetGlobal {
@@ -1452,12 +1526,61 @@ fn add_tick(
 
     // 3. The barrier itself.
     a.label("barrier");
+    // A dead switch: lockSyncMode held with no step parked. Only a switch step
+    // takes the lock, and it parks its next step right after (checked in plan);
+    // one that threw before parking it (net_guard logs and swallows it inside
+    // onClientReady) leaves the lock held for good: the clients it waits for get
+    // no onServerReady and stay black, every Join is parked behind it, every
+    // later switch is queued. Its clients rejoin now and the switch is ended
+    // the way its last step ends it (lockSyncMode = false, the next queued
+    // switch, else a fade-out).
+    a.op(Opcode::Bool {
+        dst: dead,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Field {
+        dst: b,
+        obj: Reg(0),
+        field: p.lock_sync,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "live");
+    a.op(Opcode::Field {
+        dst: cbs,
+        obj: Reg(0),
+        field: p.callbs,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: cbs,
+            offset: 0,
+        },
+        "live",
+    );
+    a.op(Opcode::Field {
+        dst: len,
+        obj: cbs,
+        field: p.arr_len,
+    });
+    a.jmp(
+        Opcode::JSGt {
+            a: len,
+            b: zero,
+            offset: 0,
+        },
+        "live",
+    );
+    a.op(Opcode::Bool {
+        dst: dead,
+        value: ValBool(true),
+    });
+    log(&mut a, log_dead, None);
+    a.label("live");
     a.op(Opcode::Field {
         dst: wl,
         obj: Reg(0),
         field: p.wait_locks,
     });
-    a.jmp(Opcode::JNull { reg: wl, offset: 0 }, "end");
+    a.jmp(Opcode::JNull { reg: wl, offset: 0 }, "settle");
     a.op(Opcode::Field {
         dst: len,
         obj: wl,
@@ -1469,7 +1592,7 @@ fn add_tick(
             b: len,
             offset: 0,
         },
-        "end",
+        "settle",
     );
     a.op(Opcode::GetGlobal {
         dst: kicked,
@@ -1584,6 +1707,13 @@ fn add_tick(
         },
         "release",
     );
+    a.jmp(
+        Opcode::JTrue {
+            cond: dead,
+            offset: 0,
+        },
+        "late",
+    );
     a.op(Opcode::GetGlobal {
         dst: at,
         global: g.phase_at,
@@ -1601,6 +1731,7 @@ fn add_tick(
         },
         "release",
     );
+    a.label("late");
     a.op(Opcode::Call1 {
         dst: late,
         fun: p.copy,
@@ -1702,12 +1833,40 @@ fn add_tick(
             cond: removed,
             offset: 0,
         },
-        "end",
+        "settle",
     );
     a.op(Opcode::Call1 {
         dst: v,
         fun: release,
         arg0: Reg(0),
+    });
+    a.label("settle");
+    a.jmp(
+        Opcode::JFalse {
+            cond: dead,
+            offset: 0,
+        },
+        "end",
+    );
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::SetField {
+        obj: Reg(0),
+        field: p.lock_sync,
+        src: b,
+    });
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.process_sync,
+        arg0: Reg(0),
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.safe_fade,
+        arg0: game,
     });
     a.label("end");
     a.op(Opcode::Ret { ret: v });
@@ -1946,6 +2105,9 @@ mod tests {
         Rejoin(usize),
         Join(usize),
         Stop(usize),
+        /// processSyncMode ran a queued switch.
+        Process,
+        FadeOut,
     }
 
     struct Sim<'a> {
@@ -2051,6 +2213,29 @@ mod tests {
             self.wait_locks().extend(cl);
             let cb = self.field_arr(self.ctrl, self.p.callbs);
             self.list(cb).push(V::Null);
+        }
+        /// A switch queued behind the current one: the barrier stays active.
+        fn hold(&mut self) {
+            let q = self.field_arr(self.ctrl, self.p.mode_queue);
+            self.list(q).push(V::Null);
+        }
+        fn settle(&mut self) {
+            let q = self.field_arr(self.ctrl, self.p.mode_queue);
+            self.list(q).clear();
+        }
+        /// A switch step took lockSyncMode and threw before parking its next
+        /// step: `waitForClients` ran (the clients are waited for), nothing parked.
+        fn step_threw(&mut self) {
+            let g = self.phase_global();
+            self.globals.insert(g, V::F(self.now));
+            let cl = self.clients().clone();
+            self.wait_locks().extend(cl);
+            let cb = self.field_arr(self.ctrl, self.p.callbs);
+            self.list(cb).clear();
+            self.set(self.ctrl, self.p.lock_sync, V::B(true));
+        }
+        fn locked(&self) -> bool {
+            self.get(self.ctrl, self.p.lock_sync) == V::B(true)
         }
         /// apply() adds phase_at first.
         fn phase_global(&self) -> usize {
@@ -2163,6 +2348,19 @@ mod tests {
             if f == p.sys_time {
                 return V::F(self.now);
             }
+            if f == p.process_sync {
+                let q = self.field_arr(self.ctrl, p.mode_queue);
+                if self.list(q).is_empty() {
+                    return V::B(false);
+                }
+                self.list(q).remove(0);
+                self.events.push(Ev::Process);
+                return V::B(true);
+            }
+            if f == p.safe_fade {
+                self.events.push(Ev::FadeOut);
+                return V::Null;
+            }
             if f == p.println {
                 let V::S(s) = &args[0] else { panic!() };
                 self.log.push(s.clone());
@@ -2232,6 +2430,13 @@ mod tests {
                     }
                     Opcode::SetGlobal { global, src } => {
                         self.globals.insert(global.0, r[src.0 as usize].clone());
+                    }
+                    Opcode::SetField { obj, field, src } => {
+                        let V::R(o) = r[obj.0 as usize] else {
+                            panic!("null access op {}", pc - 1)
+                        };
+                        let v = r[src.0 as usize].clone();
+                        self.set(o, *field, v);
                     }
                     Opcode::EnumIndex { dst, value } => {
                         let V::E(i) = r[value.0 as usize] else {
@@ -2426,7 +2631,7 @@ mod tests {
         assert!(s.at(&Ev::Stop(a)).is_some(), "{:?}", s.events);
     }
 
-    /// A switch that never settles (lockSyncMode held): the parked client is
+    /// A switch that never settles (a switch queued behind it, never run): the parked client is
     /// disconnected after JOIN_CAP and nothing is left to wait for.
     #[test]
     fn join_cap_drops_and_wait_set_recovers() {
@@ -2437,7 +2642,7 @@ mod tests {
         let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
         s.tick();
         let b = s.connect();
-        s.set(s.ctrl, p.lock_sync, V::B(true));
+        s.hold();
         s.phase();
         s.join_arrives(b);
         s.run_to(JOIN_CAP - 1.0);
@@ -2463,7 +2668,7 @@ mod tests {
         let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
         s.tick();
         let b = s.connect();
-        s.set(s.ctrl, p.lock_sync, V::B(true));
+        s.hold();
         s.phase();
         s.join_arrives(b);
         s.run_to(80.0);
@@ -2482,9 +2687,80 @@ mod tests {
         let d = s.connect();
         s.join_arrives(d);
         s.run_to(80.0 + JOIN_CAP + 10.0);
-        s.set(s.ctrl, p.lock_sync, V::B(false));
+        s.settle();
         s.run_to(80.0 + JOIN_CAP + 20.0);
         assert!(s.at(&Ev::Join(d)).is_some(), "{:?}", s.events);
         assert_eq!(s.at(&Ev::Stop(d)), None);
+    }
+
+    /// The T2Tavern freeze (harness run 20261026-135848): the host's enter step
+    /// threw after taking lockSyncMode, before onServerReady / waitForUnlock.
+    /// The waiting client is asked to rejoin on the next tick (no 30 s wait),
+    /// the switch is ended (lock released, fade-out), and its rejoin's Join is
+    /// not parked.
+    #[test]
+    fn dead_switch_rejoins_and_ends() {
+        let Some((orig, code)) = sim_image() else {
+            return;
+        };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
+        s.tick();
+        let a = s.connect();
+        s.join_arrives(a);
+        s.step_threw();
+        s.now += 0.25;
+        s.tick();
+        assert!(s.at(&Ev::Rejoin(a)).is_some(), "{:?}", s.events);
+        assert!(!s.locked() && s.wait_locks().is_empty());
+        assert!(s.at(&Ev::FadeOut).is_some(), "{:?}", s.events);
+        assert!(s.log.iter().any(|l| l == LOG_DEAD), "{:?}", s.log);
+        s.now += 5.0;
+        s.join_arrives(a);
+        assert_eq!(
+            s.events.iter().filter(|e| **e == Ev::Join(a)).count(),
+            2,
+            "{:?}",
+            s.events
+        );
+        s.run_to(4.0 * JOIN_CAP);
+        assert_eq!(s.at(&Ev::Stop(a)), None, "{:?}\n{:?}", s.events, s.log);
+    }
+
+    /// A dead switch with a switch queued behind it runs that one instead of
+    /// fading out; with no client waiting nobody is asked to rejoin.
+    #[test]
+    fn dead_switch_runs_the_queued_one() {
+        let Some((orig, code)) = sim_image() else {
+            return;
+        };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
+        s.tick();
+        s.step_threw();
+        s.hold();
+        s.tick();
+        assert_eq!(s.events, [Ev::Process]);
+        assert!(!s.locked());
+    }
+
+    /// Unchanged: a live switch (lock held, its next step parked) waits for
+    /// its client up to TIMEOUT.
+    #[test]
+    fn live_switch_is_not_dead() {
+        let Some((orig, code)) = sim_image() else {
+            return;
+        };
+        let p = plan(&orig).expect("plan");
+        let mut s = Sim::new(&code, &p, orig.functions.len(), orig.globals.len());
+        s.tick();
+        let a = s.connect();
+        s.join_arrives(a);
+        s.set(s.ctrl, p.lock_sync, V::B(true));
+        s.phase();
+        s.run_to(TIMEOUT - 1.0);
+        assert!(s.locked());
+        assert_eq!(s.at(&Ev::Rejoin(a)), None, "{:?}", s.events);
+        assert!(!s.log.iter().any(|l| l == LOG_DEAD));
     }
 }

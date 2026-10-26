@@ -316,7 +316,12 @@ its game reloads, reconnects and full-syncs the state the host moved on to,
 getting its own `ent.Player` (and units) back through the vanilla Join
 handler's `set_ownerObject`; a kicked client still connected 30 s later is
 `stop()`ped; (3) runs the parked callbacks exactly like `onClientReady__impl`'s
-tail (copied op for op). The host's Join handler parks a Join that arrives
+tail (copied op for op); (4) ends a dead switch: `lockSyncMode` held with no
+step parked (a host step threw between taking the lock and parking its next
+step; net_guard logged and swallowed it): its waiting clients are asked to
+rejoin at once, then the lock is released, the next queued switch runs, else
+`safeFadeOut`, as a switch's last step does. Before, the guest stayed black and
+its rejoin's Join was parked until it was disconnected. The host's Join handler parks a Join that arrives
 during a switch (`lockSyncMode`, a non-empty wait/callback/queue list, or a
 phase begun less than 3 s ago) and the tick replays it when the switch ends (a
 switch still running 90 s after a client's own Join disconnects that client instead):
