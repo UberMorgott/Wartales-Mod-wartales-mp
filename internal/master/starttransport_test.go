@@ -61,19 +61,26 @@ func TestStartAnswerFollowsTheGuestsLinks(t *testing.T) {
 		guests map[string]bool // name -> over SDR
 		want   string          // serverID prefix
 		sdr    bool            // lobby made under -transport sdr
+		hostID string          // default S5d6de506
 	}{
-		{"alone", nil, "R127.0.0.1:14250:", false},
-		{"all direct (#7: LAN code join)", map[string]bool{"loftyrogue": false}, "R127.0.0.1:14250:", false},
-		{"all over SDR", map[string]bool{"a": true, "b": true}, "S5d6de506", false},
-		{"mixed", map[string]bool{"steamy": true, "coded": false}, "Игроки steamy вошли через Steam", false},
-		{"SDR lobby alone", nil, "S5d6de506", true},
-		{"SDR lobby, code join", map[string]bool{"coded": false}, "R127.0.0.1:14250:", true},
+		{"alone", nil, "R127.0.0.1:14250:", false, ""},
+		{"all direct (#7: LAN code join)", map[string]bool{"loftyrogue": false}, "R127.0.0.1:14250:", false, ""},
+		{"all over SDR", map[string]bool{"a": true, "b": true}, "S5d6de506", false, ""},
+		{"mixed", map[string]bool{"steamy": true, "coded": false}, "Игроки steamy вошли через Steam", false, ""},
+		// -transport sdr: isSteamOnly's old verdict (every member id a Steam id)
+		{"SDR lobby alone", nil, "S5d6de506", true, ""},
+		{"SDR lobby, Steam ids over mixed links", map[string]bool{"ab": false, "cd": true}, "S5d6de506", true, ""},
+		{"SDR lobby, a non-Steam id", map[string]bool{"coded": false}, "R127.0.0.1:14250:", true, ""},
+		{"SDR lobby, non-Steam host alone", nil, "R127.0.0.1:14250:", true, "X1"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := &Server{opt: Options{Log: log.New(io.Discard, "", 0), RelayPort: 14250, HostPW: "hpw", SlavePW: "spw", Transport: ModeAuto}}
 			s.lobbies = newStore(s)
 			host := localPeer{game: "S5d6de506"}
+			if c.hostID != "" {
+				host.game = c.hostID
+			}
 			l := &lobby{id: "L1D", owner: host.game, transport: TransportDirect}
 			if c.sdr {
 				l.id, l.transport = "L1", TransportSDR

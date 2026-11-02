@@ -21,8 +21,9 @@ import (
 //     into its vanilla Steam path, carried over SDR by the shim;
 //   - both kinds: a message naming the Steam players. It is not a platform id,
 //     so the same callback shows it and the start fails cleanly;
-//   - a lobby made under -transport sdr with no direct guest: the Steam path,
-//     as the game's own isSteamOnly test chose before it was bypassed.
+//   - a lobby made under -transport sdr whose members all have Steam ids: the
+//     host's id, what the game's own isSteamOnly test chose before it was
+//     bypassed (Lobby.setupPlatform: onServerID(getUser().id)).
 //
 // -transport direct keeps the relay whatever the links.
 func (s *Server) startAnswer() map[string]any {
@@ -32,11 +33,16 @@ func (s *Server) startAnswer() map[string]any {
 	}
 	var host Peer
 	var steam, direct []string
-	sdrLobby := false
+	var steamOnly string // the owner of an SDR lobby of Steam ids only
 	s.lobbies.mu.Lock()
 	if l := s.lobbies.lobbies[s.lobbies.inviteLobby]; l != nil {
-		sdrLobby = l.transport == TransportSDR
+		if l.transport == TransportSDR && len(l.users) > 0 {
+			steamOnly = l.owner
+		}
 		for _, u := range l.users {
+			if !uid.IsSteam(u.ID) {
+				steamOnly = ""
+			}
 			switch {
 			case u.peer == nil:
 			case !u.peer.Remote():
@@ -55,7 +61,10 @@ func (s *Server) startAnswer() map[string]any {
 	s.lobbies.mu.Unlock()
 
 	switch {
-	case len(steam) == 0 && !(sdrLobby && len(direct) == 0):
+	case steamOnly != "":
+		s.opt.Log.Printf("master: game start: SDR lobby of Steam ids: the game's Steam path (%s)", steamOnly)
+		return map[string]any{"serverID": steamOnly}
+	case len(steam) == 0:
 		s.opt.Log.Printf("master: game start: %d guest(s), all over a direct link: our relay", len(direct))
 		return relay
 	case len(direct) == 0 && host != nil && uid.IsSteam(host.GameID()):
