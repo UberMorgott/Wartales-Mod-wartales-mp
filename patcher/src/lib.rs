@@ -55,6 +55,7 @@ mod log_error_cast;
 mod loot_level;
 mod loot_all;
 mod marker_names;
+mod master_config;
 mod mirror;
 mod mod_version;
 mod net_guard;
@@ -217,6 +218,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     mode_windows::patch_mode_windows(&mut code);
     stale_lobby::patch_stale_lobby(&mut code);
     log_error_cast::patch_log_error_cast(&mut code);
+    master_config::patch_master_config(&mut code);
     start_transport::patch_start_transport(&mut code);
     reload_route::patch_reload_route(&mut code);
     reconnect::patch_reconnect(&mut code);

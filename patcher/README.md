@@ -537,6 +537,15 @@ never ran and a host whose relay connect failed loaded forever. The cast is now
 `Std.string(e)` (same op count): the error text is logged and the failure path
 runs. Skipped (logged) on mismatch.
 
+**Master config** (`src/master_config.rs`): `Const.getMPManConfig` (from
+`Main.initMpman`) lists `master.shirogames.com` and `master2.shirogames.com`,
+port 60442, `ssl: true`. Both hosts now load `"127.0.0.1"` and `ssl` is
+`false` (same op count): the game talks plain WebSocket to the master inside
+winmm.dll, no DNS hook, TLS or CA install. Harness builds read
+`WARTALES_MP_TEST_INSTANCE=N` (1..9) at patch time and use `127.0.0.N`.
+Skipped (logged) on mismatch, which refuses the image: never plaintext to a
+public host.
+
 **Fade chain** (`src/fade_chain.rs`): vanilla `Game.fadeTo` dropped a fade
 asked for while a no-break one (any fadeIn) ran ("Interrupted fade"), so its
 onEnd never ran. Every mode switch parks its next step in its fadeIn's onEnd:
