@@ -7,7 +7,7 @@
 #
 # Build order (the exe is embedded into the DLL, so it must exist first):
 #   1. gendef reads System32\winmm.dll  -> winmm_stubs.c + winmm.def
-#      hlpatchgen (internal/hlpatch)    -> proxy\hlpatch.h
+#      hlpatchgen (helper hlpatch.rs)   -> proxy\hlpatch.h
 #   2. go build                          -> wartales-mp.exe   (the final helper)
 #   3. objcopy wraps that exe            -> embed.o           (a linkable blob)
 #   3b. cargo builds helper\ (Rust crate wartales-mp, patcher\ = wartales-tips linked in as an
@@ -76,23 +76,21 @@ $work = Join-Path $OutDir 'obj'
 New-Item -ItemType Directory -Force $work | Out-Null
 
 # 1. Generate the forwarder thunks and the aliasing .def from the real winmm.
+#    The generators are bins of the helper crate (helper\src\bin).
 $stubs = Join-Path $work 'winmm_stubs.c'
 $def   = Join-Path $work 'winmm.def'
-Push-Location $repo
-try {
-    & go run ./tools/gendef -in $SystemDll -library winmm.dll -stubs $stubs -out $def
-    if ($LASTEXITCODE -ne 0) { throw 'gendef failed' }
-} finally { Pop-Location }
+#    Same cargo flags as step 3b, so -Test does not build the crate twice.
+$cargoTest = if ($Test) { @('--features', 'harness', '--target-dir', (Join-Path $repo 'helper\target-test')) } else { @() }
+$genArgs = @('run', '--release', '--quiet', '--target', 'x86_64-pc-windows-gnu', '--manifest-path', (Join-Path $repo 'helper\Cargo.toml')) + $cargoTest + @('--bin')
+& cargo @genArgs gendef -- -in $SystemDll -library winmm.dll -stubs $stubs -out $def
+if ($LASTEXITCODE -ne 0) { throw 'gendef failed' }
 $forwards = (Select-String -Path $def -Pattern '=' -SimpleMatch).Count
 Write-Host ("winmm.dll: {0} forwarded exports" -f $forwards)
 
-# 1b. Regenerate the HashLink bytecode patch table from internal/hlpatch, so the
-#     committed header can never drift from the tested Go table.
-Push-Location $repo
-try {
-    & go run ./tools/hlpatchgen -out (Join-Path $PSScriptRoot 'proxy\hlpatch.h')
-    if ($LASTEXITCODE -ne 0) { throw 'hlpatchgen failed' }
-} finally { Pop-Location }
+# 1b. Regenerate the HashLink bytecode patch table from helper\src\hlpatch.rs, so
+#     the committed header can never drift from the tested table.
+& cargo @genArgs hlpatchgen -- -out (Join-Path $PSScriptRoot 'proxy\hlpatch.h')
+if ($LASTEXITCODE -ne 0) { throw 'hlpatchgen failed' }
 
 # 2. Build the helper exe first: it is embedded into the DLL below.
 #    Release strips symbols (-s -w); the default keeps them for debugging.
@@ -128,7 +126,6 @@ try {
 $crate = Join-Path $repo 'helper'
 Push-Location $crate
 try {
-    $cargoTest = if ($Test) { @('--features', 'harness', '--target-dir', 'target-test') } else { @() }
     & cargo build --release --target x86_64-pc-windows-gnu @cargoTest
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed for helper' }
 } finally { Pop-Location }
