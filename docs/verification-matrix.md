@@ -26,7 +26,6 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | dialog_inventory (reworked 2026-11-02) | PASS | the f9047d8 hide is gone (owner: panels stay over a shared dialog); co-op skips the never-restored hide in playConfessionSetup and Ruins.onSwitched. Runs `20261102-104644`, `20261102-105454`: host and guest `invVisible` true in world.Confession (before: false on both). Ruins entry unit only |
 | camp_talk | unit | gate refusal not exercised |
 | camp_any_unit | unit | |
-| camp_choice | PASS | R2 S7: aptitude 1 -> 2 logged on host, both dumps |
 | hold_speed | unit | |
 | loot_level (higher-level drops) | unit | |
 | armor_any | unit | |
@@ -42,7 +41,6 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | drop_in | PASS | R2 S4; R6: guest WM_CLOSE, relaunch, `join FW00009QNCC` into the running game |
 | returning_units | PASS | R2 S4: guest owns its units again after rejoin |
 | diag | PASS | R6: `mp: error stack` lines in shim.log |
-| activity_diag | unit | |
 | follow | unit | |
 | marker_names | PASS | R5/R6 shots: player labels on the world map |
 | skill_cost | unit | |

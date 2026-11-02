@@ -5,10 +5,8 @@
 // order by `patch_image`. Each pass validates the shapes it edits; on a mismatch it
 // leaves the image untouched and reports it (`skipped`), and `patch_image` then refuses
 // the whole image: a game build the co-op set does not fully match runs unpatched,
-// never half-patched. Only the print-only diagnostics (diag, activity_diag,
-// camp_choice) are skipped alone. What each pass does: patcher/README.md.
+// never half-patched. Only the print-only diagnostic diag is skipped alone. What each pass does: patcher/README.md.
 
-mod activity_diag;
 mod activity_injury;
 mod alive_bind;
 mod all_inv;
@@ -20,7 +18,6 @@ mod battle_rejoin;
 mod battle_takeover;
 mod camp_any_unit;
 mod camp_chest;
-mod camp_choice;
 mod camp_talk;
 mod career_plan;
 mod censer_tip;
@@ -180,7 +177,6 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     camp_talk::patch_camp_talk(&mut code);
     fake_npc::patch_fake_npc(&mut code);
     camp_any_unit::patch_camp_any_unit(&mut code);
-    camp_choice::patch_camp_choice(&mut code);
     hold_speed::patch_hold_speed(&mut code);
     loot_level::patch_loot_level(&mut code);
     loot_level::patch_armor_any(&mut code);
@@ -198,7 +194,6 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     returning_units::patch_returning_units(&mut code);
     fade_chain::patch_fade_chain(&mut code);
     diag::patch_diag(&mut code);
-    activity_diag::patch_activity_diag(&mut code);
     follow::patch_follow(&mut code);
     marker_names::patch_marker_names(&mut code);
     skill_cost::patch_skill_cost(&mut code);
