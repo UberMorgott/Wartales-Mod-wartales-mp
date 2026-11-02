@@ -150,6 +150,7 @@ impl Server {
         let on_link: Arc<dyn Fn(ConnRef) + Send + Sync> = Arc::new(on_link);
         loop {
             let (c, _) = ln.accept()?;
+            let _ = c.set_nodelay(true); // Go's default: game frames are small and latency-bound
             let (s, on_link) = (self.clone(), on_link.clone());
             spawn(&self.log, move || s.dispatch(Arc::new(c), &*on_link));
         }

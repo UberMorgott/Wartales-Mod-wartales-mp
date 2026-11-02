@@ -213,8 +213,11 @@ impl Socket {
                     TcpStream::connect_timeout(&a, Duration::from_secs(3))
                         .map_err(anyhow::Error::from)
                 });
-            if let Err(e) = &c {
-                logf!(me.log, "punch: relay {} for {from}: {e:#}", me.relay);
+            match &c {
+                Ok(c) => {
+                    let _ = c.set_nodelay(true); // Go's default
+                }
+                Err(e) => logf!(me.log, "punch: relay {} for {from}: {e:#}", me.relay),
             }
             me.splice(key, c.ok());
         });
