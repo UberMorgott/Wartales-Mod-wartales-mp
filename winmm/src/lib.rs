@@ -18,6 +18,7 @@ pub mod link;
 pub mod master;
 pub mod modver;
 pub mod nat;
+pub mod net;
 pub mod punch;
 pub mod relay;
 pub mod sdrbridge;
