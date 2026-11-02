@@ -9,8 +9,8 @@ import (
 	"github.com/UberMorgott/wartales-mp/internal/uid"
 )
 
-// startAnswer is instance/get for the host's own game, asked when it starts a
-// direct-marked lobby (Lobby.setupPlatform). The game's transport is chosen
+// startAnswer is instance/get for the host's own game, asked whenever it
+// starts (Lobby.setupPlatform, patcher start_transport.rs). The game's transport is chosen
 // here, from how the guests actually joined (issue #7), not at lobby creation:
 //
 //   - no guest, or every guest over a direct TCP link: our relay
@@ -20,7 +20,9 @@ import (
 //     which the game's patched callback (patcher start_transport.rs) turns
 //     into its vanilla Steam path, carried over SDR by the shim;
 //   - both kinds: a message naming the Steam players. It is not a platform id,
-//     so the same callback shows it and the start fails cleanly.
+//     so the same callback shows it and the start fails cleanly;
+//   - a lobby made under -transport sdr with no direct guest: the Steam path,
+//     as the game's own isSteamOnly test chose before it was bypassed.
 //
 // -transport direct keeps the relay whatever the links.
 func (s *Server) startAnswer() map[string]any {
@@ -30,8 +32,10 @@ func (s *Server) startAnswer() map[string]any {
 	}
 	var host Peer
 	var steam, direct []string
+	sdrLobby := false
 	s.lobbies.mu.Lock()
 	if l := s.lobbies.lobbies[s.lobbies.inviteLobby]; l != nil {
+		sdrLobby = l.transport == TransportSDR
 		for _, u := range l.users {
 			switch {
 			case u.peer == nil:
@@ -51,7 +55,7 @@ func (s *Server) startAnswer() map[string]any {
 	s.lobbies.mu.Unlock()
 
 	switch {
-	case len(steam) == 0:
+	case len(steam) == 0 && !(sdrLobby && len(direct) == 0):
 		s.opt.Log.Printf("master: game start: %d guest(s), all over a direct link: our relay", len(direct))
 		return relay
 	case len(direct) == 0 && host != nil && uid.IsSteam(host.GameID()):

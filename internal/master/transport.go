@@ -15,13 +15,13 @@ import (
 type Transport int
 
 const (
-	// TransportDirect marks the lobby id (DirectLobbyMark): the game's
-	// isSteamOnly is false (patcher direct_lobby.rs), it asks instance/get and
-	// is pointed at our relay on the host's public endpoint.
+	// TransportDirect marks the lobby id (DirectLobbyMark); at start the
+	// host's game asks instance/get and startAnswer points it at our relay, or
+	// at its Steam path when every guest joined over SDR.
 	TransportDirect Transport = iota
-	// TransportSDR: an unmarked lobby id and the players' real Steam ids, so
-	// Lobby.isSteamOnly is true, the game takes its Steam path, and the shim
-	// carries it over ISteamNetworkingMessages (SDR).
+	// TransportSDR: an unmarked lobby id and the players' real Steam ids;
+	// startAnswer gives the game its Steam path, and the shim carries it over
+	// ISteamNetworkingMessages (SDR).
 	TransportSDR
 )
 

@@ -28,7 +28,6 @@ mod coop_spectate;
 mod customize_slots;
 mod debrief;
 mod diag;
-mod direct_lobby;
 mod reload_route;
 mod start_transport;
 mod dialog_inventory;
@@ -214,7 +213,6 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     mode_windows::patch_mode_windows(&mut code);
     stale_lobby::patch_stale_lobby(&mut code);
     log_error_cast::patch_log_error_cast(&mut code);
-    direct_lobby::patch_direct_lobby(&mut code);
     start_transport::patch_start_transport(&mut code);
     reload_route::patch_reload_route(&mut code);
     window_drag::patch_window_drag(&mut code);

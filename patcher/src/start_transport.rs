@@ -2,10 +2,16 @@
 //
 // The game's transport is chosen when the host starts (issue #7).
 //
-// Every lobby of our master is direct-marked (direct_lobby.rs), so the host's
-// `Lobby.setupPlatform` always asks instance/get, and our master answers from
-// how the guests actually joined (internal/master/starttransport.go). The
-// answer callback (Lobby.hx:607-619) only knows a relay:
+// `Lobby.setupPlatform` (Lobby.hx:589) starts with
+//
+//   if (isSteamOnly()) { onServerID(getUser().id, null); return; }
+//
+// (every player id a Steam id: the vanilla Steam path, no instance/get). Our
+// master names every member by the id its game calls itself, so that test says
+// nothing about how the guests joined: its `JFalse` becomes a `JAlways`, the
+// host's game always asks instance/get, and our master answers from how the
+// guests actually joined (internal/master/starttransport.go). The answer
+// callback (Lobby.hx:607-619) only knows a relay:
 //
 //   if (r == null) { trace("No server found"); p(null, null); return; }
 //   switch getPlatform(r.serverID) {
@@ -28,6 +34,8 @@ use crate::asm::Asm;
 use crate::diag::static_fn;
 
 struct Plan {
+    /// setupPlatform and its `JFalse isSteamOnly()` (op 1).
+    setup_fi: usize,
     fi: usize,
     /// The op the RelayP2P test jumps to when it fails (the default branch).
     at: usize,
@@ -75,6 +83,14 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         }
     }
     let fi = found.context("setupPlatform: no instance/get callback")?;
+    let steam_only = method(code, lobby_t, "isSteamOnly")?.findex;
+    if !matches!(
+        (setup.ops.first(), setup.ops.get(1)),
+        (Some(Opcode::Call1 { dst, fun, .. }), Some(Opcode::JFalse { cond, .. }))
+            if *fun == steam_only && cond == dst
+    ) {
+        bail!("setupPlatform: does not start with `if (isSteamOnly())`");
+    }
     let f = &code.functions[fi];
     // ... Field sid = r.serverID; Call1 getPlatform(sid); NullCheck; EnumIndex v;
     // Int k = 11; JNotEq v, k -> default.
@@ -161,6 +177,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("TitleScreen.message: unexpected signature");
     }
     Ok(Plan {
+        setup_fi: fun_index(code, setup.findex)?,
         fi,
         at,
         test,
@@ -180,6 +197,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
 }
 
 fn apply(code: &mut Bytecode, p: Plan) {
+    let f = &mut code.functions[p.setup_fi];
+    let Opcode::JFalse { offset, .. } = f.ops[1] else { unreachable!() };
+    f.ops[1] = Opcode::JAlways { offset };
+    eprintln!("patched start transport fn@{} op 1: the host always asks instance/get", f.findex.0);
     let steam = int_const(code, p.steam);
     let unknown = int_const(code, p.unknown);
     let f = &mut code.functions[p.fi];
@@ -267,7 +288,7 @@ mod tests {
         let Some(image) = game() else { return };
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
-        let (fi, at, test) = (p.fi, p.at, p.test);
+        let (fi, at, test, setup) = (p.fi, p.at, p.test, p.setup_fi);
         let mut code = read(&image);
         patch_start_transport(&mut code);
         let mut patched = Vec::new();
@@ -275,8 +296,17 @@ mod tests {
         let back = read(&patched);
         for (i, (a, b)) in orig.functions.iter().zip(&back.functions).enumerate() {
             let same = format!("{:?}", a.ops) == format!("{:?}", b.ops) && a.regs == b.regs;
-            assert_eq!(same, i != fi, "function #{i} (fn@{})", a.findex.0);
+            assert_eq!(same, i != fi && i != setup, "function #{i} (fn@{})", a.findex.0);
         }
+        // setupPlatform: only the isSteamOnly jump, same target.
+        let (a, b) = (&orig.functions[setup], &back.functions[setup]);
+        let (Opcode::JFalse { offset: o1, .. }, Opcode::JAlways { offset: o2 }) = (&a.ops[1], &b.ops[1])
+        else {
+            panic!("isSteamOnly jump");
+        };
+        assert_eq!(o1, o2);
+        assert_eq!(a.ops.len(), b.ops.len());
+        assert!((0..a.ops.len()).all(|k| k == 1 || format!("{:?}", a.ops[k]) == format!("{:?}", b.ops[k])));
         let (a, b) = (&orig.functions[fi], &back.functions[fi]);
         let n = b.ops.len() - a.ops.len();
         assert_eq!(n, 11);

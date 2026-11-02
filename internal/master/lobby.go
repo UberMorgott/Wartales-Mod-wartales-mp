@@ -134,10 +134,10 @@ func (s *store) syncInviteLocked() {
 
 // newLobbyID returns an id whose first character is a valid UserID platform
 // char ('L' = Lobby); the client rejects anything else.
-// DirectLobbyMark ends the id of every lobby on our direct relay. The game
-// reads it (patcher direct_lobby.rs: Lobby.isSteamOnly is false for such a
-// lobby), so a lobby whose members all have Steam ids still asks instance/get
-// and plays over our relay. An SDR lobby id is "L" + lowercase hex only.
+// DirectLobbyMark ends the id of every lobby on our direct relay, so a guest's
+// master can tell the host's verdict (logHostTransport). The host's game asks
+// instance/get either way (patcher start_transport.rs) and startAnswer picks
+// the transport. An SDR lobby id is "L" + lowercase hex only.
 const DirectLobbyMark = "D"
 
 func newLobbyID(t Transport) string {

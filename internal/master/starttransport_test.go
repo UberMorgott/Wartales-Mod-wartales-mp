@@ -60,11 +60,14 @@ func TestStartAnswerFollowsTheGuestsLinks(t *testing.T) {
 		name   string
 		guests map[string]bool // name -> over SDR
 		want   string          // serverID prefix
+		sdr    bool            // lobby made under -transport sdr
 	}{
-		{"alone", nil, "R127.0.0.1:14250:"},
-		{"all direct (#7: LAN code join)", map[string]bool{"loftyrogue": false}, "R127.0.0.1:14250:"},
-		{"all over SDR", map[string]bool{"a": true, "b": true}, "S5d6de506"},
-		{"mixed", map[string]bool{"steamy": true, "coded": false}, "Игроки steamy вошли через Steam"},
+		{"alone", nil, "R127.0.0.1:14250:", false},
+		{"all direct (#7: LAN code join)", map[string]bool{"loftyrogue": false}, "R127.0.0.1:14250:", false},
+		{"all over SDR", map[string]bool{"a": true, "b": true}, "S5d6de506", false},
+		{"mixed", map[string]bool{"steamy": true, "coded": false}, "Игроки steamy вошли через Steam", false},
+		{"SDR lobby alone", nil, "S5d6de506", true},
+		{"SDR lobby, code join", map[string]bool{"coded": false}, "R127.0.0.1:14250:", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -72,6 +75,9 @@ func TestStartAnswerFollowsTheGuestsLinks(t *testing.T) {
 			s.lobbies = newStore(s)
 			host := localPeer{game: "S5d6de506"}
 			l := &lobby{id: "L1D", owner: host.game, transport: TransportDirect}
+			if c.sdr {
+				l.id, l.transport = "L1", TransportSDR
+			}
 			l.users = append(l.users, &member{ID: host.game, Name: "host", peer: host})
 			for n, sdr := range c.guests {
 				l.users = append(l.users, &member{ID: "S" + n, Name: n, peer: linkPeer(t, n, sdr)})

@@ -77,6 +77,8 @@ Crockford base32, как `UnifiedCode.cs` в PhoenixPoint\Multiplayer2. Direct:
 
 ### Лестница транспортов: direct → SDR
 
+> 2026-11-02: тест `isSteamOnly` в `setupPlatform` обойдён (`patcher/src/start_transport.rs`): хост всегда спрашивает `instance/get`, транспорт игры выбирает мастер при старте (`startAnswer`, `internal/master/starttransport.go`); `direct_lobby.rs` удалён. Ниже — история.
+
 Переключатель — uid участников лобби. `Lobby.isSteamOnly@24596` возвращает true, если uid
 КАЖДОГО участника начинается с `S` (платформенный символ Steam). Тогда
 `Lobby.setupPlatform@24597` вообще не шлёт `instance/get`: хост отдаёт гостям свой

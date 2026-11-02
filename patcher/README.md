@@ -530,12 +530,14 @@ captured and the guests waiting forever. The dropped fade is now queued: the
 running fade's onEnd is wrapped to run first, then start the new fade with the
 same arguments. Skipped (logged) on mismatch.
 
-**Direct lobby** (`src/direct_lobby.rs`): lobby members are named by their
-games' own ids on both transports (internal/master `idOf`), so a lobby of
-Steam players looks Steam-only to `Lobby.isSteamOnly` (only caller
-`setupPlatform`). A prologue returns false when `mpLobby.id` ends in 'D', the
-mark our master gives every direct-relay lobby (`DirectLobbyMark`): the host
-asks `instance/get` and plays over our relay. Skipped (logged) on mismatch.
+**Start transport** (`src/start_transport.rs`): lobby members are named by
+their games' own ids on both transports (internal/master `idOf`), so
+`Lobby.isSteamOnly` says nothing about how the guests joined. Its test at the
+top of `setupPlatform` becomes a `JAlways`: the host always asks
+`instance/get`, and our master answers from the guests' links (relay, the
+host's Steam id, or a reason). The answer callback gets a Steam case
+(`p(serverID, null)`, the vanilla Steam path) and an Unknown case (the reason
+shown, then the vanilla failure). Skipped (logged) on mismatch.
 
 **Style guard** (`src/style_guard.rs`): domkit's `Properties.applyStyle` saves
 the static `APPLY_LOOPS`, counts style passes in it and restores it at the end;
