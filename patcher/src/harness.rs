@@ -359,6 +359,12 @@ struct Ctx {
     end_turn: RefFun,
     /// `camp`: GameUI.toggleCamp (the HUD's camp button).
     toggle_camp: RefFun,
+    /// `inv` / `paths` / `sheet`: GameUI.toggleInventory, togglePaths,
+    /// showUnit (the HUD buttons / a unit portrait); GameInventory.inventory.
+    toggle_inv: RefFun,
+    toggle_paths: RefFun,
+    show_unit: RefFun,
+    inv_panel: (RefField, RefType),
     /// `talk`: GameState.get_confession, Confession.getPending, its `unit`,
     /// Controller.playCampConfession (the camp talk on the speaker).
     get_confession: (RefFun, RefType),
@@ -958,6 +964,10 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         inv_auth: mfn(inv_t, "hasAuthority", &[inv_t], bool_t)?,
         end_turn: mfn(battle_t, "endTurn", &[battle_t], void_t)?,
         toggle_camp: mfn(game_ui.1, "toggleCamp", &[game_ui.1], void_t)?,
+        toggle_inv: mfn(game_ui.1, "toggleInventory", &[game_ui.1], void_t)?,
+        toggle_paths: mfn(game_ui.1, "togglePaths", &[game_ui.1], void_t)?,
+        show_unit: mfn(game_ui.1, "showUnit", &[game_ui.1, unit_t], void_t)?,
+        inv_panel: field(code, game_inv.1, "inventory")?,
         get_confession: {
             let conf_t = obj_type(code, "st.player.Confession")?;
             (mfn(state_t, "get_confession", &[state_t], conf_t)?, conf_t)
@@ -1468,6 +1478,9 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_song = gs("song");
     let s_endturn = gs("endturn");
     let s_camp = gs("camp");
+    let s_inv = gs("inv");
+    let s_paths = gs("paths");
+    let s_sheet = gs("sheet");
     let s_talk = gs("talk");
     let s_put = gs("put ");
     let s_take = gs("take ");
@@ -1575,6 +1588,8 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let cam = r.r(c.state_camera.1);
     let drg = r.r(c.battle_drag.1);
     let hbar = r.r(c.ui_bar.1);
+    let gwui = r.r(c.global_ui.1);
+    let invp = r.r(c.inv_panel.1);
     let uinv = r.r(c.uinv_t);
     let pk = r.r(c.pick.1);
     let hk = r.r(c.pick_k.1);
@@ -2446,6 +2461,60 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("ack");
     a.label("not_camp");
 
+    // verbs: inv / paths (GameUI.toggleInventory / togglePaths, the HUD
+    // buttons), sheet (GameUI.showUnit of the first GameState.getUnits unit)
+    for (v, f, next) in [
+        (s_inv, c.toggle_inv, "not_inv"),
+        (s_paths, c.toggle_paths, "not_paths"),
+    ] {
+        verb(&mut a, v, next, None);
+        a.gg(res, s_nogame);
+        a.gg(gcls, c.game_g);
+        a.fld(g, gcls, c.game_inst);
+        a.if_null(g, "ack");
+        a.fld(gui, g, c.game_ui.0);
+        a.if_null(gui, "ack");
+        a.call(void, f, &[gui]);
+        a.gg(res, s_ok);
+        a.go("ack");
+        a.label(next);
+    }
+    verb(&mut a, s_sheet, "not_sheet", None);
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(gui, g, c.game_ui.0);
+    a.if_null(gui, "ack");
+    a.fld(gst, g, c.g.state);
+    a.if_null(gst, "ack");
+    a.gg(res, s_noelem);
+    a.op(Opcode::Null { dst: rf });
+    a.call(list, c.get_units, &[gst, rf]);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.int(ix, k0);
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.fld(arr, list, c.arr_arr.0);
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::SafeCast { dst: unit, src: d });
+    a.if_null(unit, "ack");
+    a.call(void, c.show_unit, &[gui, unit]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_sheet");
+
     // verb: talk  (camp: Controller.playCampConfession(pending.unit), the right
     // click on the speaker of the pending confession; noelem when none)
     verb(&mut a, s_talk, "not_talk", None);
@@ -3003,6 +3072,35 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.label("no_bar");
     w.lit(code, "null");
     w.a.label("bar_end");
+    // open windows (Std.string of globalUI.windows / mode.windows) and the
+    // inventory panel's visibility: what a mode switch or a dialog closes
+    w.lit(code, ",\"gwins\":");
+    w.a.fld(gwui, g, c.global_ui.0);
+    w.a.op(Opcode::Null { dst: list });
+    w.a.if_null(gwui, "gw_q");
+    w.a.fld(list, gwui, c.windows);
+    w.a.label("gw_q");
+    w.obj_q(list);
+    w.lit(code, ",\"mwins\":");
+    w.a.fld(mode, g, c.g.mode.0);
+    w.a.op(Opcode::Null { dst: list });
+    w.a.if_null(mode, "mw_q");
+    w.a.fld(list, mode, c.windows);
+    w.a.label("mw_q");
+    w.obj_q(list);
+    w.lit(code, ",\"invVisible\":");
+    w.a.fld(gui, g, c.game_ui.0);
+    w.a.if_null(gui, "no_invp");
+    w.a.fld(ginv, gui, c.game_inv.0);
+    w.a.if_null(ginv, "no_invp");
+    w.a.fld(invp, ginv, c.inv_panel.0);
+    w.a.if_null(invp, "no_invp");
+    w.a.fld(b, invp, c.obj_visible);
+    w.val(b);
+    w.a.go("invp_end");
+    w.a.label("no_invp");
+    w.lit(code, "null");
+    w.a.label("invp_end");
     // the own inventory's and the chest's scroll areas: scroll, content /
     // viewport height, alignment, their children's y (scrollbar / grid)
     for (key, field) in [

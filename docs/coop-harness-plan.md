@@ -229,6 +229,7 @@ Run 2026-10-26 (`D:\WartalesTest\runs\20261026-115816`, `-120514`, `-121525`): h
 | `put <idx> <n>` / `take <idx> <n>` | own inventory slot idx -> the chest panel's inventory / chest slot idx -> own inventory: `inv._networkOperation(idx, MoveTo(dst, n), false)`, the slot api's authority branch (a drag or right-click move); `noauth` when this game has no authority on the source, `refused` when the operation returns false |
 | `endturn` | `Battle.endTurn` (the HUD's End Turn button; a client asks the host). Run it on the game that owns `battle.currentUnit` |
 | `camp` | `GameUI.toggleCamp` (the camp button: make / leave camp) |
+| `inv` / `paths` / `sheet` | `GameUI.toggleInventory` / `togglePaths` (HUD buttons), `GameUI.showUnit` of the first `GameState.getUnits` unit. Dump: `gwins` / `mwins` (Std.string of `globalUI.windows` / `mode.windows`), `invVisible` |
 | `talk` | camp: `Controller.playCampConfession(Confession.getPending().unit)` (the right click on the speaker); `noelem` when no confession is pending |
 
 `console battle b RatInvasion` starts the Rat Matriarch fight (`b <Data.battle id>`). `console confession <id>` often fails silently (cooldowns / conditions, reported on the console only): `talk` answers `noelem` then; `ConfessionHate` worked on the fixture. Tutorials pause a battle (`tutorial` on both games each step). `Go-Place` waits on the dump's `place.id` (ruins run in `world.Ruins`, not PlaceView). Forge: `craft` / `confirm` may answer `nowindow` when the anvil opens the forge directly; the hits still run.
