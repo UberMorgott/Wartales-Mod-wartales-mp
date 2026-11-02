@@ -164,6 +164,21 @@
 //      5 s). The camp leave prints "mp: camp leave pending: <why|go>" (on
 //      change) and "mp: camp leave closes <type>" on the machine that closes.
 //
+//   D  A player in a minigame gets no other player's window on top of it.
+//      Every window another machine opens reaches this one through
+//      Window.alive (dialogs, the chest search window, confirms, notifies).
+//      Window.alive gets `if (flDefer(this)) return;` in front: while
+//      flMinigame(game) (a visible ActivityWindow, or a started Craft / Alter;
+//      a spectator's hidden minigame window does not count) the window's
+//      `alive` closure goes into Controller.waitGameAlive, which
+//      Controller.update re-runs every frame (the queue vanilla alive uses
+//      while the controller is locked), so it appears once the minigame ends.
+//      Minigame windows themselves (ActivityWindow) never wait. A waiting
+//      window gets `game` set (dispatchRemove reads it); one the host removed
+//      while it waited (`removed`) is dropped. Covers windows another machine
+//      shares (they arrive through alive); a window the host builds itself for
+//      a client's request skips alive and is not deferred on the host.
+//
 // Coordination: the G1 repeat guard still runs the Leave button once per click
 // burst and drops clicks while the mode-switch barrier runs; the pending leave
 // waits for that barrier too and leave() runs once per PlaceView. The follow
@@ -436,6 +451,21 @@ struct Plan {
     set_locked: RefFun,
     /// ui.win.ActivityWindow class global: a running minigame.
     act_win_cls: (RefGlobal, RefType),
+    /// h2d.Object.visible (a spectator's hidden minigame window is no minigame).
+    o_visible: RefField,
+    /// D: Window.alive (fn index, findex, its own closure type), Game.inst,
+    /// Controller.waitGameAlive, ArrayObj.push.
+    alive_fi: usize,
+    alive_fn: RefFun,
+    alive_cl_t: RefType,
+    g_cls: (RefGlobal, RefType),
+    g_inst: RefField,
+    c_wait_alive: F,
+    arr_push: RefFun,
+    /// Window.game / Window.removed (a deferred window knows its game; one removed
+    /// while it waited is dropped).
+    w_game: RefField,
+    w_removed: RefField,
     /// st.Unit.isInTroop (guard 3: the player's own company) and its Null<Bool> result.
     in_troop: RefFun,
     in_troop_t: RefType,
@@ -633,6 +663,42 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("ui.win.ActivityWindow is not a ui.Window");
     }
     let act_win_cls = class_global(code, "ui.win.ActivityWindow")?;
+    let o_visible = typed(obj_type(code, "h2d.Object")?, "visible", t.bool_)?;
+    let alive = method(code, win_t, "alive")?;
+    if fun_args(code, alive) != [win_t] {
+        bail!("unexpected Window.alive signature");
+    }
+    let alive_fi = fun_index(code, alive.findex)?;
+    let alive_fn = alive.findex;
+    // Its own `waitAlive(this.alive)` closure gives the closure type.
+    let alive_cl_t = alive
+        .ops
+        .iter()
+        .find_map(|o| match o {
+            Opcode::InstanceClosure {
+                dst,
+                fun,
+                obj: Reg(0),
+            } if *fun == alive_fn => Some(alive.regs[dst.0 as usize]),
+            _ => None,
+        })
+        .context("Window.alive: no this.alive closure")?;
+    if matches!(alive.ops.first(), Some(Opcode::Call1 { arg0: Reg(0), .. })) {
+        bail!("Window.alive: already hooked");
+    }
+    let w_game = typed(win_t, "game", game_t)?;
+    let w_removed = typed(win_t, "removed", t.bool_)?;
+    let g_cls = class_global(code, "Game")?;
+    let g_inst = typed(g_cls.1, "inst", game_t)?;
+    let c_wait_alive = field(code, ctrl_t, "waitGameAlive")?;
+    if c_wait_alive.1 != arr_t {
+        bail!("Controller.waitGameAlive is not an ArrayObj");
+    }
+    let arr_push = method(code, arr_t, "push")?.findex;
+    match sig(code, arr_push)? {
+        (a, r) if a.len() == 2 && a[0] == arr_t && r == t.i32_ => {}
+        s => bail!("unexpected ArrayObj.push signature {s:?}"),
+    }
     let set_locked = method(code, bp_t, "set_lockedWith")?.findex;
     match sig(code, set_locked)? {
         (a, r) if a.len() == 2 && a[0] == bp_t && a[1] == bp_locked.1 && r == bp_locked.1 => {}
@@ -917,6 +983,16 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         v_leave_cb,
         set_locked,
         act_win_cls,
+        o_visible,
+        alive_fi,
+        alive_fn,
+        alive_cl_t,
+        g_cls,
+        g_inst,
+        c_wait_alive,
+        arr_push,
+        w_game,
+        w_removed,
         in_troop,
         in_troop_t,
         is_multi,
@@ -2764,7 +2840,17 @@ fn add_minigame(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun>
             arg0: acr,
             arg1: w,
         });
+        let aw: &'static str = Box::leak(format!("{head}_aw").into_boxed_str());
+        a.jmp(Opcode::JFalse { cond: b, offset: 0 }, aw);
+        // a spectator's minigame window is kept hidden (coop_spectate): no minigame here
+        a.op(Opcode::Field {
+            dst: b,
+            obj: w,
+            field: p.o_visible,
+        });
         a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
+        a.jmp(Opcode::JAlways { offset: 0 }, head);
+        a.label(aw);
         for &(l, cr, cw, f) in &acts {
             a.op(Opcode::GetGlobal {
                 dst: cr,
@@ -2814,6 +2900,103 @@ fn add_minigame(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun>
     });
     a.op(Opcode::Ret { ret: b });
     push_fn(code, vec![p.game_t], t.bool_, r.0, a.finish(), p.dbg_file)
+}
+
+/// `flDefer(win) -> Bool`, at op 0 of Window.alive (a replicated window arrives
+/// on a client): while this machine runs a minigame (flMinigame), a window
+/// another machine opened waits in Controller.waitGameAlive, which
+/// Controller.update re-runs every frame (the vanilla queue alive uses during a
+/// fade); it shows once the minigame ends. A minigame window itself never waits.
+fn add_defer(code: &mut Bytecode, p: &Plan, minigame: RefFun) -> Result<RefFun> {
+    let t = &p.t;
+    let mut r = Regs(vec![p.win_t]);
+    let (gc, g, b, acr, ctrl, lst, cb, n) = (
+        r.r(p.g_cls.1),
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(p.act_win_cls.1),
+        r.r(p.g_ctrl.1),
+        r.r(p.arr_t),
+        r.r(p.alive_cl_t),
+        r.r(t.i32_),
+    );
+    let mut a = Asm::new();
+    // removed (dispatchRemove) while it waited: dropped, never shown
+    a.op(Opcode::Field {
+        dst: b,
+        obj: Reg(0),
+        field: p.w_removed,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
+    a.op(Opcode::GetGlobal {
+        dst: gc,
+        global: p.g_cls.0,
+    });
+    a.op(Opcode::Field {
+        dst: g,
+        obj: gc,
+        field: p.g_inst,
+    });
+    a.jmp(Opcode::JNull { reg: g, offset: 0 }, "no");
+    a.op(Opcode::GetGlobal {
+        dst: acr,
+        global: p.act_win_cls.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: acr,
+        arg1: Reg(0),
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "no");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: minigame,
+        arg0: g,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "no");
+    a.op(Opcode::Field {
+        dst: ctrl,
+        obj: g,
+        field: p.g_ctrl.0,
+    });
+    a.jmp(Opcode::JNull { reg: ctrl, offset: 0 }, "no");
+    a.op(Opcode::Field {
+        dst: lst,
+        obj: ctrl,
+        field: p.c_wait_alive.0,
+    });
+    a.jmp(Opcode::JNull { reg: lst, offset: 0 }, "no");
+    // dispatchRemove__impl reads this.game while it waits
+    a.op(Opcode::SetField {
+        obj: Reg(0),
+        field: p.w_game,
+        src: g,
+    });
+    a.op(Opcode::InstanceClosure {
+        dst: cb,
+        fun: p.alive_fn,
+        obj: Reg(0),
+    });
+    a.op(Opcode::Call2 {
+        dst: n,
+        fun: p.arr_push,
+        arg0: lst,
+        arg1: cb,
+    });
+    a.label("yes");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("no");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![p.win_t], t.bool_, r.0, a.finish(), p.dbg_file)
 }
 
 /// `flRelease(game)`, every machine while a leave is pending (place, owned
@@ -5132,6 +5315,7 @@ struct Added {
     closable: RefFun,
     dialog: RefFun,
     minigame: RefFun,
+    defer: RefFun,
     release: RefFun,
     update: RefFun,
     paused: RefFun,
@@ -5250,6 +5434,8 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
     let closable = add_closable(code, p, dyn_t)?;
     let dialog = add_dialog(code, p, dyn_t)?;
     let minigame = add_minigame(code, p, dyn_t)?;
+    let defer = add_defer(code, p, minigame)?;
+    guard_hook(&mut code.functions[p.alive_fi], p.t.bool_, p.t.void, defer);
     let release = add_release(code, p, &wg, minigame)?;
     let fns = Fns {
         why,
@@ -5356,6 +5542,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         closable,
         dialog,
         minigame,
+        defer,
         release,
         update,
         paused,
@@ -5366,7 +5553,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
 
 /// Indices of every function `apply` edits.
 fn touched(p: &Plan) -> Vec<usize> {
-    let mut v = vec![p.update_fi, p.try_close_fi, p.leave_fi, p.content_fi];
+    let mut v = vec![p.update_fi, p.try_close_fi, p.leave_fi, p.content_fi, p.alive_fi];
     if let Some(tv) = &p.tav {
         v.extend([tv.ask_fi, tv.close_fi, tv.upd_fi]);
     }
@@ -5391,8 +5578,8 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
     match apply(code, &p) {
         Ok(a) => {
             eprintln!(
-                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, text fn@{}, notify fn@{}, windows fn@{}, dialog fn@{}, minigame fn@{}, release fn@{}), tryClose -> fn@{}, leave -> fn@{}",
-                a.update.0, a.why.0, a.log.0, a.text.0, a.notify.0, a.closable.0, a.dialog.0, a.minigame.0, a.release.0, a.refused.0, a.paused.0
+                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, text fn@{}, notify fn@{}, windows fn@{}, dialog fn@{}, minigame fn@{}, release fn@{}), Window.alive defers to fn@{} during a minigame, tryClose -> fn@{}, leave -> fn@{}",
+                a.update.0, a.why.0, a.log.0, a.text.0, a.notify.0, a.closable.0, a.dialog.0, a.minigame.0, a.release.0, a.defer.0, a.refused.0, a.paused.0
             );
             if let Some(t) = a.tav {
                 eprintln!(
@@ -5436,9 +5623,9 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        // Appended only: 21 functions (+ their types), 15 globals.
+        // Appended only: 22 functions (+ their types), 15 globals.
         let nf = orig.functions.len();
-        assert_eq!(back.functions.len(), nf + 21);
+        assert_eq!(back.functions.len(), nf + 22);
         assert_eq!(&back.types[..orig.types.len()], &orig.types[..]);
         let ng = orig.globals.len();
         assert_eq!(&back.globals[..ng], &orig.globals[..]);
@@ -5481,6 +5668,7 @@ mod tests {
             added.closable,
             added.dialog,
             added.minigame,
+            added.defer,
             added.release,
             added.update,
             added.paused,

@@ -88,6 +88,8 @@ mod tip_overflow;
 mod title_version;
 mod tooltip_input;
 mod window_close;
+mod mode_windows;
+mod rest_report;
 mod window_drag;
 mod work_mirror;
 
@@ -212,6 +214,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loot_all::patch_loot_all(&mut code);
     debrief::patch_debrief(&mut code);
     window_close::patch_window_close(&mut code);
+    mode_windows::patch_mode_windows(&mut code);
     stale_lobby::patch_stale_lobby(&mut code);
     log_error_cast::patch_log_error_cast(&mut code);
     direct_lobby::patch_direct_lobby(&mut code);
@@ -232,6 +235,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     ping_cell::patch_ping_cell(&mut code);
     forge_mirror::patch_forge_mirror(&mut code);
     work_mirror::patch_work_mirror(&mut code);
+    rest_report::patch_rest_report(&mut code);
     coop_spectate::patch_coop_spectate(&mut code);
     timeline_hud::patch_timeline_hud(&mut code);
     activity_injury::patch_activity_injury(&mut code);
