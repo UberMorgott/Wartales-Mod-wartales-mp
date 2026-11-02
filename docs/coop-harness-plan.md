@@ -2,6 +2,8 @@
 
 Status: slices 1 and 2 implemented (2026-10-08, see section 8). Plan Codex reviewed (agrees, with changes folded in below).
 
+> 2026-11-03: the C shim and the Go helper exe are gone; the whole mod is one Rust `winmm.dll` (`winmm/`). Sections 1-7 keep the original plan (`proxy.c`, helper, `build.ps1` of `shim\`) as history; section 8 describes the current seam.
+
 ## 1. Feasibility verdicts (with evidence)
 
 | Question | Verdict | Evidence |
@@ -79,12 +81,11 @@ Cheaper first slice (~0.5 k lines, 1 day): shim+helper seam + driver + `console`
 
 ## 8. Slice 1 (implemented)
 
-Test seam, compiled only by `shim\build.ps1 -Test` (output `dist-test\`, `dist\` stays shippable); all of it carries `WMP_TEST_SEAM` and/or reads `WARTALES_MP_TEST_INSTANCE`:
+Test seam, compiled only by `tools\build.ps1 -Test` (cargo feature `harness`, output `dist-test\`, `dist\` stays shippable); all of it carries `WMP_TEST_SEAM` and/or reads `WARTALES_MP_TEST_INSTANCE`:
 
-- shim `proxy.c` (`#ifdef WMP_TEST`): mutex `Local\wartales-mp-running-N`, master hosts resolve to `127.0.0.N`, helper started as `run -master 127.0.0.N:60442 -port 1425N -transport direct`.
-- helper (Go tag `harness`): `cmd/wartales-mp/testseam_harness.go` (join codes advertise `127.0.0.1:1425N`, verified, no UPnP/STUN; relay listens on loopback only). Lobby member ids need no seam: every lobby names members by their games' own ids (finding 1, fixed).
-- patcher (cargo feature `harness`): `patcher/src/harness.rs`, see below.
-- `shim\seamcheck.ps1` (run by `build.ps1` and `check.ps1`): markers absent from the release `winmm.dll`, from the helper embedded in it (cut out, UPX-unpacked) and from `wartales-mp.exe`; `-Test` requires them.
+- `winmm/src/net.rs` (`mod harness`): mutex `Local\wartales-mp-running-N`, master on `127.0.0.N:60442`, port `1425N`, transport direct; join codes advertise `127.0.0.1:1425N`, verified, no UPnP/STUN; relay listens on loopback only. (Before 2026-11-03: `proxy.c` `#ifdef WMP_TEST` + Go tag `harness`.) Lobby member ids need no seam: every lobby names members by their games' own ids (finding 1, fixed).
+- patcher (cargo feature `harness`): `patcher/src/harness.rs`, see below; the `master_config` pass points instance N at `127.0.0.N`.
+- `tools\build.ps1` checks the markers (ASCII and UTF-16): absent from the release `winmm.dll`, required in the `-Test` one; `tools\harness\setup.ps1` refuses a dll without them.
 
 Verified: saves and `prefs.sav` are game-folder relative (each copy writes its own `save\udat_*.sav` / `prefs.sav`, the real folder's timestamps stay put). Separate uids, masters and relay ports per instance in the logs.
 
@@ -106,7 +107,7 @@ Debug console commands (from the mode constructors; `cargo test --release --feat
 ### Running it
 
 ```powershell
-.\shim\build.ps1 -Release -Test; .\shim\check.ps1 -Test          # dist-test\winmm.dll
+.\tools\build.ps1 -Test             # dist-test\winmm.dll
 .\tools\harness\setup.ps1 -Saves     # D:\WartalesTest\{A,B}: hardlinks + own save\, prefs, test dll (re-run: refreshes the dll)
 .\tools\harness\coop.ps1 start       # run folder D:\WartalesTest\runs\<stamp>\{A,B} = per-instance LOCALAPPDATA
 .\tools\harness\coop.ps1 cmd -Inst A -Line 'dump'      # or 'console <command>'
@@ -208,14 +209,14 @@ Console steps that replace clicks: `console quit` (leave the place, Place consol
 | `enter <placeId>` | `GameState.getPlace(id, checkCities = true)` + `Place.enter(null, null, null)`, as the script API's `enterPlace`: a town's sub-place (T2Tavern, T2Forge) is found under its town. The World console `enter` looks at top-level places only and `Place.create(id, null)`s a missing one: no parent, region `Worldwide` (no `content/script/*.hx`, so no region `globals`) |
 | dump `place` | `{id, parent, region}` of `Game.getCurrentPlace`: parent's id, `getRegion().kind` |
 
-Driver: `coop.ps1 freeze -Inst B` / `thaw -Inst B` (`NtSuspendProcess` / `NtResumeProcess` of the game; its helper and relay connection stay up): a guest that stops answering, background only. Forces the host barrier's 30 s rejoin: `freeze B`, a host switch (`console quit`, `enter X`), wait 35 s, `thaw B`.
+Driver: `coop.ps1 freeze -Inst B` / `thaw -Inst B` (`NtSuspendProcess` / `NtResumeProcess` of the game, and with it the whole mod: master, relay and its connections): a guest that stops answering, background only. Forces the host barrier's 30 s rejoin: `freeze B`, a host switch (`console quit`, `enter X`), wait 35 s, `thaw B`.
 
 Scripts (`tools/harness/scenarios/`): `up.ps1` (start, host the fixture save, slot, join by code, start, `welcome`), `common.ps1` (`T`, `Go-Place`, `Show-Logs`), `spectate.ps1 -Case lockpick|woodcut|ruins|forge|sing` (`Go-Place` waits until both games are in the place view, no fade). `song`: the open `SongRepertoire`'s `onSongChoose` (Play). Spots: TowerBad2 `GearCrate` (LockPick), PoorHamlet `WoodCutting` (WoodCutting), E1Ruins `NinePuzzle` / `CylinderPuzzle` (torches first), T2Forge `Anvil` (Forge), T2Tavern `SingSpot` (Sing, bard job, then `song`).
 
 T2Tavern freeze (runs `20261026-124507`, `-125111`, `-125713`, repro `20261026-135848`): `console enter T2Tavern` created a parentless T2Tavern (dump `place` `{"id":"T2Tavern","parent":null,"region":"Worldwide"}`); its MinstrelT2 element script (`if (globals.desertertrigger)`, line 6) threw `Unknown variable: globals` inside the host's enter step (`onClientReady` -> Controller.hx:527 `onEnd` -> `Place.doEnter` -> `PlaceView.onSwitched` -> `Element.onInit`), net_guard swallowed it, so `onServerReady` / the next `waitForUnlock` never ran and `lockSyncMode` stayed set: guest black at `enter client faded`, its 30 s rejoin's Join parked until JOIN_CAP disconnected it. Harness side: `enter` verb (above). Mod side: `barrier.rs` ends such a dead switch (lock held, nothing parked): its clients rejoin at once. Run `20261026-142109`: dead switch ended in the same ms, guest Join + ReadyToStart 13 s later. Run `20261026-142913`: forced 30 s kicks (`freeze B`) during a leave and an enter: guest back in the world / in T2Tavern. Run `20261026-143420`: `spectate.ps1 -Case sing` PASS (guest `spectate Sing 0`, sees the bard, tavern view again at the end).
 
 ```powershell
-.\shim\build.ps1 -Release -Test; .\tools\harness\setup.ps1
+.\tools\build.ps1 -Test; .\tools\harness\setup.ps1
 .\tools\harness\scenarios\up.ps1
 .\tools\harness\scenarios\spectate.ps1 -Case lockpick   # then -Case forge / ruins / woodcut
 .\tools\harness\coop.ps1 stop
