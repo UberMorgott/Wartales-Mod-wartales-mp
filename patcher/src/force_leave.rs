@@ -64,13 +64,10 @@
 //      So a location modal (MODAL_OK) is closed only when it sits directly over
 //      a guarded lock window in the same list (no parentWindow link exists);
 //      anywhere else it is ignored. UnitInfo closes only as the sheet of a
-//      unit outside the troop (`!unit.isInTroop()`) during an NPC lock.
-//      flRelease (every machine, after the closing): this machine's own lock
-//      that no minigame holds (flMinigame: an ActivityWindow, or a Craft /
-//      Alter whose activity started) and that outlives RELEASE_AFTER s (an
-//      NPC / dialog-action lock, a window under a personal modal, a lock whose
-//      window never opened) is cleared with `me.set_lockedWith(null)`; the mode
-//      switch disposes what stays open. The host leaves with `leave(null)`
+//      unit outside the troop (`!unit.isInTroop()`) during an NPC lock (the
+//      inspect lock is local, npc_inspect.rs: only the reader's machine waits
+//      on it, and closes the sheet). A lock no closable window holds (a window
+//      under a personal modal) waits for its player. The host leaves with `leave(null)`
 //      once flWhy(view, true) is 0: tryClose's own refusals but the gamepad
 //      global-window test (the host's own windows never hold the leave).
 //      Wait timer (every machine, `pend_at` = first pending frame): after
@@ -219,10 +216,6 @@ const WARN_EVERY: f64 = 30.0;
 const PAUSED_EVERY: f64 = 5.0;
 /// Seconds between two rounds of camp close requests (Tool.closeActionWindow RPCs).
 const ASK_EVERY: f64 = 1.0;
-/// Seconds a pending leave lets this machine's own non-minigame lock outlive
-/// its window closing before flRelease clears it.
-const RELEASE_AFTER: f64 = 3.0;
-const RELEASES: &str = "mp: leave releases lock ";
 
 /// Reason codes of `flWhy` / `flDialog` / `tlWhy` / `cpWhy` (0 = nothing refuses) and their log text.
 const REASONS: [&str; 15] = [
@@ -447,8 +440,6 @@ struct Plan {
     /// PlaceView.leave slot (the host leaves without tryClose's own refusals).
     v_leave: RefField,
     v_leave_cb: RefType,
-    /// BasePlayer.set_lockedWith (the networked setter).
-    set_locked: RefFun,
     /// ui.win.ActivityWindow class global: a running minigame.
     act_win_cls: (RefGlobal, RefType),
     /// h2d.Object.visible (a spectator's hidden minigame window is no minigame).
@@ -698,11 +689,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     match sig(code, arr_push)? {
         (a, r) if a.len() == 2 && a[0] == arr_t && r == t.i32_ => {}
         s => bail!("unexpected ArrayObj.push signature {s:?}"),
-    }
-    let set_locked = method(code, bp_t, "set_lockedWith")?.findex;
-    match sig(code, set_locked)? {
-        (a, r) if a.len() == 2 && a[0] == bp_t && a[1] == bp_locked.1 && r == bp_locked.1 => {}
-        s => bail!("unexpected BasePlayer.set_lockedWith signature {s:?}"),
     }
     let mut modal_ok = vec![];
     for name in MODAL_OK {
@@ -981,7 +967,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         dlg,
         v_leave: leave_slot,
         v_leave_cb,
-        set_locked,
         act_win_cls,
         o_visible,
         alive_fi,
@@ -2999,148 +2984,6 @@ fn add_defer(code: &mut Bytecode, p: &Plan, minigame: RefFun) -> Result<RefFun> 
     push_fn(code, vec![p.win_t], t.bool_, r.0, a.finish(), p.dbg_file)
 }
 
-/// `flRelease(game)`, every machine while a leave is pending (place, owned
-/// tavern, camp), after its window closing: this machine's own lock that no
-/// minigame holds and that outlived RELEASE_AFTER s (no closable window took it
-/// away: an NPC / dialog-action lock, a window under a personal modal, a lock
-/// whose window never opened) is cleared with `me.set_lockedWith(null)` (the
-/// networked setter its own lock sites use); the mode switch disposes what is
-/// left open. A minigame lock is kept: only a running minigame holds a leave.
-fn add_release(code: &mut Bytecode, p: &Plan, wg: &WGlobals, minigame: RefFun) -> Result<RefFun> {
-    let f0 = float_const(code, 0.0);
-    let f_after = float_const(code, RELEASE_AFTER);
-    let releases = str_global(code, p.t.str_, RELEASES);
-    let t = &p.t;
-    let mut r = Regs(vec![p.game_t]);
-    let (me, lw, hl, nul, b, now, pa, lim, s_r, x, v) = (
-        r.r(p.g_me.1),
-        r.r(p.bp_locked.1),
-        r.r(p.bp_locked.1),
-        r.r(p.bp_locked.1),
-        r.r(t.bool_),
-        r.r(t.f64_),
-        r.r(t.f64_),
-        r.r(t.f64_),
-        r.r(t.str_),
-        r.r(t.str_),
-        r.r(t.void),
-    );
-    let mut a = Asm::new();
-    a.op(Opcode::Field {
-        dst: me,
-        obj: Reg(0),
-        field: p.g_me.0,
-    });
-    a.jmp(Opcode::JNull { reg: me, offset: 0 }, "end");
-    a.op(Opcode::Field {
-        dst: lw,
-        obj: me,
-        field: p.bp_locked.0,
-    });
-    a.jmp(Opcode::JNull { reg: lw, offset: 0 }, "reset");
-    a.op(Opcode::Call1 {
-        dst: b,
-        fun: p.in_fade,
-        arg0: Reg(0),
-    });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
-    a.op(Opcode::Call1 {
-        dst: b,
-        fun: minigame,
-        arg0: Reg(0),
-    });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "reset");
-    a.op(Opcode::Call0 {
-        dst: now,
-        fun: p.sys_time,
-    });
-    a.op(Opcode::GetGlobal {
-        dst: hl,
-        global: wg.rel_lw,
-    });
-    a.jmp(
-        Opcode::JEq {
-            a: lw,
-            b: hl,
-            offset: 0,
-        },
-        "timed",
-    );
-    a.op(Opcode::SetGlobal {
-        global: wg.rel_lw,
-        src: lw,
-    });
-    a.op(Opcode::SetGlobal {
-        global: wg.rel_at,
-        src: now,
-    });
-    a.jmp(Opcode::JAlways { offset: 0 }, "end");
-    a.label("timed");
-    a.op(Opcode::GetGlobal {
-        dst: pa,
-        global: wg.rel_at,
-    });
-    a.op(Opcode::Sub {
-        dst: pa,
-        a: now,
-        b: pa,
-    });
-    a.op(Opcode::Float {
-        dst: lim,
-        ptr: f_after,
-    });
-    a.jmp(
-        Opcode::JSLt {
-            a: pa,
-            b: lim,
-            offset: 0,
-        },
-        "end",
-    );
-    a.op(Opcode::GetGlobal {
-        dst: s_r,
-        global: releases,
-    });
-    // An object goes to Std.string's Dyn argument as is.
-    a.op(Opcode::Call1 {
-        dst: x,
-        fun: p.std_string,
-        arg0: lw,
-    });
-    a.op(Opcode::Call2 {
-        dst: s_r,
-        fun: p.str_add,
-        arg0: s_r,
-        arg1: x,
-    });
-    a.op(Opcode::Call1 {
-        dst: v,
-        fun: p.println,
-        arg0: s_r,
-    });
-    a.op(Opcode::Null { dst: nul });
-    a.op(Opcode::Call2 {
-        dst: nul,
-        fun: p.set_locked,
-        arg0: me,
-        arg1: nul,
-    });
-    a.label("reset");
-    a.op(Opcode::Null { dst: hl });
-    a.op(Opcode::SetGlobal {
-        global: wg.rel_lw,
-        src: hl,
-    });
-    a.op(Opcode::Float { dst: pa, ptr: f0 });
-    a.op(Opcode::SetGlobal {
-        global: wg.rel_at,
-        src: pa,
-    });
-    a.label("end");
-    a.op(Opcode::Ret { ret: v });
-    push_fn(code, vec![p.game_t], t.void, r.0, a.finish(), p.dbg_file)
-}
-
 /// Close this machine's own lock-holding window (not during a fade), as F2:
 /// `if (!inFade && me.lockedWith != null) { w = closable(game);
 ///  if (w != null && w != g_closed) { g_closed = w; println(CLOSES + name); w.close(); } }`
@@ -3235,7 +3078,6 @@ struct Fns {
     dialog: RefFun,
     text: RefFun,
     notify: RefFun,
-    release: RefFun,
 }
 
 /// Wait-timer globals of the place leave (every machine).
@@ -3246,9 +3088,6 @@ struct WGlobals {
     warned_at: RefGlobal,
     /// The `me.lockedWith` this machine last reported as still holding the leave.
     here_lw: RefGlobal,
-    /// flRelease: the lock it times and since when (sys_time).
-    rel_lw: RefGlobal,
-    rel_at: RefGlobal,
 }
 
 /// `flUpdate(view)`, at the top of PlaceView.update; see the module comment.
@@ -3406,13 +3245,7 @@ fn add_update(
         "timer",
     );
     close_own_tail(&mut a, p, w, s_r, v);
-    // A lock no minigame holds does not outlive the window closing for long.
     a.label("timer");
-    a.op(Opcode::Call1 {
-        dst: v,
-        fun: f.release,
-        arg0: game,
-    });
     // How long this machine has seen the leave pending (el = now - pend_at).
     a.op(Opcode::Call0 {
         dst: now,
@@ -3823,10 +3656,6 @@ fn add_update(
         global: wg.here_lw,
         src: hl,
     });
-    a.op(Opcode::SetGlobal {
-        global: wg.rel_lw,
-        src: hl,
-    });
     a.label("end");
     a.op(Opcode::Ret { ret: v });
     push_fn(code, vec![p.view_t], t.void, r.0, a.finish(), p.dbg_file)
@@ -4056,7 +3885,6 @@ struct TFns {
     closable: RefFun,
     mark: RefFun,
     why: RefFun,
-    release: RefFun,
 }
 
 /// `tlAsk(tavern) -> Bool`, in front of Tavern.askLeave__impl: true = the
@@ -4384,11 +4212,6 @@ fn add_tl_update(code: &mut Bytecode, p: &Plan, tv: &Tav, g: &Globals, f: &TFns)
     close_own_tail(&mut a, p, w, s_r, v);
     // Host: leave through askLeave__impl once nothing refuses.
     a.label("host");
-    a.op(Opcode::Call1 {
-        dst: v,
-        fun: f.release,
-        arg0: game,
-    });
     a.jmp(
         Opcode::JFalse {
             cond: auth,
@@ -5170,7 +4993,6 @@ fn add_cp_close(
     p: &Plan,
     c: &Camp,
     closable: RefFun,
-    release: RefFun,
 ) -> Result<RefFun> {
     let ccloses = str_global(code, p.t.str_, CCLOSES);
     let t = &p.t;
@@ -5285,12 +5107,6 @@ fn add_cp_close(
     close_own_tail(&mut a, p, w, s_r, v);
     a.jmp(Opcode::JAlways { offset: 0 }, "loop");
     a.label("done");
-    // a lock no closable window took away and no minigame holds
-    a.op(Opcode::Call1 {
-        dst: v,
-        fun: release,
-        arg0: game,
-    });
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(true),
@@ -5316,7 +5132,6 @@ struct Added {
     dialog: RefFun,
     minigame: RefFun,
     defer: RefFun,
-    release: RefFun,
     update: RefFun,
     paused: RefFun,
     tav: Option<TAdded>,
@@ -5422,8 +5237,6 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         pend_at: add_global(code, p.t.f64_),
         warned_at: add_global(code, p.t.f64_),
         here_lw: add_global(code, p.bp_locked.1),
-        rel_lw: add_global(code, p.bp_locked.1),
-        rel_at: add_global(code, p.t.f64_),
     };
     let go = p.camp.as_ref().map(|_| add_global(code, p.t.bool_));
     let why = add_why(code, p)?;
@@ -5436,7 +5249,6 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
     let minigame = add_minigame(code, p, dyn_t)?;
     let defer = add_defer(code, p, minigame)?;
     guard_hook(&mut code.functions[p.alive_fi], p.t.bool_, p.t.void, defer);
-    let release = add_release(code, p, &wg, minigame)?;
     let fns = Fns {
         why,
         log,
@@ -5444,7 +5256,6 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         dialog,
         text,
         notify,
-        release,
     };
     let update = add_update(code, p, &g, &wg, &fns, dyn_t)?;
     let paused = add_paused(code, p, &g)?;
@@ -5483,7 +5294,6 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
                 closable,
                 mark,
                 why: twhy,
-                release,
             };
             let ask = add_tl_ask(code, p, tv, &g, &tf)?;
             let tupdate = add_tl_update(code, p, tv, &g, &tf)?;
@@ -5515,7 +5325,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
             };
             let ask = add_cp_ask(code, p, c, cg, &cf)?;
             let cupdate = add_cp_update(code, p, c, cg)?;
-            let close = add_cp_close(code, p, c, closable, release)?;
+            let close = add_cp_close(code, p, c, closable)?;
             guard_hook(&mut code.functions[c.ask_fi], p.t.bool_, p.t.void, ask);
             guard_hook(&mut code.functions[c.close_fi], p.t.bool_, p.t.void, close);
             gtc_hooks(&mut code.functions[c.gtc_fi], p, c, go);
@@ -5543,7 +5353,6 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         dialog,
         minigame,
         defer,
-        release,
         update,
         paused,
         tav,
@@ -5578,8 +5387,8 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
     match apply(code, &p) {
         Ok(a) => {
             eprintln!(
-                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, text fn@{}, notify fn@{}, windows fn@{}, dialog fn@{}, minigame fn@{}, release fn@{}), Window.alive defers to fn@{} during a minigame, tryClose -> fn@{}, leave -> fn@{}",
-                a.update.0, a.why.0, a.log.0, a.text.0, a.notify.0, a.closable.0, a.dialog.0, a.minigame.0, a.release.0, a.defer.0, a.refused.0, a.paused.0
+                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, text fn@{}, notify fn@{}, windows fn@{}, dialog fn@{}, minigame fn@{}), Window.alive defers to fn@{} during a minigame, tryClose -> fn@{}, leave -> fn@{}",
+                a.update.0, a.why.0, a.log.0, a.text.0, a.notify.0, a.closable.0, a.dialog.0, a.minigame.0, a.defer.0, a.refused.0, a.paused.0
             );
             if let Some(t) = a.tav {
                 eprintln!(
@@ -5623,14 +5432,14 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        // Appended only: 22 functions (+ their types), 15 globals.
+        // Appended only: 21 functions (+ their types), 13 globals.
         let nf = orig.functions.len();
-        assert_eq!(back.functions.len(), nf + 22);
+        assert_eq!(back.functions.len(), nf + 21);
         assert_eq!(&back.types[..orig.types.len()], &orig.types[..]);
         let ng = orig.globals.len();
         assert_eq!(&back.globals[..ng], &orig.globals[..]);
         assert_eq!(
-            &back.globals[ng..ng + 15],
+            &back.globals[ng..ng + 13],
             &[
                 p.t.i32_,
                 p.win_t,
@@ -5644,8 +5453,6 @@ mod tests {
                 p.t.f64_,
                 p.t.f64_,
                 p.bp_locked.1,
-                p.bp_locked.1,
-                p.t.f64_,
                 p.t.bool_
             ]
         );
@@ -5669,7 +5476,6 @@ mod tests {
             added.dialog,
             added.minigame,
             added.defer,
-            added.release,
             added.update,
             added.paused,
             ta.mark,
@@ -6036,8 +5842,9 @@ mod tests {
         let first_new = orig.functions.len() + orig.natives.len();
         assert!(roots.iter().all(|f| f.0 >= first_new));
         let ours = reachable(&b, first_new, &roots);
-        // All 21 but flPaused (it hangs off PlaceView.leave, which diag also edits).
-        assert_eq!(ours.len(), 20, "functions the hooks reach");
+        // All 21 but flPaused, flDefer and flMinigame (they hang off PlaceView.leave
+        // and Window.alive, which other passes also edit).
+        assert_eq!(ours.len(), 18, "functions the hooks reach");
         for g in ours {
             check_flow(g);
             check_types(&b, g, 0..g.ops.len());
