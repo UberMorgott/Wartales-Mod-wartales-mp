@@ -1,14 +1,14 @@
-//! wartales-mp: the co-op helper, running inside the game process.
-//!
-//! The winmm.dll shim (shim/proxy) links this staticlib and starts it from its
-//! worker thread via `wartales_mp_start`. The patcher's C ABI
-//! (`wartales_tips_*`, shim/proxy/tips.h) ships in the same library.
+//! wartales-mp: the whole winmm.dll the game loads from its folder. It forwards
+//! every winmm export to System32 (`forward`) and runs the co-op helper inside
+//! the game process.
 
 pub use wartales_tips;
 
 pub mod log;
 pub use log::{rand_bytes, Log};
 pub mod conn;
+pub mod forward;
+pub mod pe;
 
 pub mod applog;
 pub mod code;

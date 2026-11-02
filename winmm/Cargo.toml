@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 harness = ["wartales-tips/harness"]
 
 [dependencies]
-# Linked as an rlib: its C ABI (wartales_tips_*) ships inside this one staticlib.
+# The bytecode patcher, called through its Rust API.
 wartales-tips = { path = "../patcher" }
 anyhow = "1"
 ring = "0.17.14"
@@ -25,7 +25,7 @@ kcp = "0.6.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 quick-xml = "0.42"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"
