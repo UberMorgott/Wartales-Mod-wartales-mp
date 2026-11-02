@@ -295,6 +295,7 @@ impl<'a> Sim<'a> {
                     r[rr(dst)] = self.c.enm(construct.0 as i32, vals)
                 }
                 Opcode::Incr { dst } => r[rr(dst)] = V::I(num(&r[rr(dst)]) + 1),
+                Opcode::Decr { dst } => r[rr(dst)] = V::I(num(&r[rr(dst)]) - 1),
                 // A ref is passed by value: the callee is always a stub.
                 Opcode::Ref { dst, src } => r[rr(dst)] = r[rr(src)].clone(),
                 Opcode::Add { dst, a, b }

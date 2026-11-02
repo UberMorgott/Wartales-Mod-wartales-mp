@@ -1,26 +1,23 @@
 // Copyright (c) 2026 Morgott. Licensed under CC BY-NC 4.0.
 //
-// Battle skill bar: no holes between skills, passives in their own order.
+// Battle skill bar: no page without a skill, passives in their own order.
 //
 // A unit saves its bar per mode as pages of 10 skill ids (`st.Unit.skillsLayouts`,
 // `SkillsLayout.skillBars`). Ids of skills the unit no longer has (other weapon
-// set, items, statuses, replaced skills) are never removed and a new skill takes
-// the first free slot or a new page, so the bar spreads a few skills over many
-// pages, and the vanilla drag-reorder (`PREFS.editSkillbar`) only swaps inside
-// one page. `battle.ui.win.SkillBar.init` (SkillBar.hx:187-298) rebuilds
-// `this.skillsLayout` (pages of SkillIcon) from those saved positions.
+// set, items, statuses, replaced skills) are never removed, so whole pages can
+// show no icon. `battle.ui.win.SkillBar.init` (SkillBar.hx:187-298) rebuilds
+// `this.skillsLayout` (pages of SkillIcon) from those saved positions. The
+// player's own layout (holes, skills spread over pages by the vanilla drag,
+// which swaps across pages too) is kept as it is.
 //
 // Display-only fix, no data write: right before init first reads the page count
-// (`nbActiveSkillBar`, SkillBar.hx:491) a new `compact(bar)` repacks the icons
-// in page order into pages of 10 (last one padded with null) and, when the
-// current page is gone, switches to the last one. The saved layout changes only
-// through the vanilla drag (`saveSkillsLayout` -> `saveOrderedSkills` RPC, host
-// owned), which then stores the packed bar of the skills shown; a skill that
-// comes back later (weapon swap) takes the first free slot, at the end. Nothing
-// here writes synced data, so host and guests never fight over it. When the
-// unit has no layout yet the positions come back after an RPC: no icon is
-// placed at that point, `compact` keeps the bar, and vanilla builds a packed
-// layout itself.
+// (`nbActiveSkillBar`, SkillBar.hx:491) a new `compact(bar)` drops the pages
+// that show no icon, keeps the shown page (its index drops by the pages dropped
+// before it) and, when that page is gone, switches to the last one. The saved layout changes only through the vanilla drag
+// (`saveSkillsLayout` -> `saveOrderedSkills` RPC, host owned), which then stores
+// the pages shown. Nothing here writes synced data, so host and guests never
+// fight over it. When the unit has no layout yet the positions come back after
+// an RPC: no icon is placed at that point and `compact` keeps the bar.
 //
 // Passives were each added at child 0 of `passiveSkillsContent`
 // (SkillBar.hx:300), which reverses them; they now go at `children.length`.
@@ -30,13 +27,10 @@
 use super::*;
 use crate::asm::{push_fn, Asm, Regs, Snap};
 
-const PAGE: i32 = 10;
-
 struct Plan {
     fi: usize,
     bar_t: RefType,
     arr_t: RefType,
-    icon_t: RefType,
     type_t: RefType,
     alloc_ret_t: RefType,
     wrap_arg_t: RefType,
@@ -62,7 +56,6 @@ struct Plan {
 fn plan(code: &Bytecode) -> Result<Plan> {
     let bar_t = obj_type(code, "battle.ui.win.SkillBar")?;
     let arr_t = obj_type(code, "hl.types.ArrayObj")?;
-    let icon_t = obj_type(code, "ui.comp.SkillIcon")?;
     let obj_t = obj_type(code, "h2d.Object")?;
     let i32_t = prim_type(code, "i32", |t| matches!(t, Type::I32))?;
     let dyn_t = prim_type(code, "dynamic", |t| matches!(t, Type::Dyn))?;
@@ -161,7 +154,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         fi,
         bar_t,
         arr_t,
-        icon_t,
         type_t,
         alloc_ret_t,
         wrap_arg_t,
@@ -183,11 +175,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     })
 }
 
-/// `compact(bar)`: repacks `bar.skillsLayout` into full pages of 10, see the header.
+/// `compact(bar)`: drops the pages of `bar.skillsLayout` without an icon, see the header.
 fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
     let zero_i = int_const(code, 0);
     let one_i = int_const(code, 1);
-    let page_i = int_const(code, PAGE);
     let raw_t = code.types[p.arr_t.0]
         .get_type_obj()
         .map(|o| o.fields[p.arr_raw.0].t)
@@ -195,7 +186,6 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
     let mut r = Regs(vec![p.bar_t]);
     let bar = Reg(0);
     let lay = r.r(p.arr_t);
-    let flat = r.r(p.arr_t);
     let out = r.r(p.arr_t);
     let page = r.r(p.arr_t);
     let raw = r.r(raw_t);
@@ -203,7 +193,7 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
     let ty = r.r(p.type_t);
     let ar = r.r(p.alloc_ret_t);
     let cr = r.r(p.wrap_arg_t);
-    let [i, j, n, len, k, zero, one, ten, tmp] = [(); 9].map(|_| r.r(p.i32_t));
+    let [i, j, n, len, k, c0, zero, one, tmp] = [(); 9].map(|_| r.r(p.i32_t));
     let v = r.r(p.void_t);
 
     let mut a = Asm::new();
@@ -230,10 +220,6 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
         dst: one,
         ptr: one_i,
     });
-    a.op(Opcode::Int {
-        dst: ten,
-        ptr: page_i,
-    });
     a.op(Opcode::GetThis {
         dst: lay,
         field: p.layout,
@@ -245,8 +231,14 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
         },
         "end",
     );
-    // flat = every icon, page by page
-    new_arr(&mut a, p.icon_t, flat);
+    // out = every page with an icon, as it is (holes kept); k = the current
+    // page's new index (one less per dropped page before it)
+    new_arr(&mut a, p.arr_t, out);
+    a.op(Opcode::GetThis {
+        dst: c0,
+        field: p.cur,
+    });
+    a.op(Opcode::Mov { dst: k, src: c0 });
     a.op(Opcode::Int {
         dst: i,
         ptr: zero_i,
@@ -263,7 +255,7 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
             b: len,
             offset: 0,
         },
-        "flat_done",
+        "pages_done",
     );
     a.op(Opcode::Field {
         dst: raw,
@@ -282,7 +274,7 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
             reg: page,
             offset: 0,
         },
-        "pages",
+        "drop",
     );
     a.op(Opcode::Int {
         dst: j,
@@ -300,7 +292,7 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
             b: len,
             offset: 0,
         },
-        "pages",
+        "drop",
     );
     a.op(Opcode::Field {
         dst: raw,
@@ -317,14 +309,26 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
     a.op(Opcode::Call2 {
         dst: tmp,
         fun: p.push,
-        arg0: flat,
-        arg1: d,
+        arg0: out,
+        arg1: page,
     });
-    a.jmp(Opcode::JAlways { offset: 0 }, "slots");
-    a.label("flat_done");
+    a.jmp(Opcode::JAlways { offset: 0 }, "pages");
+    // page i - 1 dropped: before the current one when i <= cur
+    a.label("drop");
+    a.jmp(
+        Opcode::JSGt {
+            a: i,
+            b: c0,
+            offset: 0,
+        },
+        "pages",
+    );
+    a.op(Opcode::Decr { dst: k });
+    a.jmp(Opcode::JAlways { offset: 0 }, "pages");
+    a.label("pages_done");
     a.op(Opcode::Field {
         dst: n,
-        obj: flat,
+        obj: out,
         field: p.arr_len,
     });
     a.jmp(
@@ -335,87 +339,13 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
         },
         "clamp",
     );
-    // out = pages of 10
-    new_arr(&mut a, p.arr_t, out);
-    a.op(Opcode::Int {
-        dst: i,
-        ptr: zero_i,
-    });
-    a.loop_head("fill");
-    a.jmp(
-        Opcode::JSGte {
-            a: i,
-            b: n,
-            offset: 0,
-        },
-        "pad",
-    );
-    a.op(Opcode::SMod {
-        dst: k,
-        a: i,
-        b: ten,
-    });
-    a.jmp(
-        Opcode::JNotEq {
-            a: k,
-            b: zero,
-            offset: 0,
-        },
-        "put",
-    );
-    new_arr(&mut a, p.icon_t, page);
-    a.op(Opcode::Call2 {
-        dst: tmp,
-        fun: p.push,
-        arg0: out,
-        arg1: page,
-    });
-    a.label("put");
-    a.op(Opcode::Field {
-        dst: raw,
-        obj: flat,
-        field: p.arr_raw,
-    });
-    a.op(Opcode::GetArray {
-        dst: d,
-        array: raw,
-        index: i,
-    });
-    a.op(Opcode::Call2 {
-        dst: tmp,
-        fun: p.push,
-        arg0: page,
-        arg1: d,
-    });
-    a.op(Opcode::Incr { dst: i });
-    a.jmp(Opcode::JAlways { offset: 0 }, "fill");
-    a.label("pad");
-    a.op(Opcode::Null { dst: d });
-    a.loop_head("pad_loop");
-    a.op(Opcode::Field {
-        dst: len,
-        obj: page,
-        field: p.arr_len,
-    });
-    a.jmp(
-        Opcode::JSGte {
-            a: len,
-            b: ten,
-            offset: 0,
-        },
-        "set",
-    );
-    a.op(Opcode::Call2 {
-        dst: tmp,
-        fun: p.push,
-        arg0: page,
-        arg1: d,
-    });
-    a.jmp(Opcode::JAlways { offset: 0 }, "pad_loop");
-    a.label("set");
     a.op(Opcode::SetThis {
         field: p.layout,
         src: out,
+    });
+    a.op(Opcode::SetThis {
+        field: p.cur,
+        src: k,
     });
     // the current page is gone (fewer pages than before): show the last one;
     // switchSkillBar refills the slots and the page number
@@ -502,13 +432,13 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
         }],
     );
     eprintln!(
-        "patched skill bar fn@{}: pages packed by fn@{}, passives in order",
+        "patched skill bar fn@{}: empty pages dropped by fn@{}, passives in order",
         f.findex.0, compact.0
     );
     Ok(())
 }
 
-/// Packs the battle skill bar pages and keeps passives in order, or leaves
+/// Drops empty battle skill bar pages and keeps passives in order, or leaves
 /// `code` untouched and logs why.
 pub(crate) fn patch_skillbar_compact(code: &mut Bytecode) {
     // apply fails only in push_fn, before init is edited
@@ -575,8 +505,12 @@ mod tests {
     }
 
     /// Runs `compact` on pages of icon names (None = empty slot, outer None = null
-    /// page) with page `cur` shown: the pages after it and the switchSkillBar calls.
-    fn run(pages: &[Option<Vec<Option<&str>>>], cur: i32) -> (Vec<Vec<Option<String>>>, Vec<i32>) {
+    /// page) with page `cur` shown: the pages after it, the switchSkillBar calls
+    /// and the current page.
+    fn run(
+        pages: &[Option<Vec<Option<&str>>>],
+        cur: i32,
+    ) -> (Vec<Vec<Option<String>>>, Vec<i32>, i32) {
         use crate::testsim::{Sim, V};
         let image = game().unwrap();
         let orig = read(&image);
@@ -658,11 +592,14 @@ mod tests {
                 _ => panic!(),
             })
             .collect();
-        (out, sw)
+        let V::I(cur) = sim.c.get(&bar, cur_f) else {
+            panic!()
+        };
+        (out, sw, cur)
     }
 
     #[test]
-    fn packs_pages() {
+    fn drops_empty_pages() {
         if game().is_none() {
             return;
         }
@@ -671,39 +608,53 @@ mod tests {
             v.resize(10, None);
             Some(v)
         };
-        let s = |v: &[&str]| -> Vec<Option<String>> {
-            let mut v: Vec<_> = v.iter().map(|x| Some(x.to_string())).collect();
+        let s = |v: &[Option<&str>]| -> Vec<Option<String>> {
+            let mut v: Vec<_> = v.iter().map(|x| x.map(String::from)).collect();
             v.resize(10, None);
             v
         };
-        // holes and an empty middle page: one packed page, current page 2 gone
-        let (out, sw) = run(
+        // holes kept, the empty last page dropped: current page 2 gone
+        let (out, sw, cur) = run(
             &[
                 page(&[Some("A"), None, Some("B")]),
+                page(&[None, None, None, Some("C")]),
                 page(&[]),
-                page(&[Some("C")]),
             ],
             2,
         );
-        assert_eq!(out, vec![s(&["A", "B", "C"])]);
-        assert_eq!(sw, vec![0]);
-        // 11 icons over three pages and a null page: 10 + 1, page 1 kept
-        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"];
-        let sparse: Vec<Option<&str>> = names[..6].iter().flat_map(|n| [Some(*n), None]).collect();
-        let (out, sw) = run(
+        assert_eq!(
+            out,
+            vec![
+                s(&[Some("A"), None, Some("B")]),
+                s(&[None, None, None, Some("C")])
+            ]
+        );
+        assert_eq!((sw, cur), (vec![1], 1));
+        // an empty middle page and a null page dropped, page 1 (now "C") kept
+        let (out, sw, cur) = run(
             &[
-                Some(sparse[..10].to_vec()),
+                page(&[None, Some("A")]),
+                page(&[]),
                 None,
-                Some(sparse[10..].to_vec()),
-                page(&names[6..].iter().map(|n| Some(*n)).collect::<Vec<_>>()),
+                page(&[Some("C")]),
             ],
             1,
         );
-        assert_eq!(out, vec![s(&names[..10]), s(&names[10..])]);
-        assert!(sw.is_empty());
+        assert_eq!(out, vec![s(&[None, Some("A")]), s(&[Some("C")])]);
+        assert_eq!((sw, cur), (vec![], 1));
+        // an empty page before the current one: the same page stays shown
+        let (out, sw, cur) = run(&[page(&[]), page(&[Some("A")]), page(&[Some("B")])], 1);
+        assert_eq!(out, vec![s(&[Some("A")]), s(&[Some("B")])]);
+        assert_eq!((sw, cur), (vec![], 0));
+        let (out, sw, cur) = run(
+            &[page(&[]), page(&[]), page(&[Some("A")]), page(&[Some("B")])],
+            2,
+        );
+        assert_eq!(out, vec![s(&[Some("A")]), s(&[Some("B")])]);
+        assert_eq!((sw, cur), (vec![], 0));
         // no icon: layout kept, an out-of-range page still clamped
-        let (out, sw) = run(&[page(&[])], 1);
+        let (out, sw, cur) = run(&[page(&[])], 1);
         assert_eq!(out, vec![vec![None; 10]]);
-        assert_eq!(sw, vec![0]);
+        assert_eq!((sw, cur), (vec![0], 0));
     }
 }
