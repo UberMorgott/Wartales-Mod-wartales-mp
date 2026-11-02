@@ -149,7 +149,14 @@ filled, so set 2 had to match set 1's exact type. Its four `JNull` on
 both slots always take the class's `inf.weaponTypes` (minus Shield) without
 the exact-type flag. All equip paths (inventory highlight / drop, autoUnequip,
 localEquipSlot, load-time recoverInvalidEquips) read these slots; the class
-check (`hasCantEquipReasons`) is unchanged. Same op count.
+check (`hasCantEquipReasons`) is unchanged. Same op count. Mixed sets (1H +
+2H) with an offhand: `ItemSlot.autoUnequip`, for a LeftHand/Shield item on an
+`is2HWeaponUser()` unit (2H in either set), cleared every "Weapon" slot, so a
+torch or shield emptied both sets; a copy of its own TwoHands test (18 ops)
+before that push clears only slots holding a 2H weapon. The synthetic 2H
+LeftHand slot getter returned the active weapon even when 1H (shown in the
+offhand, passed as `prev`, its bar skill removed); its tail now returns that
+weapon only when TwoHands, else `left`.
 **Skill bar compact** (`src/skillbar_compact.rs`): `SkillBar.init` rebuilds
 `this.skillsLayout` (pages of 10 SkillIcon) from the unit's saved positions,
 which keep ids of skills it no longer has, so pages have holes. Right before
