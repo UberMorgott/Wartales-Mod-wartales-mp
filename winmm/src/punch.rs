@@ -518,6 +518,7 @@ impl Socket {
         self.spawn(&mut st, move || {
             for c in ln.incoming() {
                 let Ok(c) = c else { return };
+                let _ = c.set_nodelay(true); // Go's default
                 let me2 = me.clone();
                 me.spawn(&mut me.st(), move || me2.stream(c, ha)); // refused once closed
                 if me.st().closed {

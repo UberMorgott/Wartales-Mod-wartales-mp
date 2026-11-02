@@ -57,7 +57,7 @@ fn detour_runs_and_the_original_still_opens_files() {
 
     let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .expect("read via the original");
-    assert!(text.contains("ilhook"));
+    assert!(text.contains("minhook"));
     assert!(CALLS.load(Ordering::SeqCst) >= 1, "detour not called");
     assert!(std::fs::File::open("Z:\\definitely\\missing").is_err());
 }

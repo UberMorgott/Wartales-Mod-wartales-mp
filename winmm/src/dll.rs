@@ -69,6 +69,7 @@ fn log_open() {
 /// The worker thread: everything that must not run under the loader lock.
 fn worker() {
     shim_log("worker: started");
+    crate::net::start();
     crate::gamelog::start();
     crate::steam::start();
 }

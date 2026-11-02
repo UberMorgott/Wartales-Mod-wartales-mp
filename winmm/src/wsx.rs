@@ -361,9 +361,7 @@ impl Conn {
 }
 
 pub(crate) fn sha1(b: &[u8]) -> Vec<u8> {
-    ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, b)
-        .as_ref()
-        .to_vec()
+    crate::log::digest(crate::log::Alg::Sha1, b)
 }
 
 /// Lowercase hex of b.
