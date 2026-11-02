@@ -38,6 +38,7 @@
 //      so a hung attempt counts as failed: retry in 1 s within the window,
 //      or join_error -> title after it. A new attempt re-arms C1.
 //   C3 the callback, right after the vanilla `reloading` return:
+//        mpConnGame = null;   // resolved: C2 must not fail it a second time
 //        if (ui != null && ctrl != null && options.multi.serverID != null) {
 //          println(LOG_REJOIN);
 //          ctrl.reload__impl(options.saveFile, options.localSaveFile, serverID);
@@ -367,7 +368,14 @@ fn apply(code: &mut Bytecode, p: Plan) {
     let local = new_reg(f, p.str_t);
     let msg = new_reg(f, p.str_t);
     let v = new_reg(f, p.void_t);
+    let none = new_reg(f, p.game_t);
     let mut a = Asm::new();
+    // This attempt resolved (failed): C2 must not fail it again.
+    a.op(Opcode::Null { dst: none });
+    a.op(Opcode::SetGlobal {
+        global: g_game,
+        src: none,
+    });
     for (dst, obj, field) in [
         (ui, this, p.ui.0),
         (c, this, p.ctrl.0),
