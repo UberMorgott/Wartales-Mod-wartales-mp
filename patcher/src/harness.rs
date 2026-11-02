@@ -348,6 +348,9 @@ struct Ctx {
     /// `inspect`: ent.p.Npc, Npc.inspect and its callback type.
     npc_t: RefType,
     npc_inspect: (RefFun, RefType),
+    /// `inspect`: the Npc class global and hl.BaseType.check (skip non-NPC matches).
+    npc_cls: (RefGlobal, RefType),
+    base_check: RefFun,
     /// dump `meLock` / `locked`: BasePlayer.lockedWith, Game.getPlayerLocked.
     bp_locked: (RefField, RefType),
     get_locked: RefFun,
@@ -1146,6 +1149,14 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             want_sig(code, f.findex, &[npc_t, cb], void_t, "inspect")?;
             (f.findex, cb)
         },
+        npc_cls: class_global(code, "ent.p.Npc")?,
+        base_check: {
+            let f = method(code, obj_type(code, "hl.BaseType")?, "check")?;
+            if fun_args(code, f).len() != 2 || f.t.as_fun(code).map(|t| t.ret) != Some(bool_t) {
+                bail!("hl.BaseType.check is not (BaseType, v) -> Bool");
+            }
+            f.findex
+        },
         bp_locked: field(code, player_t, "lockedWith")?,
         get_locked: mfn(game_t, "getPlayerLocked", &[game_t, bool_t], arr_t)?,
         leave_state: {
@@ -1696,6 +1707,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         r.r(c.npc_inspect.1),
         r.r(c.bp_locked.1),
     );
+    let (ncls, isn) = (r.r(c.npc_cls.1), r.r(c.bool_t));
     let lcb = r.r(c.leave_state.1);
     let eid = r.r(c.str_t);
     let aid = r.r(c.str_t);
@@ -2463,9 +2475,12 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("ack");
     a.label("act_click");
     a.if_false(ins, "act_activate");
-    a.op(Opcode::SafeCast { dst: npc, src: pe });
+    // SafeCast would throw on a non-NPC match: check the type, go on searching.
     a.gg(res, s_noelem);
-    a.if_null(npc, "act_e");
+    a.gg(ncls, c.npc_cls.0);
+    a.call(isn, c.base_check, &[ncls, pe]);
+    a.if_false(isn, "act_e");
+    a.op(Opcode::UnsafeCast { dst: npc, src: pe });
     a.op(Opcode::Null { dst: icb });
     a.call(void, c.npc_inspect.0, &[npc, icb]);
     a.gg(res, s_ok);
