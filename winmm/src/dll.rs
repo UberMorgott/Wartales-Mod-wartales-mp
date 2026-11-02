@@ -70,6 +70,7 @@ fn log_open() {
 fn worker() {
     shim_log("worker: started");
     crate::gamelog::start();
+    crate::steam::start();
 }
 
 fn attach(inst: HMODULE) {

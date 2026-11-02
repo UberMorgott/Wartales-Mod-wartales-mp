@@ -55,7 +55,7 @@ pub fn start() {
     let p = p.map_or(std::ptr::null(), |f| f as *const c_void);
     // SAFETY: hl_sys_print is a libhl function entry; the detour has its signature.
     let Some(orig) =
-        (unsafe { crate::hook::install("libhl!hl_sys_print", p, detour as *const c_void) })
+        (unsafe { crate::hook::install("libhl!hl_sys_print", p, detour as *const c_void, &REAL) })
     else {
         return;
     };

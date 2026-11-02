@@ -43,8 +43,15 @@ fn detour_runs_and_the_original_still_opens_files() {
     .expect("kernelbase!CreateFileW") as *const c_void;
     // SAFETY: a function entry; the detour has its signature. install's own
     // log line goes nowhere here (no shim.log in a test process).
-    let orig = unsafe { winmm::hook::install("test!CreateFileW", target, detour as *const c_void) }
-        .expect("hooked");
+    let orig = unsafe {
+        winmm::hook::install(
+            "test!CreateFileW",
+            target,
+            detour as *const c_void,
+            &ORIGINAL,
+        )
+    }
+    .expect("hooked");
     ORIGINAL.store(orig as usize, Ordering::SeqCst);
     assert_ne!(orig, target);
 
@@ -58,6 +65,13 @@ fn detour_runs_and_the_original_still_opens_files() {
 #[test]
 fn null_target_is_refused() {
     // SAFETY: a null target is checked before anything is patched.
-    let got = unsafe { winmm::hook::install("test!none", std::ptr::null(), std::ptr::null()) };
+    let got = unsafe {
+        winmm::hook::install(
+            "test!none",
+            std::ptr::null(),
+            std::ptr::null(),
+            &AtomicUsize::new(0),
+        )
+    };
     assert!(got.is_none());
 }

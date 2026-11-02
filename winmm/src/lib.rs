@@ -27,5 +27,6 @@ pub mod punch;
 pub mod relay;
 pub mod sdrbridge;
 pub mod sendq;
+pub mod steam;
 pub mod uid;
 pub mod wsx;

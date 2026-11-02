@@ -54,9 +54,7 @@ type CreateFileAFn = unsafe extern "system" fn(
     HANDLE,
 ) -> HANDLE;
 
-/// kernelbase!CreateFileW, set before it is hooked; its original is read from
-/// the stub until REAL_W is set (install's own log line opens shim.log).
-static TARGET_W: AtomicUsize = AtomicUsize::new(0);
+/// The originals, set by hook::install before the jumps are written.
 static REAL_W: AtomicUsize = AtomicUsize::new(0);
 static REAL_A: AtomicUsize = AtomicUsize::new(0);
 
@@ -70,12 +68,7 @@ thread_local! {
 }
 
 fn real_w() -> CreateFileWFn {
-    let mut p = REAL_W.load(Ordering::Acquire);
-    if p == 0 {
-        // SAFETY: TARGET_W is the function being hooked; the detour only runs once it is.
-        p = unsafe { crate::hook::original(TARGET_W.load(Ordering::Acquire) as *const c_void) }
-            .map_or(0, |o| o as usize);
-    }
+    let p = REAL_W.load(Ordering::Acquire);
     assert!(p != 0, "CreateFileW original unknown");
     // SAFETY: p is the callable original of kernelbase!CreateFileW.
     unsafe { std::mem::transmute::<usize, CreateFileWFn>(p) }
@@ -116,17 +109,22 @@ pub fn hook_open() {
     };
     let w = w.map_or(std::ptr::null(), |f| f as *const c_void);
     let a = a.map_or(std::ptr::null(), |f| f as *const c_void);
-    TARGET_W.store(w as usize, Ordering::Release);
     // SAFETY: both are kernelbase function entries; the detours have their exact signatures.
     unsafe {
-        if let Some(o) =
-            crate::hook::install("kernelbase!CreateFileW", w, detour_w as *const c_void)
-        {
+        if let Some(o) = crate::hook::install(
+            "kernelbase!CreateFileW",
+            w,
+            detour_w as *const c_void,
+            &REAL_W,
+        ) {
             REAL_W.store(o as usize, Ordering::Release);
         }
-        if let Some(o) =
-            crate::hook::install("kernelbase!CreateFileA", a, detour_a as *const c_void)
-        {
+        if let Some(o) = crate::hook::install(
+            "kernelbase!CreateFileA",
+            a,
+            detour_a as *const c_void,
+            &REAL_A,
+        ) {
             REAL_A.store(o as usize, Ordering::Release);
         }
     }
