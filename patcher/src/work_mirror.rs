@@ -28,7 +28,9 @@
 // is mirrored too, despite being replicated: SingAction.startSong (the
 // bard's machine only: it runs once the chosen song's delay is over) sends
 // start and hit (kind 2); the hit plays the song's anim ("Sing", read from
-// startSong) looped, the end (_cancel, as above) the idle. The bard is not a
+// startSong) looped. The song keeps no idle in `workIdleOf`: on a spectator
+// the bard is gone before the end event (_cancel, as above) arrives (stage 1),
+// so the entry would never be forgotten. The bard is not a
 // parked worker (a coop activity never calls addUnitToElement) but the
 // replicated activity's unitView, a child of the stage coop_spectate.rs shows:
 // y is the activity's own hxbit uid and the worker `refs.get(y).unitView`.
@@ -49,7 +51,7 @@
 //       (every activity end, success or cancel, runs _cancel)
 //   receiver, ping__impl entry `if (workRecv(this, x, y, z, player)) return;`:
 //     false unless x is this sentinel; skipped for the sender itself; worker
-//     = mirrorWorker(game, y, camp); start: remember its current anim as that
+//     = mirrorWorker(game, y, camp); start (not the song): remember its current anim as that
 //     worker's idle (`workIdleOf`, per worker, see mirror.rs); hit: the work
 //     anim once, onEnd -> workIdle (that idle looped), kind 2 the song's
 //     anim looped; end: the idle looped,
@@ -703,6 +705,17 @@ fn add_recv(
         },
         "notstart",
     );
+    // not for the song: the bard is gone before its end event (stage 1), so
+    // a remembered idle would never be forgotten
+    int(&mut a, code, k, KIND_SING);
+    a.jmp(
+        Opcode::JEq {
+            a: kind,
+            b: k,
+            offset: 0,
+        },
+        "started",
+    );
     int(&mut a, code, k, mirror::IDLE_START);
     a.op(Opcode::Call2 {
         dst: cur,
@@ -710,6 +723,7 @@ fn add_recv(
         arg0: e,
         arg1: k,
     });
+    a.label("started");
     int(&mut a, code, stage, 3);
     a.jmp(Opcode::JAlways { offset: 0 }, "untrap");
     a.label("notstart");
@@ -722,14 +736,6 @@ fn add_recv(
         },
         "nothit",
     );
-    // hit: this worker's idle (its current anim if the start was missed)
-    int(&mut a, code, k, mirror::IDLE_READ);
-    a.op(Opcode::Call2 {
-        dst: cur,
-        fun: idle_of,
-        arg0: e,
-        arg1: k,
-    });
     int(&mut a, code, k, KIND_SING);
     a.jmp(
         Opcode::JEq {
@@ -739,6 +745,14 @@ fn add_recv(
         },
         "sing",
     );
+    // hit: this worker's idle (its current anim if the start was missed)
+    int(&mut a, code, k, mirror::IDLE_READ);
+    a.op(Opcode::Call2 {
+        dst: cur,
+        fun: idle_of,
+        arg0: e,
+        arg1: k,
+    });
     a.op(Opcode::GetGlobal {
         dst: anim,
         global: p.work_g,
@@ -1477,10 +1491,12 @@ mod tests {
         assert_eq!(plays.len(), 1);
         assert_eq!(plays[0][..2], [w.bard.clone(), st("Sing")]);
         assert_eq!(s.c.key_get(&plays[0][2], "dloop"), V::B(true));
+        // nothing remembered for the song: an end that still finds the bard
+        // keeps its current anim (a real spectator has lost it by then)
         s.c.set(&w.bard, p.e_anim, st("Sing"));
         ev(&mut s, SENTINEL, 55.0, z(2, 0, 2), &w.other);
         let plays = s.c.take("play");
-        assert_eq!(plays[0][..2], [w.bard.clone(), st("IdlePose")]);
+        assert_eq!(plays[0][..2], [w.bard.clone(), st("Sing")]);
         // an unknown activity uid: nothing (stage 1); the host: its own
         // SingAction plays the song, nothing here (stage 0)
         ev(&mut s, SENTINEL, 56.0, z(1, 0, 2), &w.other);
