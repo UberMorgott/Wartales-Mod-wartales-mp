@@ -31,7 +31,8 @@
 //       enter shows where it stopped: parked in waitAlive, or its fade never ended)
 //   - Game.fadeTo (entry): fading, busy (fadeParams set), onBreak set. Vanilla
 //     drops a fade asked for while one without onBreak is up ("Interrupted
-//     fade"): its onEnd never runs, that screen stays black;
+//     fade"); fade_chain queues it instead (a second fadeTo line follows when
+//     the running fade ends);
 //   - st.Inventory._networkOperation (entry, the slot operation run on this
 //     machine): op (SlotOperation constructor index), idx, owned (owner set:
 //     a player inventory; false for chests / loot);

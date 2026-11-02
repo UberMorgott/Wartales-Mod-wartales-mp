@@ -525,6 +525,15 @@ never ran and a host whose relay connect failed loaded forever. The cast is now
 `Std.string(e)` (same op count): the error text is logged and the failure path
 runs. Skipped (logged) on mismatch.
 
+**Fade chain** (`src/fade_chain.rs`): vanilla `Game.fadeTo` dropped a fade
+asked for while a no-break one (any fadeIn) ran ("Interrupted fade"), so its
+onEnd never ran. Every mode switch parks its next step in its fadeIn's onEnd:
+a switch started during another fadeIn (RuinsHallway, battle end, fief/tavern
+leaves, a switch queued behind another) left the host black with input
+captured and the guests waiting forever. The dropped fade is now queued: the
+running fade's onEnd is wrapped to run first, then start the new fade with the
+same arguments. Skipped (logged) on mismatch.
+
 **Direct lobby** (`src/direct_lobby.rs`): lobby members are named by their
 games' own ids on both transports (internal/master `idOf`), so a lobby of
 Steam players looks Steam-only to `Lobby.isSteamOnly` (only caller

@@ -72,6 +72,8 @@
 //       song            the open SongRepertoire: onSongChoose (Play).
 //       endturn         Battle.endTurn (the End Turn button).
 //       camp            GameUI.toggleCamp (the camp button: make / leave camp).
+//       fadecamp        Game.fadeIn(null..) then GameUI.toggleCamp in the same
+//                       frame: a camp switch started under a no-break fade.
 //       talk            camp: Controller.playCampConfession(the pending
 //                       confession's unit), the talk on the speaker; noelem if none.
 //       put <idx> <n>   own inventory slot idx -> the chest panel's inventory;
@@ -359,6 +361,8 @@ struct Ctx {
     end_turn: RefFun,
     /// `camp`: GameUI.toggleCamp (the HUD's camp button).
     toggle_camp: RefFun,
+    /// `fadecamp`: Game.fadeIn and its argument types.
+    fade_in: (RefFun, Vec<RefType>),
     /// `talk`: GameState.get_confession, Confession.getPending, its `unit`,
     /// Controller.playCampConfession (the camp talk on the speaker).
     get_confession: (RefFun, RefType),
@@ -958,6 +962,14 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         inv_auth: mfn(inv_t, "hasAuthority", &[inv_t], bool_t)?,
         end_turn: mfn(battle_t, "endTurn", &[battle_t], void_t)?,
         toggle_camp: mfn(game_ui.1, "toggleCamp", &[game_ui.1], void_t)?,
+        fade_in: {
+            let f = method(code, game_t, "fadeIn")?;
+            let a = fun_args(code, f);
+            if a.len() != 5 {
+                bail!("Game.fadeIn: unexpected signature");
+            }
+            (f.findex, a)
+        },
         get_confession: {
             let conf_t = obj_type(code, "st.player.Confession")?;
             (mfn(state_t, "get_confession", &[state_t], conf_t)?, conf_t)
@@ -1468,6 +1480,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_song = gs("song");
     let s_endturn = gs("endturn");
     let s_camp = gs("camp");
+    let s_fadecamp = gs("fadecamp");
     let s_talk = gs("talk");
     let s_put = gs("put ");
     let s_take = gs("take ");
@@ -1552,6 +1565,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let proxy = r.r(c.lobby_players.1);
     let parr = r.r(c.proxy_array.1);
     let battle = r.r(c.battle_t);
+    let fade_nulls: Vec<Reg> = c.fade_in.1[1..].iter().map(|&t| r.r(t)).collect();
     let bu = r.r(c.bunit_t);
     let skill = r.r(c.skill_t);
     let unit = r.r(c.unit_t);
@@ -2432,6 +2446,26 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.gg(res, s_ok);
     a.go("ack");
     a.label("not_endturn");
+
+    // verb: fadecamp  (Game.fadeIn(null..) then GameUI.toggleCamp in one frame:
+    // a switch started while a no-break fade is up, see fade_chain)
+    verb(&mut a, s_fadecamp, "not_fadecamp", None);
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(gui, g, c.game_ui.0);
+    a.if_null(gui, "ack");
+    for &n in &fade_nulls {
+        a.op(Opcode::Null { dst: n });
+    }
+    let mut fargs = vec![g];
+    fargs.extend(&fade_nulls);
+    a.call(void, c.fade_in.0, &fargs);
+    a.call(void, c.toggle_camp, &[gui]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_fadecamp");
 
     // verb: camp  (GameUI.toggleCamp, the HUD's camp button: make / leave camp)
     verb(&mut a, s_camp, "not_camp", None);
