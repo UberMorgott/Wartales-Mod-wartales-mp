@@ -33,6 +33,10 @@
 //     drops a fade asked for while one without onBreak is up ("Interrupted
 //     fade"); fade_chain queues it instead (a second fadeTo line follows when
 //     the running fade ends);
+//   - a co-op load's start count, host: "ready: host loaded" (its own
+//     Game.start returned, before its own count), "ready: count" (a counted
+//     ReadyToStart: playersReady against the players waited for, right before
+//     the `==` that starts gameplay), "gameplayStart" (entry);
 //   - st.Inventory._networkOperation (entry, the slot operation run on this
 //     machine): op (SlotOperation constructor index), idx, owned (owner set:
 //     a player inventory; false for chests / loot);
@@ -467,6 +471,57 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         leaf: Leaf::FieldSet(inv_owner, inv_owner_t),
     };
 
+    // A co-op load's start count (host): the host's own count right after its
+    // Game.start returns, every counted ReadyToStart against the players the
+    // count waits for, and gameplayStart itself. A load that never starts
+    // shows which one is missing or short.
+    let players_ready = typed(game_t, "playersReady", i32_t)?;
+    let game_start = method(code, game_t, "start")?.findex;
+    let gameplay_start = method(code, game_t, "gameplayStart")?.findex;
+    let reads_ready = |op: &Opcode| matches!(op, Opcode::Field { obj: Reg(0), field, .. } if *field == players_ready);
+    let self_hits: Vec<(usize, usize)> = code
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.regs.first() == Some(&game_t))
+        .flat_map(|(fi, g)| {
+            (0..g.ops.len().saturating_sub(1))
+                .filter(move |&k| {
+                    matches!(g.ops[k], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == game_start)
+                        && g.ops[k + 1..g.ops.len().min(k + 4)].iter().any(reads_ready)
+                })
+                .map(move |k| (fi, k + 1))
+        })
+        .collect();
+    let [(self_fi, self_at)] = self_hits[..] else {
+        bail!("host self count: expected one `start(); playersReady++`, found {}", self_hits.len());
+    };
+    let nc_t = obj_type(code, "hxbit.NetworkClient")?;
+    let (handler, _) = crate::ready_start::plan_handler(code, game_t, nc_t)?;
+    let h = &code.functions[handler];
+    let counts: Vec<(usize, Reg)> = (1..h.ops.len())
+        .filter_map(|i| match h.ops[i] {
+            Opcode::JNotEq { a, b, .. }
+                if matches!(h.ops[i - 1], Opcode::Field { dst, obj: Reg(0), field } if dst == a && field == players_ready)
+                    && h.regs[b.0 as usize] == i32_t
+                    && h.ops[i + 1..h.ops.len().min(i + 5)]
+                        .iter()
+                        .any(|o| matches!(o, Opcode::Call1 { fun, .. } if *fun == gameplay_start)) =>
+            {
+                Some((i, b))
+            }
+            _ => None,
+        })
+        .collect();
+    let [(count_at, nb_players)] = counts[..] else {
+        bail!("ReadyToStart: expected one `playersReady == nbPlayers` before gameplayStart, found {}", counts.len());
+    };
+    let ready_part = || Part {
+        label: " ready=",
+        path: vec![],
+        leaf: Leaf::Field(players_ready, i32_t),
+    };
+
     let tag_only = |fi: usize, tag: &'static str| Probe {
         fi,
         at: 0,
@@ -474,6 +529,31 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         parts: vec![],
     };
     let probes = vec![
+        Probe {
+            fi: self_fi,
+            at: self_at,
+            tag: "mp: ready: host loaded",
+            parts: vec![ready_part()],
+        },
+        Probe {
+            fi: handler,
+            at: count_at,
+            tag: "mp: ready: count",
+            parts: vec![
+                ready_part(),
+                Part {
+                    label: " of=",
+                    path: vec![],
+                    leaf: Leaf::Arg(nb_players),
+                },
+            ],
+        },
+        Probe {
+            fi: fun_index(code, gameplay_start)?,
+            at: 0,
+            tag: "mp: gameplayStart",
+            parts: vec![ready_part()],
+        },
         Probe {
             fi: sync_leave,
             at: 0,
@@ -831,14 +911,26 @@ mod tests {
             assert_eq!(&b.regs[..a.regs.len()], &a.regs[..]);
             // The probe ends in Sys.println and is inserted whole at `pos`.
             assert!(matches!(b.ops[pos + n - 1], Opcode::Call1 { fun, .. } if fun == println));
-            assert_eq!(
-                format!("{:?}", &b.ops[..pos]),
-                format!("{:?}", &a.ops[..pos])
-            );
-            assert_eq!(
-                format!("{:?}", &b.ops[pos + n..]),
-                format!("{:?}", &a.ops[pos..])
-            );
+            // Every original op kept, its jumps still landing on the same ops.
+            let map = |t: usize| if t < pos { t } else { t + n };
+            for i in 0..a.ops.len() {
+                let (x, y) = (&a.ops[i], &b.ops[map(i)]);
+                let want: Vec<usize> = jump_targets(a, i).into_iter().map(map).collect();
+                assert_eq!(jump_targets(b, map(i)), want, "fn@{} op {i}", a.findex.0);
+                if want.is_empty() {
+                    assert_eq!(format!("{x:?}"), format!("{y:?}"), "fn@{} op {i}", a.findex.0);
+                } else {
+                    // same op and operands, only the offset moved
+                    let strip = |o: &Opcode| {
+                        let s = format!("{o:?}");
+                        match s.find("offset: ") {
+                            Some(k) => s[..k].to_string(),
+                            None => format!("{:?}", std::mem::discriminant(o)),
+                        }
+                    };
+                    assert_eq!(strip(x), strip(y), "fn@{} op {i}", a.findex.0);
+                }
+            }
             crate::asm::testutil::check_types(&back, b, pos..pos + n);
             // The probe writes only its own (new) registers.
             for op in &b.ops[pos..pos + n] {
