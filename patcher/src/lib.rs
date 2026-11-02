@@ -37,6 +37,7 @@ mod start_transport;
 mod dialog_inventory;
 mod dialog_recruit;
 mod dlc_untouched;
+mod fade_chain;
 mod fake_npc;
 mod drop_in;
 mod follow;
@@ -189,6 +190,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     battle_takeover::patch_battle_takeover(&mut code);
     drop_in::patch_drop_in(&mut code);
     returning_units::patch_returning_units(&mut code);
+    fade_chain::patch_fade_chain(&mut code);
     diag::patch_diag(&mut code);
     activity_diag::patch_activity_diag(&mut code);
     follow::patch_follow(&mut code);

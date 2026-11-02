@@ -91,9 +91,9 @@
 // A step that throws before taking the lock (syncLeaveMode's leaveMode) leaves
 // it free: its clients wait TIMEOUT and rejoin, Joins are not parked.
 //
-// Not handled: the host's own fade callback lost before its first parked step
-// (`Game.fadeTo` drops a fade): every list is empty, the host stays black, and
-// after PHASE_GRACE a Join goes in. That host is broken with or without it.
+// The host's own fade callback before its first parked step can no longer be
+// lost: `Game.fadeTo` used to drop a fade asked for while a no-break one ran;
+// fade_chain queues it behind the running one instead.
 //
 // Validated before editing; a mismatch skips the pass (logged).
 
