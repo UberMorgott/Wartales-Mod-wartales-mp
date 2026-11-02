@@ -84,6 +84,7 @@ mod timeline_hud;
 mod tip_overflow;
 mod title_version;
 mod tooltip_input;
+mod weapon_set;
 mod window_close;
 mod window_drag;
 mod work_mirror;
@@ -181,6 +182,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loot_level::patch_champion_gear(&mut code);
     loot_level::patch_loot_order(&mut code);
     loot_level::patch_loot_pity(&mut code);
+    weapon_set::patch_weapon_set(&mut code);
     job_xp::patch_job_xp(&mut code);
     job_confirm::patch_job_confirm(&mut code);
     barrier::patch_barrier(&mut code);

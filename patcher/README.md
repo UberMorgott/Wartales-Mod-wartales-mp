@@ -142,6 +142,15 @@ behind every press-and-hold ring, divides its duration by 3 at entry
 (NPC/entity trigger 0.45 s -> 0.15 s, gamepad place exit and skill-bar arrow
 1.95 s -> 0.65 s). The gamepad long-press binding duration is cdb data
 (`Const` `Pad_LongPress_Duration`) and is not changed here.
+**Weapon set** (`src/weapon_set.rs`): `st.Unit.getEquipSlots` gave the
+Weapon slot `allowed = [secondaryWeapon.inf.type]` with `identicItemType`,
+and the SecondaryWeapon slot the same from `weapon`, once the other set was
+filled, so set 2 had to match set 1's exact type. Its four `JNull` on
+`this.secondaryWeapon` / `this.weapon` become `JAlways` to the same target:
+both slots always take the class's `inf.weaponTypes` (minus Shield) without
+the exact-type flag. All equip paths (inventory highlight / drop, autoUnequip,
+localEquipSlot, load-time recoverInvalidEquips) read these slots; the class
+check (`hasCantEquipReasons`) is unchanged. Same op count.
 **Save kind** (`src/save_kind.rs`): vanilla names every save of a campaign
 `header.gameName`, so auto, quick and manual saves look alike in the load
 list. `LoadGame.getSaveName` (row title, detail panel, save-over / delete
