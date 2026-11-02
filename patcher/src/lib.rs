@@ -71,6 +71,7 @@ mod rpc_cancel;
 mod save_kind;
 mod save_order;
 mod scroll_hit;
+mod shield_total;
 mod skill_cost;
 mod skill_result;
 mod skill_sync;
@@ -225,6 +226,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     tip_overflow::patch_tip_overflow(&mut code);
     tooltip_input::patch(&mut code);
     censer_tip::patch_censer_tip(&mut code);
+    shield_total::patch_shield_total(&mut code);
     ping_cell::patch_ping_cell(&mut code);
     forge_mirror::patch_forge_mirror(&mut code);
     work_mirror::patch_work_mirror(&mut code);
