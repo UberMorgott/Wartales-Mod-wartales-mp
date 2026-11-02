@@ -96,7 +96,12 @@ fn flush(try_only: bool) {
     } else {
         PENDING.lock().unwrap_or_else(PoisonError::into_inner)
     };
-    let out = std::mem::take(&mut p.buf);
+    // The game thread keeps a full-capacity buffer: it never reallocates under the lock.
+    let out = if p.buf.is_empty() {
+        Vec::new()
+    } else {
+        std::mem::replace(&mut p.buf, Vec::with_capacity(BUF_BYTES))
+    };
     let dropped = std::mem::take(&mut p.dropped);
     drop(p);
     if !out.is_empty() {
@@ -157,8 +162,11 @@ fn is_net_sync(w: &[u16]) -> bool {
         .iter()
         .take_while(|&&c| c == u16::from(b'.') || (u16::from(b'0')..=u16::from(b'9')).contains(&c))
         .count();
-    let head = String::from_utf16_lossy(&w[i..w.len().min(i + 10)]);
-    i > 0 && (head == " [S] SYNC " || head == " [C] SYNC ")
+    let rest = &w[i..];
+    i > 0
+        && [" [S] SYNC ", " [C] SYNC "]
+            .iter()
+            .any(|m| rest.len() >= 10 && rest[..10].iter().copied().eq(m.encode_utf16()))
 }
 
 /// One shim.log line per printed line: a multi-line message (an exception and

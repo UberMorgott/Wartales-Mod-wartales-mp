@@ -318,9 +318,11 @@ fn capture_stderr<T>(f: impl FnOnce() -> T) -> T {
     if unsafe { SetStdHandle(STD_ERROR_HANDLE, file.as_raw_handle()) } == 0 {
         return f();
     }
-    let out = f();
+    // A panic still restores stderr before it goes on unwinding.
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     // SAFETY: restores the handle saved above.
     unsafe { SetStdHandle(STD_ERROR_HANDLE, prev) };
+    let out = out.unwrap_or_else(|p| std::panic::resume_unwind(p));
     let mut text = String::new();
     if file.rewind().is_ok() {
         let _ = file.take(1024 * 1024).read_to_string(&mut text);
