@@ -130,9 +130,13 @@ fn run() {
     );
     remove_old_install(
         &applog::dir(),
-        std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .as_deref(),
+        // As the old helper's DataDir: the temp dir when ProgramData is unset or empty.
+        Some(
+            std::env::var_os("ProgramData")
+                .filter(|v| !v.is_empty())
+                .map_or_else(std::env::temp_dir, PathBuf::from),
+        )
+        .as_deref(),
         &log,
     );
 
@@ -457,12 +461,8 @@ mod tests {
         assert!(!local.join("wartales-mp.exe").exists() && !local.join("sdr.status").exists());
         assert!(local.join("shim.log").exists(), "current files stay");
         assert!(!certs.exists(), "empty cert folder removed");
-        assert_eq!(
-            lines.lock().unwrap().len(),
-            7,
-            "{:?}",
-            lines.lock().unwrap()
-        );
+        let got = lines.lock().unwrap().clone();
+        assert_eq!(got.len(), 7, "{got:?}");
         // Second start: nothing left, nothing logged; a non-empty folder stays.
         std::fs::create_dir_all(&certs).unwrap();
         std::fs::write(certs.join("other"), "x").unwrap();
