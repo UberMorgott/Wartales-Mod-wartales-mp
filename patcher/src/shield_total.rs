@@ -31,9 +31,16 @@
 // before the first sync, and the panels outside battle) and the Guard tooltip
 // are unchanged. Reads only the unit's local stats: the same on host and guest.
 //
+// The number itself (the counter's `tf`) is shown or hidden only by rebuild:
+// `tf.visible = guardInitialValue > 0 || guard.value > 0`. A unit without Guard
+// at rebuild kept a hidden number, so a status reduction gained later (shout
+// Protection) showed an empty shield. sync now repeats rebuild's test right
+// after its counter set_visible call.
+//
 // Validated before editing; a mismatch skips the pass (logged).
 
 use super::*;
+use hlbc::types::ValBool;
 
 struct Plan {
     fi: usize,
@@ -45,7 +52,17 @@ struct Plan {
     join: usize,
     /// The `x = guard.value` read of the "maxed" test.
     maxed: usize,
+    /// The op after sync's `guard.set_visible(..)`; the number's visibility goes in front of it.
+    vis: usize,
     i32_t: RefType,
+    bool_t: RefType,
+    counter_t: RefType,
+    tf_t: RefType,
+    guard: RefField,
+    value: RefField,
+    tf: RefField,
+    initial: RefField,
+    set_visible: RefFun,
     stats_t: RefType,
     unit_t: RefType,
     battle: RefField,
@@ -62,6 +79,19 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let battle = typed(code, bars_t, "battle", unit_t)?;
     let (guard, counter_t) = field(code, bars_t, "guard")?;
     let (value, _) = field(code, counter_t, "value")?;
+    let (tf, tf_t) = field(code, counter_t, "tf")?;
+    let initial = typed(code, bars_t, "guardInitialValue", i32_t)?;
+    let bool_t = prim_type(code, "bool", |t| matches!(t, Type::Bool))?;
+    let set_visible = proto(code, obj_type(code, "h2d.Object")?, "set_visible")?;
+    // rebuild sets the number's visibility with this same call.
+    let rebuild = method(code, bars_t, "rebuild")?;
+    if !rebuild
+        .ops
+        .iter()
+        .any(|op| matches!(op, Opcode::Call2 { fun, .. } if *fun == set_visible))
+    {
+        bail!("HealthBars.rebuild: no h2d.Object.set_visible call");
+    }
     let stats = typed(code, unit_t, "stats", stats_t)?;
     let taken = typed(code, stats_t, "damageTakenPercent", i32_t)?;
     let reduce = typed(code, stats_t, "damageReducePercent", i32_t)?;
@@ -140,13 +170,39 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let [maxed] = reads[..] else {
         bail!("HealthBars.sync: {} maxed tests, want 1", reads.len());
     };
+    // guard.set_visible(..): the one call on the guard counter between set_value and the maxed test.
+    let calls: Vec<usize> = (at + 1..maxed)
+        .filter(|&i| {
+            matches!(o[i], Opcode::Call2 { fun, arg0, .. }
+                if is_guard(arg0, i) && fname(code, fun) == "set_visible")
+        })
+        .collect();
+    let [call] = calls[..] else {
+        bail!(
+            "HealthBars.sync: {} guard set_visible calls, want 1",
+            calls.len()
+        );
+    };
+    let vis = call + 1;
+    if (0..o.len()).any(|i| jump_targets(f, i).contains(&vis)) {
+        bail!("HealthBars.sync: op after guard set_visible is a jump target");
+    }
     Ok(Plan {
         fi,
         at,
         v,
         join: at - 2,
         maxed,
+        vis,
         i32_t,
+        bool_t,
+        counter_t,
+        tf_t,
+        guard,
+        value,
+        tf,
+        initial,
+        set_visible,
         stats_t,
         unit_t,
         battle,
@@ -161,6 +217,70 @@ fn apply(code: &mut Bytecode, p: Plan) {
     let k99 = int_const(code, 99);
     let k100 = int_const(code, 100);
     let f = &mut code.functions[p.fi];
+    // tf.visible = guardInitialValue > 0 || guard.value > 0 (rebuild's test), after the counter's own set_visible.
+    let c = new_reg(f, p.counter_t);
+    let txt = new_reg(f, p.tf_t);
+    let x = new_reg(f, p.i32_t);
+    let z = new_reg(f, p.i32_t);
+    let b = new_reg(f, p.bool_t);
+    let mut a = crate::asm::Asm::new();
+    a.op(Opcode::GetThis {
+        dst: c,
+        field: p.guard,
+    });
+    a.op(Opcode::NullCheck { reg: c });
+    a.op(Opcode::Field {
+        dst: txt,
+        obj: c,
+        field: p.tf,
+    });
+    a.op(Opcode::Int { dst: z, ptr: k0 });
+    a.op(Opcode::GetThis {
+        dst: x,
+        field: p.initial,
+    });
+    a.jmp(
+        Opcode::JSLt {
+            a: z,
+            b: x,
+            offset: 0,
+        },
+        "show",
+    );
+    a.op(Opcode::Field {
+        dst: x,
+        obj: c,
+        field: p.value,
+    });
+    a.jmp(
+        Opcode::JSLt {
+            a: z,
+            b: x,
+            offset: 0,
+        },
+        "show",
+    );
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "set");
+    a.label("show");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.label("set");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.set_visible,
+        arg0: txt,
+        arg1: b,
+    });
+    let tf_ops = a.finish();
+    let m = tf_ops.len();
+    // Later index first, so `p.at` stays valid.
+    insert_ops(f, p.vis, tf_ops);
     let g = new_reg(f, p.i32_t);
     let r = new_reg(f, p.i32_t);
     let t = new_reg(f, p.i32_t);
@@ -221,12 +341,13 @@ fn apply(code: &mut Bytecode, p: Plan) {
         unreachable!()
     };
     *offset = (p.at - p.join - 1) as i32;
-    let Opcode::Field { dst, .. } = f.ops[p.maxed + n] else {
+    // vis < maxed: both blocks sit in front of the maxed read.
+    let Opcode::Field { dst, .. } = f.ops[p.maxed + n + m] else {
         unreachable!()
     };
-    f.ops[p.maxed + n] = Opcode::Mov { dst, src: g };
+    f.ops[p.maxed + n + m] = Opcode::Mov { dst, src: g };
     eprintln!(
-        "patched shield total fn@{}: guard counter shows Guard + damage reduction (op {})",
+        "patched shield total fn@{}: guard counter shows Guard + damage reduction, number visible (op {})",
         f.findex.0, p.at
     );
 }
@@ -278,20 +399,35 @@ mod tests {
             assert_eq!(same(a, b), i != fi, "function #{i} (fn@{})", a.findex.0);
         }
         let (a, b) = (&orig.functions[fi], &back.functions[fi]);
-        let n = b.ops.len() - a.ops.len();
+        // m: the number-visibility block at vis, n: the formula block at at.
+        const M: usize = 12;
+        let (vis, m) = (p.vis, M);
+        let n = b.ops.len() - a.ops.len() - m;
+        let map = |i: usize| {
+            if i < at {
+                i
+            } else if i < vis {
+                i + n
+            } else {
+                i + n + m
+            }
+        };
         check_flow(b);
         check_types(&back, b, at..at + n);
+        check_types(&back, b, vis + n..vis + n + m);
         assert_eq!(b.regs[..a.regs.len()], a.regs[..]);
-        // Unchanged outside the block, but the join jump and the maxed read.
+        // The number block: tf.set_visible(..) closes it, right after the counter's set_visible.
+        assert!(matches!(b.ops[vis + n - 1], Opcode::Call2 { .. }));
+        assert!(
+            matches!(b.ops[vis + n + m - 1], Opcode::Call2 { fun, .. } if fun == p.set_visible)
+        );
+        // Unchanged outside the blocks, but the join jump and the maxed read.
         for i in 0..a.ops.len() {
-            let j = if i < at { i } else { i + n };
+            let j = map(i);
             if i == join || i == maxed {
                 continue;
             }
-            let ta: Vec<usize> = jump_targets(a, i)
-                .into_iter()
-                .map(|t| if t < at { t } else { t + n })
-                .collect();
+            let ta: Vec<usize> = jump_targets(a, i).into_iter().map(map).collect();
             if ta.is_empty() {
                 assert_eq!(
                     format!("{:?}", a.ops[i]),
@@ -306,8 +442,8 @@ mod tests {
         assert_eq!(jump_targets(b, join), vec![at]);
         assert!(matches!(b.ops[at - 1], Opcode::Mov { .. }));
         assert!(matches!(b.ops[at + n], Opcode::CallMethod { .. }));
-        assert!(matches!(b.ops[maxed + n], Opcode::Mov { .. }));
-        assert!(matches!(b.ops[maxed + n + 1], Opcode::JSLt { .. }));
+        assert!(matches!(b.ops[maxed + n + m], Opcode::Mov { .. }));
+        assert!(matches!(b.ops[maxed + n + m + 1], Opcode::JSLt { .. }));
 
         let mut again = read(&patched);
         assert!(plan(&again).is_err());
@@ -317,7 +453,7 @@ mod tests {
 
     /// Runs the patched guard block of sync: (counter value, "maxed") for a unit
     /// with Guard `guard`, damageTakenPercent `taken`, damageReducePercent `reduce`.
-    fn run(code: &Bytecode, p: &Plan, n: usize, guard: i32, taken: i32, reduce: i32) -> (V, V) {
+    fn run(code: &Bytecode, p: &Plan, n: usize, guard: i32, taken: i32, reduce: i32) -> (V, V, V) {
         const MAX: f64 = 50.0;
         let b = &code.functions[p.fi];
         let unit_t = p.unit_t;
@@ -352,7 +488,10 @@ mod tests {
                 Some(match fname(code, f) {
                     "get_guard" => V::I(guard),
                     "getConst" => c.obj(&[(cval, V::F(MAX))]),
-                    "set_visible" => a[1].clone(),
+                    "set_visible" => {
+                        c.log.push(("vis", vec![a[0].clone(), a[1].clone()]));
+                        a[1].clone()
+                    }
                     "toggleClass" => {
                         c.log.push(("maxed", vec![a[2].clone()]));
                         V::Null
@@ -368,7 +507,8 @@ mod tests {
         let stats = s.c.obj(&[(p.taken, V::I(taken)), (p.reduce, V::I(reduce))]);
         let unit = s.c.obj(&[(p.stats, stats)]);
         let dom = s.c.obj(&[]);
-        let counter = s.c.obj(&[(fld(counter_t, "dom"), dom)]);
+        let tf = s.c.obj(&[]);
+        let counter = s.c.obj(&[(fld(counter_t, "dom"), dom), (p.tf, tf.clone())]);
         let this = s.c.obj(&[
             (p.battle, unit),
             (fld(bars_t, "guard"), counter.clone()),
@@ -379,7 +519,10 @@ mod tests {
         r[0] = this;
         assert_eq!(s.span(b.findex, &mut r, first - 2, &[stop]), stop);
         let maxed = s.c.take("maxed").pop().unwrap().pop().unwrap();
-        (s.c.get(&counter, value_f), maxed)
+        // The last set_visible is the number's, on tf.
+        let mut vis = s.c.take("vis").pop().unwrap();
+        assert_eq!(vis[0], tf);
+        (s.c.get(&counter, value_f), maxed, vis.pop().unwrap())
     }
 
     #[test]
@@ -407,7 +550,7 @@ mod tests {
             (0, 30, 0),
         ] {
             let gc = g.min(50);
-            let (v, maxed) = run(&code, &p, n, g, taken, reduce);
+            let (v, maxed, num) = run(&code, &p, n, g, taken, reduce);
             assert_eq!(
                 v,
                 V::I(shown(taken, reduce, gc)),
@@ -416,9 +559,19 @@ mod tests {
             // "maxed" still means the Guard itself is at its cap (vanilla: value >= max, max 0 without Guard).
             let max = if g > 0 { 50 } else { 0 };
             assert_eq!(maxed, V::B(gc >= max), "maxed for guard {g}");
+            // The number shows as rebuild decides it: initial Guard (here = Guard) or a positive value.
+            let shown_v = shown(taken, reduce, gc);
+            assert_eq!(
+                num,
+                V::B(g > 0 || shown_v > 0),
+                "number for {g}/{taken}/{reduce}"
+            );
         }
         assert_eq!(run(&code, &p, n, 80, 0, 20).0, V::I(60)); // 0.8 * 0.5 taken
         assert_eq!(run(&code, &p, n, 0, 30, 0).0, V::I(-30)); // vulnerability keeps its sign
+                                                              // Shout Protection on a unit without Guard: 25% with its number shown (was an empty shield).
+        let (v, _, num) = run(&code, &p, n, 0, 0, 25);
+        assert_eq!((v, num), (V::I(25), V::B(true)));
     }
 
     #[test]
@@ -427,8 +580,9 @@ mod tests {
         let orig = read(&image);
         let p = plan(&orig).expect("plan");
         let base = write(&orig);
-        // Other set_value argument source, min branch not via JAlways, maxed test on another value.
-        let edits: [fn(&mut Function, &Plan); 3] = [
+        // Other set_value argument source, min branch not via JAlways, maxed test on another value,
+        // guard call that is not set_visible.
+        let edits: [fn(&mut Function, &Plan); 4] = [
             |f, p| {
                 if let Opcode::Mov { src, .. } = &mut f.ops[p.at - 1] {
                     *src = Reg(0);
@@ -438,6 +592,12 @@ mod tests {
             |f, p| {
                 if let Opcode::JSLt { b, .. } = &mut f.ops[p.maxed + 1] {
                     *b = Reg(0);
+                }
+            },
+            |f, p| {
+                let me = f.findex;
+                if let Opcode::Call2 { fun, .. } = &mut f.ops[p.vis - 1] {
+                    *fun = me;
                 }
             },
         ];

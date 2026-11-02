@@ -67,7 +67,7 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | tip_overflow | unit | |
 | tooltip_input | unit | |
 | censer_tip | unit | |
-| shield_total | unit | testsim run of the patched HealthBars.sync guard block: counter = formula for Guard / taken / reduce cases, "maxed" on the capped Guard. Harness run `20261102-095306`: applied (`patched shield total fn@10553`), battle on host and guest with no game error; the shown value not read (no background capture) |
+| shield_total | unit | testsim run of the patched HealthBars.sync guard block: counter = formula for Guard / taken / reduce cases, "maxed" on the capped Guard, number (`tf`) visible by rebuild's test (shout Protection on a 0-Guard unit: 25, shown). Harness run `20261102-095306`: applied (`patched shield total fn@10553`), battle on host and guest with no game error; the shown value not read (no background capture). Number-visibility fix (empty shield after shout Protection): in-game check pending |
 | ping_cell | unit | |
 | forge_mirror | unit | |
 | work_mirror | unit | |
