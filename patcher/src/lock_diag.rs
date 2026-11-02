@@ -10,7 +10,8 @@
 //
 //   S. set_lockCounter(v): when lockCounter goes from 0 to v > 0, the call stack
 //      (CallStack.callStack(), an array; stringified only when reported) is
-//      kept in a new global: who took the lock that is still held.
+//      kept in a new global: who took the lock that is still held (not once
+//      the report cap is spent).
 //   R. lockReport(battle, what), called where a request is refused while locked:
 //        netExecuteSkill        "host refused a skill request"
 //        battleUnitEndTurn__impl "host refused an end turn"
@@ -371,8 +372,10 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
         .map(|x| str_global(code, p.str_t, x))
         .collect();
     let zero = int_const(code, 0);
+    let cap = int_const(code, REPORT_CAP);
 
-    // S: 0 -> v > 0 keeps the stack. Jumps to the store land on the inserted block.
+    // S: 0 -> v > 0 keeps the stack, until the report cap is spent.
+    // Jumps to the store land on the inserted block.
     let f = &mut code.functions[p.set_fi];
     let old = new_reg(f, p.i32_t);
     let z = new_reg(f, p.i32_t);
@@ -387,12 +390,22 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<()> {
         Opcode::JNotEq {
             a: old,
             b: z,
-            offset: to(6, 2),
+            offset: to(9, 2),
         },
         Opcode::JSGte {
             a: z,
             b: Reg(1),
-            offset: to(6, 3),
+            offset: to(9, 3),
+        },
+        Opcode::GetGlobal {
+            dst: old,
+            global: count,
+        },
+        Opcode::Int { dst: z, ptr: cap },
+        Opcode::JSGte {
+            a: old,
+            b: z,
+            offset: to(9, 6),
         },
         Opcode::Call0 {
             dst: arr,
@@ -559,11 +572,12 @@ mod tests {
         check_flow(f);
 
         let (a, b) = (&orig.functions[p.set_fi], &back.functions[p.set_fi]);
-        assert_eq!(b.ops.len(), a.ops.len() + 6);
-        check_types(&back, b, p.set_at..p.set_at + 6);
+        assert_eq!(b.ops.len(), a.ops.len() + 9);
+        check_types(&back, b, p.set_at..p.set_at + 9);
         check_flow(b);
-        assert_eq!(jump_targets(b, p.set_at + 2), [p.set_at + 6]);
-        assert_eq!(jump_targets(b, p.set_at + 3), [p.set_at + 6]);
+        for k in [2, 3, 6] {
+            assert_eq!(jump_targets(b, p.set_at + k), [p.set_at + 9]);
+        }
         // The vanilla `v >= 0` guard reaches the inserted block, not the store.
         let guard: Vec<usize> = (0..p.set_at)
             .filter(|&i| !jump_targets(a, i).is_empty())
