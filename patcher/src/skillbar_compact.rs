@@ -88,12 +88,33 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     // `this.skillsLayout = new ArrayObj(alloc_array(ArrayObj, 0))` (SkillBar.hx:187).
     let mut alloc_site = None;
     for w in ops.windows(6) {
-        if let [Opcode::Int { dst: z, ptr }, Opcode::Type { dst: tr, ty }, Opcode::Call2 { dst: ar, fun: alloc, arg0, arg1 }, Opcode::UnsafeCast { dst: cr, src }, Opcode::Call1 { dst: lr, fun: wrap, arg0: c }, Opcode::SetThis { field, src: l }] = w
+        if let [Opcode::Int { dst: z, ptr }, Opcode::Type { dst: tr, ty }, Opcode::Call2 {
+            dst: ar,
+            fun: alloc,
+            arg0,
+            arg1,
+        }, Opcode::UnsafeCast { dst: cr, src }, Opcode::Call1 {
+            dst: lr,
+            fun: wrap,
+            arg0: c,
+        }, Opcode::SetThis { field, src: l }] = w
         {
-            if *field == layout && *ty == arr_t && zero(*ptr) && arg0 == tr && arg1 == z
-                && src == ar && c == cr && l == lr
+            if *field == layout
+                && *ty == arr_t
+                && zero(*ptr)
+                && arg0 == tr
+                && arg1 == z
+                && src == ar
+                && c == cr
+                && l == lr
             {
-                alloc_site = Some((*alloc, *wrap, f.regs[tr.0 as usize], f.regs[ar.0 as usize], f.regs[cr.0 as usize]));
+                alloc_site = Some((
+                    *alloc,
+                    *wrap,
+                    f.regs[tr.0 as usize],
+                    f.regs[ar.0 as usize],
+                    f.regs[cr.0 as usize],
+                ));
             }
         }
     }
@@ -101,14 +122,16 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("init: no skillsLayout allocation");
     };
 
-    let Some(call_at) = ops.iter().position(
-        |o| matches!(o, Opcode::Call1 { fun, arg0: Reg(0), .. } if *fun == nb),
-    ) else {
+    let Some(call_at) = ops
+        .iter()
+        .position(|o| matches!(o, Opcode::Call1 { fun, arg0: Reg(0), .. } if *fun == nb))
+    else {
         bail!("init: no nbActiveSkillBar call");
     };
     let mut passive_sites = Vec::new();
     for (i, w) in ops.windows(4).enumerate() {
-        if let [Opcode::GetThis { dst: a, field }, Opcode::NullCheck { reg: n }, Opcode::Int { dst: k, ptr }, Opcode::Call3 { arg0, arg2, .. }] = w
+        if let [Opcode::GetThis { dst: a, field }, Opcode::NullCheck { reg: n }, Opcode::Int { dst: k, ptr }, Opcode::Call3 { arg0, arg2, .. }] =
+            w
         {
             if *field == passive && n == a && arg0 == a && arg2 == k && zero(*ptr) {
                 passive_sites.push(i + 2);
@@ -118,7 +141,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let passive_at = match passive_sites[..] {
         [i] => i,
         [] => bail!("init: passive addChildAt(icon, 0) not found (already applied or changed)"),
-        _ => bail!("init: {} passive addChildAt sites, want 1", passive_sites.len()),
+        _ => bail!(
+            "init: {} passive addChildAt sites, want 1",
+            passive_sites.len()
+        ),
     };
     if passive_at > call_at {
         bail!("init: passives added after the page count is read");
@@ -183,74 +209,258 @@ fn compact_ops(code: &mut Bytecode, p: &Plan) -> (Vec<RefType>, Vec<Opcode>) {
     let mut a = Asm::new();
     let new_arr = |a: &mut Asm, elem: RefType, dst: Reg| {
         a.op(Opcode::Type { dst: ty, ty: elem });
-        a.op(Opcode::Call2 { dst: ar, fun: p.alloc, arg0: ty, arg1: zero });
+        a.op(Opcode::Call2 {
+            dst: ar,
+            fun: p.alloc,
+            arg0: ty,
+            arg1: zero,
+        });
         a.op(Opcode::UnsafeCast { dst: cr, src: ar });
-        a.op(Opcode::Call1 { dst, fun: p.wrap, arg0: cr });
+        a.op(Opcode::Call1 {
+            dst,
+            fun: p.wrap,
+            arg0: cr,
+        });
     };
-    a.op(Opcode::Int { dst: zero, ptr: zero_i });
-    a.op(Opcode::Int { dst: one, ptr: one_i });
-    a.op(Opcode::Int { dst: ten, ptr: page_i });
-    a.op(Opcode::GetThis { dst: lay, field: p.layout });
-    a.jmp(Opcode::JNull { reg: lay, offset: 0 }, "end");
+    a.op(Opcode::Int {
+        dst: zero,
+        ptr: zero_i,
+    });
+    a.op(Opcode::Int {
+        dst: one,
+        ptr: one_i,
+    });
+    a.op(Opcode::Int {
+        dst: ten,
+        ptr: page_i,
+    });
+    a.op(Opcode::GetThis {
+        dst: lay,
+        field: p.layout,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: lay,
+            offset: 0,
+        },
+        "end",
+    );
     // flat = every icon, page by page
     new_arr(&mut a, p.icon_t, flat);
-    a.op(Opcode::Int { dst: i, ptr: zero_i });
+    a.op(Opcode::Int {
+        dst: i,
+        ptr: zero_i,
+    });
     a.loop_head("pages");
-    a.op(Opcode::Field { dst: len, obj: lay, field: p.arr_len });
-    a.jmp(Opcode::JSGte { a: i, b: len, offset: 0 }, "flat_done");
-    a.op(Opcode::Field { dst: raw, obj: lay, field: p.arr_raw });
-    a.op(Opcode::GetArray { dst: d, array: raw, index: i });
+    a.op(Opcode::Field {
+        dst: len,
+        obj: lay,
+        field: p.arr_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: len,
+            offset: 0,
+        },
+        "flat_done",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: lay,
+        field: p.arr_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: i,
+    });
     a.op(Opcode::Incr { dst: i });
     a.op(Opcode::SafeCast { dst: page, src: d });
-    a.jmp(Opcode::JNull { reg: page, offset: 0 }, "pages");
-    a.op(Opcode::Int { dst: j, ptr: zero_i });
+    a.jmp(
+        Opcode::JNull {
+            reg: page,
+            offset: 0,
+        },
+        "pages",
+    );
+    a.op(Opcode::Int {
+        dst: j,
+        ptr: zero_i,
+    });
     a.loop_head("slots");
-    a.op(Opcode::Field { dst: len, obj: page, field: p.arr_len });
-    a.jmp(Opcode::JSGte { a: j, b: len, offset: 0 }, "pages");
-    a.op(Opcode::Field { dst: raw, obj: page, field: p.arr_raw });
-    a.op(Opcode::GetArray { dst: d, array: raw, index: j });
+    a.op(Opcode::Field {
+        dst: len,
+        obj: page,
+        field: p.arr_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: j,
+            b: len,
+            offset: 0,
+        },
+        "pages",
+    );
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: page,
+        field: p.arr_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: j,
+    });
     a.op(Opcode::Incr { dst: j });
     a.jmp(Opcode::JNull { reg: d, offset: 0 }, "slots");
-    a.op(Opcode::Call2 { dst: tmp, fun: p.push, arg0: flat, arg1: d });
+    a.op(Opcode::Call2 {
+        dst: tmp,
+        fun: p.push,
+        arg0: flat,
+        arg1: d,
+    });
     a.jmp(Opcode::JAlways { offset: 0 }, "slots");
     a.label("flat_done");
-    a.op(Opcode::Field { dst: n, obj: flat, field: p.arr_len });
-    a.jmp(Opcode::JSLte { a: n, b: zero, offset: 0 }, "clamp");
+    a.op(Opcode::Field {
+        dst: n,
+        obj: flat,
+        field: p.arr_len,
+    });
+    a.jmp(
+        Opcode::JSLte {
+            a: n,
+            b: zero,
+            offset: 0,
+        },
+        "clamp",
+    );
     // out = pages of 10
     new_arr(&mut a, p.arr_t, out);
-    a.op(Opcode::Int { dst: i, ptr: zero_i });
+    a.op(Opcode::Int {
+        dst: i,
+        ptr: zero_i,
+    });
     a.loop_head("fill");
-    a.jmp(Opcode::JSGte { a: i, b: n, offset: 0 }, "pad");
-    a.op(Opcode::SMod { dst: k, a: i, b: ten });
-    a.jmp(Opcode::JNotEq { a: k, b: zero, offset: 0 }, "put");
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: n,
+            offset: 0,
+        },
+        "pad",
+    );
+    a.op(Opcode::SMod {
+        dst: k,
+        a: i,
+        b: ten,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: k,
+            b: zero,
+            offset: 0,
+        },
+        "put",
+    );
     new_arr(&mut a, p.icon_t, page);
-    a.op(Opcode::Call2 { dst: tmp, fun: p.push, arg0: out, arg1: page });
+    a.op(Opcode::Call2 {
+        dst: tmp,
+        fun: p.push,
+        arg0: out,
+        arg1: page,
+    });
     a.label("put");
-    a.op(Opcode::Field { dst: raw, obj: flat, field: p.arr_raw });
-    a.op(Opcode::GetArray { dst: d, array: raw, index: i });
-    a.op(Opcode::Call2 { dst: tmp, fun: p.push, arg0: page, arg1: d });
+    a.op(Opcode::Field {
+        dst: raw,
+        obj: flat,
+        field: p.arr_raw,
+    });
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: raw,
+        index: i,
+    });
+    a.op(Opcode::Call2 {
+        dst: tmp,
+        fun: p.push,
+        arg0: page,
+        arg1: d,
+    });
     a.op(Opcode::Incr { dst: i });
     a.jmp(Opcode::JAlways { offset: 0 }, "fill");
     a.label("pad");
     a.op(Opcode::Null { dst: d });
     a.loop_head("pad_loop");
-    a.op(Opcode::Field { dst: len, obj: page, field: p.arr_len });
-    a.jmp(Opcode::JSGte { a: len, b: ten, offset: 0 }, "set");
-    a.op(Opcode::Call2 { dst: tmp, fun: p.push, arg0: page, arg1: d });
+    a.op(Opcode::Field {
+        dst: len,
+        obj: page,
+        field: p.arr_len,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: len,
+            b: ten,
+            offset: 0,
+        },
+        "set",
+    );
+    a.op(Opcode::Call2 {
+        dst: tmp,
+        fun: p.push,
+        arg0: page,
+        arg1: d,
+    });
     a.jmp(Opcode::JAlways { offset: 0 }, "pad_loop");
     a.label("set");
-    a.op(Opcode::SetThis { field: p.layout, src: out });
+    a.op(Opcode::SetThis {
+        field: p.layout,
+        src: out,
+    });
     // the current page is gone (fewer pages than before): show the last one;
     // switchSkillBar refills the slots and the page number
     a.label("clamp");
-    a.op(Opcode::GetThis { dst: lay, field: p.layout });
-    a.op(Opcode::GetThis { dst: k, field: p.cur });
-    a.op(Opcode::Field { dst: len, obj: lay, field: p.arr_len });
-    a.jmp(Opcode::JSLt { a: k, b: zero, offset: 0 }, "fix");
-    a.jmp(Opcode::JSLt { a: k, b: len, offset: 0 }, "end");
+    a.op(Opcode::GetThis {
+        dst: lay,
+        field: p.layout,
+    });
+    a.op(Opcode::GetThis {
+        dst: k,
+        field: p.cur,
+    });
+    a.op(Opcode::Field {
+        dst: len,
+        obj: lay,
+        field: p.arr_len,
+    });
+    a.jmp(
+        Opcode::JSLt {
+            a: k,
+            b: zero,
+            offset: 0,
+        },
+        "fix",
+    );
+    a.jmp(
+        Opcode::JSLt {
+            a: k,
+            b: len,
+            offset: 0,
+        },
+        "end",
+    );
     a.label("fix");
-    a.op(Opcode::Sub { dst: k, a: len, b: one });
-    a.op(Opcode::Call2 { dst: v, fun: p.switch, arg0: bar, arg1: k });
+    a.op(Opcode::Sub {
+        dst: k,
+        a: len,
+        b: one,
+    });
+    a.op(Opcode::Call2 {
+        dst: v,
+        fun: p.switch,
+        arg0: bar,
+        arg1: k,
+    });
     a.label("end");
     a.op(Opcode::Ret { ret: v });
     (r.0, a.finish())
@@ -264,16 +474,32 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
     insert_ops(
         f,
         p.call_at,
-        vec![Opcode::Call1 { dst: Reg(2), fun: compact, arg0: Reg(0) }],
+        vec![Opcode::Call1 {
+            dst: Reg(2),
+            fun: compact,
+            arg0: Reg(0),
+        }],
     );
-    let Opcode::Int { dst: k, .. } = f.ops[p.passive_at] else { unreachable!() };
-    let Opcode::GetThis { dst: content, .. } = f.ops[p.passive_at - 2] else { unreachable!() };
+    let Opcode::Int { dst: k, .. } = f.ops[p.passive_at] else {
+        unreachable!()
+    };
+    let Opcode::GetThis { dst: content, .. } = f.ops[p.passive_at - 2] else {
+        unreachable!()
+    };
     let kids = new_reg(f, p.arr_t);
-    f.ops[p.passive_at] = Opcode::Field { dst: kids, obj: content, field: p.children };
+    f.ops[p.passive_at] = Opcode::Field {
+        dst: kids,
+        obj: content,
+        field: p.children,
+    };
     insert_ops(
         f,
         p.passive_at + 1,
-        vec![Opcode::Field { dst: k, obj: kids, field: p.arr_len }],
+        vec![Opcode::Field {
+            dst: k,
+            obj: kids,
+            field: p.arr_len,
+        }],
     );
     eprintln!(
         "patched skill bar fn@{}: pages packed by fn@{}, passives in order",
@@ -327,10 +553,16 @@ mod tests {
             let ta: Vec<usize> = jump_targets(a, i).into_iter().map(map).collect();
             assert_eq!(jump_targets(b, map(i)), ta, "op {i}");
             if ta.is_empty() && i != passive_at {
-                assert_eq!(format!("{:?}", b.ops[map(i)]), format!("{:?}", a.ops[i]), "op {i}");
+                assert_eq!(
+                    format!("{:?}", b.ops[map(i)]),
+                    format!("{:?}", a.ops[i]),
+                    "op {i}"
+                );
             }
         }
-        assert!(matches!(b.ops[call_at + 1], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == new.findex));
+        assert!(
+            matches!(b.ops[call_at + 1], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == new.findex)
+        );
         assert!(matches!(b.ops[passive_at], Opcode::Field { .. }));
         assert!(matches!(b.ops[passive_at + 1], Opcode::Field { .. }));
         check_types(&back, b, passive_at..passive_at + 2);
@@ -340,5 +572,138 @@ mod tests {
         assert!(plan(&again).is_err());
         patch_skillbar_compact(&mut again);
         assert!(write(&again) == patched);
+    }
+
+    /// Runs `compact` on pages of icon names (None = empty slot, outer None = null
+    /// page) with page `cur` shown: the pages after it and the switchSkillBar calls.
+    fn run(pages: &[Option<Vec<Option<&str>>>], cur: i32) -> (Vec<Vec<Option<String>>>, Vec<i32>) {
+        use crate::testsim::{Sim, V};
+        let image = game().unwrap();
+        let orig = read(&image);
+        let p = plan(&orig).unwrap();
+        let mut code = read(&image);
+        patch_skillbar_compact(&mut code);
+        let compact = code.functions.last().unwrap().findex;
+        let (len, raw) = (p.arr_len, p.arr_raw);
+        let (alloc, wrap, push, switch) = (p.alloc, p.wrap, p.push, p.switch);
+        let (lay_f, cur_f) = (p.layout, p.cur);
+        let mut sim = Sim::new(
+            &code,
+            orig.functions.len(),
+            move |c, f, a| {
+                Some(if f == alloc {
+                    V::Null
+                } else if f == wrap {
+                    c.arr(len, raw, vec![])
+                } else if f == push {
+                    let n = match c.get(&a[0], len) {
+                        V::I(n) => n,
+                        o => panic!("{o:?}"),
+                    };
+                    let r = c.get(&a[0], raw);
+                    c.key_set(&r, format!("i{n}"), a[1].clone());
+                    c.set(&a[0], len, V::I(n + 1));
+                    V::I(n + 1)
+                } else if f == switch {
+                    c.log.push(("switch", a.to_vec()));
+                    c.set(&a[0], cur_f, a[1].clone());
+                    V::Null
+                } else {
+                    panic!("unexpected call fn@{}", f.0)
+                })
+            },
+            |_, m, _| panic!("unexpected method call {m}"),
+        );
+        let mut outer = vec![];
+        for pg in pages {
+            outer.push(match pg {
+                None => V::Null,
+                Some(s) => {
+                    let items = s
+                        .iter()
+                        .map(|x| x.map_or(V::Null, |n| V::S(n.into())))
+                        .collect();
+                    sim.c.arr(len, raw, items)
+                }
+            });
+        }
+        let lay = sim.c.arr(len, raw, outer);
+        let bar = sim.c.obj(&[(lay_f, lay), (cur_f, V::I(cur))]);
+        sim.run(compact, vec![bar.clone()]);
+        let items = |c: &crate::testsim::Core, a: &V| -> Vec<V> {
+            let V::I(n) = c.get(a, len) else { panic!() };
+            let r = c.get(a, raw);
+            (0..n).map(|k| c.key_get(&r, &format!("i{k}"))).collect()
+        };
+        let lay = sim.c.get(&bar, lay_f);
+        let out = items(&sim.c, &lay)
+            .iter()
+            .map(|pg| {
+                items(&sim.c, pg)
+                    .into_iter()
+                    .map(|v| match v {
+                        V::S(s) => Some(s),
+                        V::Null => None,
+                        o => panic!("{o:?}"),
+                    })
+                    .collect()
+            })
+            .collect();
+        let sw = sim
+            .c
+            .take("switch")
+            .into_iter()
+            .map(|a| match a[1] {
+                V::I(i) => i,
+                _ => panic!(),
+            })
+            .collect();
+        (out, sw)
+    }
+
+    #[test]
+    fn packs_pages() {
+        if game().is_none() {
+            return;
+        }
+        let page = |v: &[Option<&'static str>]| {
+            let mut v = v.to_vec();
+            v.resize(10, None);
+            Some(v)
+        };
+        let s = |v: &[&str]| -> Vec<Option<String>> {
+            let mut v: Vec<_> = v.iter().map(|x| Some(x.to_string())).collect();
+            v.resize(10, None);
+            v
+        };
+        // holes and an empty middle page: one packed page, current page 2 gone
+        let (out, sw) = run(
+            &[
+                page(&[Some("A"), None, Some("B")]),
+                page(&[]),
+                page(&[Some("C")]),
+            ],
+            2,
+        );
+        assert_eq!(out, vec![s(&["A", "B", "C"])]);
+        assert_eq!(sw, vec![0]);
+        // 11 icons over three pages and a null page: 10 + 1, page 1 kept
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"];
+        let sparse: Vec<Option<&str>> = names[..6].iter().flat_map(|n| [Some(*n), None]).collect();
+        let (out, sw) = run(
+            &[
+                Some(sparse[..10].to_vec()),
+                None,
+                Some(sparse[10..].to_vec()),
+                page(&names[6..].iter().map(|n| Some(*n)).collect::<Vec<_>>()),
+            ],
+            1,
+        );
+        assert_eq!(out, vec![s(&names[..10]), s(&names[10..])]);
+        assert!(sw.is_empty());
+        // no icon: layout kept, an out-of-range page still clamped
+        let (out, sw) = run(&[page(&[])], 1);
+        assert_eq!(out, vec![vec![None; 10]]);
+        assert_eq!(sw, vec![0]);
     }
 }

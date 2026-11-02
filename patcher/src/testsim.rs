@@ -199,6 +199,8 @@ impl<'a> Sim<'a> {
                 Opcode::Int { dst, ptr } => r[rr(dst)] = V::I(code.ints[ptr.0]),
                 Opcode::Float { dst, ptr } => r[rr(dst)] = V::F(code.floats[ptr.0]),
                 Opcode::Null { dst } => r[rr(dst)] = V::Null,
+                // a type value only goes to an alloc stub
+                Opcode::Type { dst, .. } => r[rr(dst)] = V::Null,
                 Opcode::NullCheck { reg } => assert_ne!(r[rr(reg)], V::Null, "null check"),
                 // A null Dyn cast to a number is 0, as hl_dyn_castd / castf / casti give it.
                 Opcode::SafeCast { dst, src }
@@ -318,6 +320,7 @@ impl<'a> Sim<'a> {
                 Opcode::Sub { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) - num(&r[rr(b)])),
                 // i32 division truncates toward zero, like the JIT's idiv.
                 Opcode::SDiv { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) / num(&r[rr(b)])),
+                Opcode::SMod { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) % num(&r[rr(b)])),
                 Opcode::And { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) & num(&r[rr(b)])),
                 Opcode::Or { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) | num(&r[rr(b)])),
                 Opcode::Shl { dst, a, b } => r[rr(dst)] = V::I(num(&r[rr(a)]) << num(&r[rr(b)])),
