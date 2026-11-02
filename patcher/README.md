@@ -2,7 +2,8 @@
 
 The Rust bytecode patcher of wartales-mp. It lives in `patcher/` of this
 repository (crate and library name stay `wartales-tips` / `wartales_tips`);
-`shim\build.ps1` builds it and links it into `winmm.dll`.
+the `winmm` crate depends on it as a Rust library, so `tools\build.ps1` builds it
+into `winmm.dll`.
 
 Tooltips on the Wartales new-game **start choice** screen. Hover an item in the
 starting-troop preview to see the game's own item tooltip; hover a unit line
@@ -842,12 +843,11 @@ Two ways, pick one:
 
 ## Build
 
-From `patcher\` (`..\shim\build.ps1` runs the gnu-target build itself;
-override the location with `-PatcherDir`):
+From `patcher\` (`..\tools\build.ps1` builds `winmm.dll` with this crate inside):
 
 ```powershell
 cargo build --release                                   # wartales-tips.exe (CLI)
-cargo build --release --target x86_64-pc-windows-gnu    # libwartales_tips.a for winmm.dll
+cargo test --release                                    # tests on the real game image skip without it
 .\target\release\wartales-tips.exe patch <in.dat> <out.dat>
 .\target\release\wartales-tips.exe inspect <in.dat> ui.comp.Element
 ```

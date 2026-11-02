@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Morgott. Licensed under CC BY-NC 4.0.
 //
 // Local co-op test harness: a command file channel (TEST BUILD ONLY: compiled
-// with the cargo feature `harness`, i.e. `shim\build.ps1 -Test`; marker
-// WMP_TEST_SEAM; the release dll carries none of it, shim\check.ps1 proves it).
+// with the cargo feature `harness`, i.e. `tools\build.ps1 -Test`; marker
+// WMP_TEST_SEAM; the release dll carries none of it, tools\build.ps1 proves it).
 // docs/coop-harness-plan.md section 8 lists the verbs.
 //
 // Two appended functions. `harnessTick()`, called at op 0 of hxd.App.mainLoop
@@ -105,7 +105,7 @@
 // one player ("S" + account id hex). Instance N plays as the Session id
 // "X" + N + id.substr(1) (User.make: userMap knows it), which its master
 // renders as its lobby member id, as it renders every player's own id
-// (internal/master idOf).
+// (winmm/src/master/lobby.rs id_of).
 // `host` stamps the save's playerId with this id.
 //
 // Validated before editing; a mismatch skips the pass (logged).

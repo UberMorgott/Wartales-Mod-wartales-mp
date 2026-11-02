@@ -10,7 +10,7 @@
 // master names every member by the id its game calls itself, so that test says
 // nothing about how the guests joined: its `JFalse` becomes a `JAlways`, the
 // host's game always asks instance/get, and our master answers from how the
-// guests actually joined (internal/master/starttransport.go). The answer
+// guests actually joined (winmm/src/master.rs start_answer). The answer
 // callback (Lobby.hx:607-619) only knows a relay:
 //
 //   if (r == null) { trace("No server found"); p(null, null); return; }

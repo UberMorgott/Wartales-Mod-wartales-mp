@@ -14,7 +14,7 @@
 //   return true;
 //
 // When a guest's mod files (winmm.dll, res1.pak) differ from the host's, the
-// guest's own master (internal/master/modcheck.go) adds the field `mpModError`
+// guest's own master (winmm/src/master/modcheck.rs) adds the field `mpModError`
 // to the lobby data, a haxe-serialized string that `MPLobby.decodeData` turns
 // back into a String, and also replaces `data.version`, so the vanilla test
 // above blocks the join even where this pass did not apply. The pass makes the
@@ -40,7 +40,7 @@ use super::asm::string_ref;
 use super::*;
 use hlbc::types::ValBool;
 
-/// Lobby data key; internal/master/modcheck.go writes it under this exact name.
+/// Lobby data key; winmm/src/master/modcheck.rs writes it under this exact name.
 const FIELD: &str = "mpModError";
 
 struct Plan {

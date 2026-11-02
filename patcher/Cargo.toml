@@ -7,14 +7,14 @@ description = "Patches Wartales hlboot.dat: item/unit tooltips on the start-choi
 
 [lib]
 name = "wartales_tips"
-crate-type = ["rlib", "staticlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "wartales-tips"
 path = "src/main.rs"
 
 [features]
-# Local co-op test harness (harness.rs): only for shim\build.ps1 -Test, never shipped.
+# Local co-op test harness (harness.rs): only for tools\build.ps1 -Test, never shipped.
 harness = []
 
 [dependencies]
