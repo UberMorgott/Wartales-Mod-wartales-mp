@@ -57,7 +57,7 @@ mod marker_names;
 mod mirror;
 mod mod_version;
 mod net_guard;
-mod npc_talk;
+mod npc_inspect;
 mod party_inventory;
 mod patch_queue;
 mod ping_cell;
@@ -170,7 +170,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     customize_slots::patch_customize_slots(&mut code);
     coop_gates::patch_coop_gates(&mut code);
     force_leave::patch_force_leave(&mut code);
-    npc_talk::patch_npc_talk(&mut code);
+    npc_inspect::patch_npc_inspect(&mut code);
     dialog_recruit::patch_dialog_recruit(&mut code);
     dialog_inventory::patch_dialog_inventory(&mut code);
     camp_talk::patch_camp_talk(&mut code);

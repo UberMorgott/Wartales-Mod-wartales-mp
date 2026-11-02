@@ -237,3 +237,13 @@ Run 2026-10-26 (`D:\WartalesTest\runs\20261026-115816`, `-120514`, `-121525`): h
 Script `scenarios/regress.ps1 -Case chest|rats|confession` (each after `up.ps1`).
 
 Run 2026-10-26 (main 570c8c2 + these verbs; runs `20261026-145107`, `-150901`, `-151632`, `-152657`, `-153355`, `-153742`): start-up lines of `consolidation-verify.md` on both, no `skipped`, no `[mp debrief]`; plain join PASS; spectate lockpick / woodcut / ruins / forge / sing PASS (guest `spectate <id> 0|1`, `forge recv` per hit, `work recv`); T2Tavern enter + leave PASS; chest guest -> chest -> host PASS (Apple 12 -> 9 on the guest, 3 in the chest on both, then on the host; guest `invOp op=5`, host `invNetAdd count=3` + `invOp op=5`); Rat Matriarch PASS (host `3v8` -> `3v20` -> `2v34` units, guest turns go on, no `Null access` / `threw` on either); battle end (`console win`) PASS, debrief loot equal on both (24 stacks), no exception; issue #9 PASS (save taken in `world.Confession` of ConfessionHate, reload, guest joins by code into `world.camp.CampMode`, guest log `Enter DialogOut(ConfessionHate)`, no `Null access .elementType`). Debrief hover / Cure all toggling (consolidation-verify 1.1-1.5) not driven: needs inventory moves under an open Debrief and a curable injury; left for the live test.
+
+### Inspect lock verbs (2026-11-02)
+
+| verb | what it does |
+| --- | --- |
+| `inspect <sub>` | in a place: `Npc.inspect(null)` of the first NPC element whose id contains `<sub>` (the right click's step on the inspecting machine) |
+| `leave` | in a place: `getCurrentPlace().setLeaveState(true, false, null)`, the Leave button's request |
+| dump `meLock` / `locked` | `Std.string` of this machine's `me.lockedWith` and of `Game.getPlayerLocked(false)` |
+
+Run `20261102-140352` (refactor/inspect-lock) vs `20261102-140733` (main), T2Tavern, guest `inspect T2Recruit1`: main host `locked=[ent.Player:124]`, `leave pending: player busy ent.p.Npc(T2Recruit1)` then go; branch host `locked=[]`, `leave pending: go` at once; both: guest `leave closes UnitInfo`, both locks empty on the world map. `act <npc>` opened no dialog on either build (cause not checked), so talk (Npc.talk refuses on `anyPlayerLocked`) is checked through `locked`.

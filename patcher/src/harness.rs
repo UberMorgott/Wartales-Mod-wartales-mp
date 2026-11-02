@@ -46,6 +46,11 @@
 //                       targetX/Y, followSpeed, targetFollowSpeed, ...).
 //       ud <key>        Storage.setUserData(key, null): drops one user-data
 //                       key (a panel's saved spot or size).
+//       leave           in a place: getCurrentPlace().setLeaveState(true, false,
+//                       null), the Leave button's request (RPC to the host).
+//       inspect <sub>   in a place: Npc.inspect(null) of the first NPC element
+//                       whose id contains <sub> (the right click's step on the
+//                       inspecting machine, netInspect__impl). Ack "noelem".
 //       act <sub>       in a place: Element.activate(game.me) (the click's
 //                       path) of the first element whose id contains <sub>;
 //                       `act ?` prints "harness: elem <id>" for each. Ack
@@ -333,6 +338,14 @@ struct Ctx {
     pelem_t: RefType,
     pelem_id: RefField,
     activate: RefFun,
+    /// `inspect`: ent.p.Npc, Npc.inspect and its callback type.
+    npc_t: RefType,
+    npc_inspect: (RefFun, RefType),
+    /// dump `meLock` / `locked`: BasePlayer.lockedWith, Game.getPlayerLocked.
+    bp_locked: (RefField, RefType),
+    get_locked: RefFun,
+    /// `leave`: Place.setLeaveState(leave, forced, onResult) and the callback type.
+    leave_state: (RefFun, RefType),
     /// `play`: Game.ctrl, Controller.allocCallback / startActivity, the conds
     /// virtual and its `player`, the callback type.
     g_ctrl: (RefField, RefType),
@@ -1113,6 +1126,23 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             &[obj_type(code, "ent.p.Element")?, player_t],
             void_t,
         )?,
+        npc_t: obj_type(code, "ent.p.Npc")?,
+        npc_inspect: {
+            let npc_t = obj_type(code, "ent.p.Npc")?;
+            let f = method(code, npc_t, "inspect")?;
+            let cb = *fun_args(code, f).get(1).context("Npc.inspect arity")?;
+            want_sig(code, f.findex, &[npc_t, cb], void_t, "inspect")?;
+            (f.findex, cb)
+        },
+        bp_locked: field(code, player_t, "lockedWith")?,
+        get_locked: mfn(game_t, "getPlayerLocked", &[game_t, bool_t], arr_t)?,
+        leave_state: {
+            let t = obj_type(code, "ent.Place")?;
+            let f = method(code, t, "setLeaveState")?;
+            let cb = *fun_args(code, f).get(3).context("setLeaveState arity")?;
+            want_sig(code, f.findex, &[t, bool_t, bool_t, cb], void_t, "setLeaveState")?;
+            (f.findex, cb)
+        },
         place: {
             let t = obj_type(code, "ent.Place")?;
             let region_t = obj_type(code, "st.Region")?;
@@ -1503,6 +1533,8 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_camtrace = gs("camtrace ");
     let s_ud = gs("ud ");
     let s_act = gs("act ");
+    let s_inspect = gs("inspect ");
+    let s_leave = gs("leave");
     let s_enter = gs("enter ");
     let s_play = gs("play ");
     let s_welcome = gs("welcome");
@@ -1638,6 +1670,13 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let uw = r.r(c.unit_weapon.1);
     let pv = r.r(c.pv_t);
     let pe = r.r(c.pelem_t);
+    let (ins, npc, icb, lk) = (
+        r.r(c.bool_t),
+        r.r(c.npc_t),
+        r.r(c.npc_inspect.1),
+        r.r(c.bp_locked.1),
+    );
+    let lcb = r.r(c.leave_state.1);
     let eid = r.r(c.str_t);
     let aid = r.r(c.str_t);
     let ctrl = r.r(c.g_ctrl.1);
@@ -2242,6 +2281,10 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         dst: b,
         value: ValBool(true),
     });
+    a.op(Opcode::Bool {
+        dst: ins,
+        value: ValBool(false),
+    });
     a.go("act_find");
     a.label("not_play");
 
@@ -2274,9 +2317,49 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     // verb: act <sub>  (place view: Element.activate(game.me) of the first
     // element whose id contains <sub>, the click's own path; `act ?` prints
     // every element id as "harness: elem <id>")
+    // verb: leave  (the place's Leave button: getCurrentPlace().setLeaveState(true,
+    // false, null), an RPC to the host)
+    verb(&mut a, s_leave, "not_leave", None);
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.op(Opcode::Null { dst: plref });
+    a.call(pl, c.place.cur, &[g, plref]);
+    a.if_null(pl, "ack");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Bool {
+        dst: ins,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Null { dst: lcb });
+    a.call(void, c.leave_state.0, &[pl, b, ins, lcb]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_leave");
+
+    // verb: inspect <sub>  (act's search; Npc.inspect(null) of the match)
+    verb(&mut a, s_inspect, "not_inspect", Some(k8));
+    a.op(Opcode::Bool {
+        dst: ins,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.go("act_find");
+    a.label("not_inspect");
     verb(&mut a, s_act, "not_act", Some(k4));
     a.op(Opcode::Bool {
         dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Bool {
+        dst: ins,
         value: ValBool(false),
     });
     a.label("act_find");
@@ -2359,6 +2442,15 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.call(void, c.start_activity, &[ctrl, sp, pe, aid, conds, dobj, i]);
     a.go("ack");
     a.label("act_click");
+    a.if_false(ins, "act_activate");
+    a.op(Opcode::SafeCast { dst: npc, src: pe });
+    a.gg(res, s_noelem);
+    a.if_null(npc, "act_e");
+    a.op(Opcode::Null { dst: icb });
+    a.call(void, c.npc_inspect.0, &[npc, icb]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("act_activate");
     a.call(void, c.activate, &[pe, me]);
     a.go("ack");
     a.label("not_act");
@@ -2944,6 +3036,20 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.lit(code, ",\"me\":");
     w.a.fld(me, g, c.g.me.0);
     w.player(code, me, s);
+    // this machine's own lock and every connected locked player as it sees them
+    w.lit(code, ",\"meLock\":");
+    w.a.op(Opcode::Null { dst: lk });
+    w.a.if_null(me, "melock_q");
+    w.a.fld(lk, me, c.bp_locked.0);
+    w.a.label("melock_q");
+    w.obj_q(lk);
+    w.lit(code, ",\"locked\":");
+    w.a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    w.a.call(list, c.get_locked, &[g, b]);
+    w.obj_q(list);
     // the current place: id, its parent's id, the region kind getRegion gives
     // (the region whose script globals the place's element scripts see)
     w.lit(code, ",\"place\":");
