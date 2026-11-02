@@ -187,18 +187,27 @@ fn run() {
     logf!(log, "transport mode {transport} (direct relay once the public endpoint is verified by inbound traffic, else SDR for everything; \
                 manual codes use direct; Steam invitations retain SDR)");
 
+    // Set on a fatal error: what still runs stops serving, as the Go helper exited.
+    let stop = Arc::new(AtomicBool::new(false));
     {
-        let b = bridge.clone();
-        service(&log, "sdr-bridge", move || {
-            b.run(&AtomicBool::new(false)); // never stopped: it ends with the game
-        });
+        let (b, stop) = (bridge.clone(), stop.clone());
+        service(&log, "sdr-bridge", move || b.run(&stop));
     }
     let (errs, failed) = mpsc::channel::<String>();
     {
-        let (rl, ms, errs) = (Arc::new(rl), ms.clone(), errs.clone());
+        let (rl, ms, errs, stop) = (Arc::new(rl), ms.clone(), errs.clone(), stop.clone());
         let addr = format!("{listen_host}:{port}");
         service(&log, "relay", move || {
-            if let Err(e) = rl.listen_and_serve(&addr, move |c| ms.serve_link(&c)) {
+            // shortcut: the relay's listener stays bound after a fatal error (relay has no close);
+            // its proxy-links are refused then, and the master is gone, so nobody can host.
+            let on_link = move |c: crate::conn::ConnRef| {
+                if stop.load(Ordering::SeqCst) {
+                    c.close();
+                } else {
+                    ms.serve_link(&c);
+                }
+            };
+            if let Err(e) = rl.listen_and_serve(&addr, on_link) {
                 let _ = errs.send(format!("relay: listen {addr}: {e}"));
             }
         });
@@ -253,6 +262,7 @@ fn run() {
         if let Some(ps) = &ps {
             ps.close();
         }
+        stop.store(true, Ordering::SeqCst);
         mapper.close();
         fatal_notice(&err);
     }
