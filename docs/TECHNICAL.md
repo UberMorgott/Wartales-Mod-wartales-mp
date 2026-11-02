@@ -175,8 +175,8 @@ Verified — a single-machine run:
 Verified without Steam — `cargo test --release` in `winmm/`, against a
 stand-in Steam flat API (`winmm/src/steam/fake.rs`):
 
-- all six legacy P2P natives are diverted and their original bodies are never
-  called,
+- the SDR transport behind the six legacy P2P natives (that the hooks are
+  installed is checked in every harness run: `shim.log` `hook ...: installed`),
 - packet semantics over the loopback `ISteamNetworkingMessages`: reliability
   flags per send type, packet boundaries, truncation, per-channel queues, the
   sender's Steam id, automatic session acceptance, close dropping a peer's
@@ -289,8 +289,9 @@ needs no patch for it.
    cannot (another game build), it reports why in `shim.log`
    (`tips: not applied: …`). The stages are all-or-nothing
    (`winmm/src/bytecode.rs`): if the byte patches or this stage do not match,
-   none of the patches is applied and the game loads its original bytecode;
-   the connection part (Steam transport hooks, join by code, relay) still works.
+   none of the patches is applied and the game loads its original bytecode,
+   master config included: it then talks to Shiro's own master, so the mod's
+   co-op fixes and join by code are off until the mod is updated.
 4. **Moves the game's Steam transport onto SDR.** The game's Steam path is
    built on the deprecated `ISteamNetworking` P2P calls in `steam.hdll`. The
    mod hooks those six calls and re-implements them on
