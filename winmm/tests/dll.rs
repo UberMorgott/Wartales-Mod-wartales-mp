@@ -89,7 +89,35 @@ fn forwards_to_system32() {
         std::thread::sleep(Duration::from_millis(20));
     };
     let bound = format!("forwards: {} exports bound, 0 missing", theirs.len());
-    for want in ["attach: winmm.dll proxy loaded", &bound, "worker: started"] {
+    for want in [
+        "attach: winmm.dll proxy loaded",
+        &bound,
+        "hook kernelbase!CreateFileW: installed at ",
+        "hook kernelbase!CreateFileA: installed at ",
+        "worker: started",
+    ] {
+        assert!(text.contains(want), "shim.log lacks {want:?}:\n{text}");
+    }
+
+    // The CreateFileW hook: an unpatchable hlboot.dat is handed out untouched,
+    // and a second open does not patch again.
+    let game = tmp.join("game");
+    std::fs::create_dir_all(&game).unwrap();
+    let boot = game.join("hlboot.dat");
+    std::fs::write(&boot, b"HLB\x09not a supported image").unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            std::fs::read(&boot).unwrap(),
+            b"HLB\x09not a supported image"
+        );
+    }
+    let text = std::fs::read_to_string(&log).unwrap();
+    for want in [
+        "bytecode: open ",
+        "patch: bytecode format 9, want 4 or 5, image left untouched",
+        "bytecode: handing out the untouched original",
+        "bytecode: already refused in this process",
+    ] {
         assert!(text.contains(want), "shim.log lacks {want:?}:\n{text}");
     }
     let _ = std::fs::remove_dir_all(&tmp);

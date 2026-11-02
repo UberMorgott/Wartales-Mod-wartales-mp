@@ -25,7 +25,7 @@ kcp = "0.6.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 quick-xml = "0.42"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
 # Inline hooks (pure Rust, iced-x86). Pinned: hook.rs reads the trampoline's original-function
 # pointer from its 2.3.0 layout (checked at install time and by a test).
 ilhook = { version = "=2.3.0", default-features = false, features = ["x64"] }
