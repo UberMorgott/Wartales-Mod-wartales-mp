@@ -7,6 +7,7 @@ pub use wartales_tips;
 pub mod log;
 pub use log::{rand_bytes, Log};
 pub mod conn;
+pub mod dll;
 pub mod forward;
 pub mod pe;
 
