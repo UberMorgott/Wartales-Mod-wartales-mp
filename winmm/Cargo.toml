@@ -6,8 +6,9 @@ license = "CC-BY-NC-4.0"
 description = "Wartales direct co-op helper (master, relay, proxy-link, punch, NAT), linked into winmm.dll"
 
 [lib]
-name = "wartales_mp"
-crate-type = ["rlib", "staticlib"]
+name = "winmm"
+# The game loads winmm.dll from its folder; rlib for the integration tests.
+crate-type = ["cdylib", "rlib"]
 
 [features]
 # Local co-op test harness: only for shim\build.ps1 -Test, never shipped.
