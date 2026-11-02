@@ -28,7 +28,11 @@
 // is mirrored too, despite being replicated: SingAction.startSong (the
 // bard's machine only: it runs once the chosen song's delay is over) sends
 // start and hit (kind 2); the hit plays the song's anim ("Sing", read from
-// startSong) looped, the end (_cancel, as above) the idle.
+// startSong) looped, the end (_cancel, as above) the idle. The bard is not a
+// parked worker (a coop activity never calls addUnitToElement) but the
+// replicated activity's unitView, a child of the stage coop_spectate.rs shows:
+// y is the activity's own hxbit uid and the worker `refs.get(y).unitView`.
+// The host skips it (stage 0): its hidden SingAction gets the startSing RPC.
 //
 // The events ride the ping RPC like the forge mirror (mirror.rs), with their
 // own sentinel x = -1000000064, y = hxbit uid of the activity element (place)
@@ -52,7 +56,7 @@
 //     the worker's entry forgotten.
 // shim.log: `mp: work send <code> <kind> <camp> <uid>` on the player's
 // machine, `mp: work recv <code> <kind> <camp> <stage>` on the others (stage 3
-// start, 4 hit, 5 end; 1 no worker found).
+// start, 4 hit, 5 end; 1 no worker found; 0 the song on the host).
 // All players need this build (an older one shows a far-away ping with its
 // sound). The y (a unit / element uid) and z go over the wire as f32 too. Validated before editing; a mismatch skips the pass (logged).
 
@@ -77,6 +81,10 @@ pub(crate) struct Plan {
     pub(crate) ar_act: RefField,
     pub(crate) w_game: RefField,
     pub(crate) a_game: RefField,
+    /// Activity.__uid and .unitView: the song's bard (kind 2), Game.isAuth.
+    pub(crate) a_uid: RefField,
+    pub(crate) a_view: RefField,
+    pub(crate) g_auth: RefField,
     pub(crate) sg_act: RefField,
     pub(crate) work_g: RefGlobal,
     /// The bard's singing anim ("Sing"), looped while the song plays.
@@ -122,6 +130,9 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         }
     }
     let a_game = typed(code, b.act_t, "game", b.game_t)?;
+    let a_uid = typed(code, b.act_t, "__uid", b.i32_)?;
+    let a_view = typed(code, b.act_t, "unitView", b.ent_t)?;
+    let g_auth = typed(code, b.game_t, "isAuth", b.bool_)?;
 
     let m = |t: RefType, name: &str| -> Result<usize> {
         let f = method(code, t, name)?;
@@ -156,6 +167,9 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         sg_act,
         w_game,
         a_game,
+        a_uid,
+        a_view,
+        g_auth,
         work_g,
         sing_g,
         sites,
@@ -286,7 +300,7 @@ fn add_send(code: &mut Bytecode, p: &Plan, g: &G) -> Result<RefFun> {
             b: k,
             offset: 0,
         },
-        "shared",
+        "sing",
     );
     a.op(Opcode::Field {
         dst: ah,
@@ -294,7 +308,6 @@ fn add_send(code: &mut Bytecode, p: &Plan, g: &G) -> Result<RefFun> {
         field: p.a_host,
     });
     a.jmp(Opcode::JNotNull { reg: ah, offset: 0 }, "untrap");
-    a.label("shared");
     get(&mut a, mode, game, p.g_mode);
     a.op(Opcode::GetGlobal {
         dst: cls,
@@ -327,6 +340,15 @@ fn add_send(code: &mut Bytecode, p: &Plan, g: &G) -> Result<RefFun> {
         dst: uid,
         obj: tgt,
         field: p.e_uid,
+    });
+    int(&mut a, code, cb, 0);
+    a.jmp(Opcode::JAlways { offset: 0 }, "enc");
+    // the song: the replicated activity's own uid (its unitView is the bard)
+    a.label("sing");
+    a.op(Opcode::Field {
+        dst: uid,
+        obj: act,
+        field: p.a_uid,
     });
     int(&mut a, code, cb, 0);
     // z = code + (camp << 2) + (kind << 3)
@@ -500,6 +522,14 @@ fn add_recv(
         r.r(p.ent_t),
     );
     let (cur, anim) = (r.r(p.str_t), r.r(p.str_t));
+    let (au, host, ctx, refs, d, sa) = (
+        r.r(p.bool_),
+        r.r(p.host_t),
+        r.r(p.ctx_t),
+        r.r(p.refs_t),
+        r.r(p.dyn_t),
+        r.r(p.act_t),
+    );
     let sent = float_const(code, SENTINEL);
     let mut a = Asm::new();
     a.op(Opcode::Bool {
@@ -599,6 +629,60 @@ fn add_recv(
     });
     a.label("look");
     a.op(Opcode::ToInt { dst: uid, src: y });
+    int(&mut a, code, k, KIND_SING);
+    a.jmp(
+        Opcode::JNotEq {
+            a: kind,
+            b: k,
+            offset: 0,
+        },
+        "worker",
+    );
+    // the song: the bard is the activity's unitView (a child of the stage,
+    // coop_spectate.rs shows it); the host's own SingAction plays it (stage 0)
+    int(&mut a, code, stage, 0);
+    a.op(Opcode::Field {
+        dst: au,
+        obj: game,
+        field: p.g_auth,
+    });
+    a.jmp(
+        Opcode::JTrue {
+            cond: au,
+            offset: 0,
+        },
+        "untrap",
+    );
+    int(&mut a, code, stage, 1);
+    for (dst, obj, field) in [
+        (host, ctrl, p.c_host),
+        (ctx, host, p.h_ctx),
+        (refs, ctx, p.x_refs),
+    ] {
+        a.op(Opcode::Field { dst, obj, field });
+        a.jmp(
+            Opcode::JNull {
+                reg: dst,
+                offset: 0,
+            },
+            "untrap",
+        );
+    }
+    a.op(Opcode::Call2 {
+        dst: d,
+        fun: p.refs_get,
+        arg0: refs,
+        arg1: uid,
+    });
+    a.jmp(Opcode::JNull { reg: d, offset: 0 }, "untrap");
+    a.op(Opcode::SafeCast { dst: sa, src: d });
+    a.op(Opcode::Field {
+        dst: e,
+        obj: sa,
+        field: p.a_view,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "found");
+    a.label("worker");
     a.op(Opcode::Call3 {
         dst: e,
         fun: worker,
@@ -606,6 +690,7 @@ fn add_recv(
         arg1: uid,
         arg2: is_camp,
     });
+    a.label("found");
     a.jmp(Opcode::JNull { reg: e, offset: 0 }, "untrap");
     int(&mut a, code, stage, 2);
     // start: remember the worker's idle anim
@@ -1177,6 +1262,7 @@ mod tests {
         parked: V,
         camper: V,
         act: V,
+        bard: V,
     }
 
     /// A machine (`me`) in a place where `other`'s unit (uid 9) is parked at
@@ -1226,12 +1312,18 @@ mod tests {
         ]);
         let ctrl = c.obj(&[(p.c_game, game.clone()), (p.c_host, host)]);
         c.set(&game, p.g_ctrl, ctrl.clone());
+        // the song's bard: the replicated activity's (uid 55) unitView
+        let bard = c.obj(&[(p.e_obj, wobj.clone()), (p.e_anim, V::S("IdlePose".into()))]);
         let act = c.obj(&[
             (p.a_target, elt.clone()),
             (p.a_unit, unit.clone()),
             (p.a_game, game.clone()),
+            (p.a_uid, V::I(55)),
+            (p.a_view, bard.clone()),
         ]);
+        c.put("refs", "55", act.clone());
         W {
+            bard,
             ctrl,
             game,
             me,
@@ -1300,11 +1392,11 @@ mod tests {
         s.c.set(&w.act, p.a_host, h);
         s.run(send, vec![w.game.clone(), w.act.clone(), V::I(0), V::I(0)]);
         assert!(s.c.log.is_empty());
-        // ... except the bard's song: coop, still sent
+        // ... except the bard's song: coop, still sent, with the activity's uid
         s.run(send, vec![w.game.clone(), w.act.clone(), V::I(1), V::I(2)]);
         assert_eq!(
             ping(&mut s)[0][1..4],
-            [V::F(SENTINEL), V::F(9.0), z(1, 1, 2)]
+            [V::F(SENTINEL), V::F(55.0), z(1, 0, 2)]
         );
         s.c.log.clear();
         s.c.set(&w.act, p.a_host, V::Null);
@@ -1376,24 +1468,33 @@ mod tests {
         }
         assert_eq!(s.c.take("println"), vec![vec![st("mp: work recv 2 1 0 5")]]);
 
-        // the bard's song (kind 2): "Sing" looped from the hit, the idle at the end
-        s.c.set(&w.parked, p.e_anim, st("IdlePose"));
-        ev(&mut s, SENTINEL, 77.0, z(0, 0, 2), &w.other);
-        ev(&mut s, SENTINEL, 77.0, z(1, 0, 2), &w.other);
+        // the bard's song (kind 2, y = the activity's uid): "Sing" looped on
+        // its unitView from the hit, the idle at the end
+        ev(&mut s, SENTINEL, 55.0, z(0, 0, 2), &w.other);
+        ev(&mut s, SENTINEL, 55.0, z(1, 0, 2), &w.other);
         let plays = s.c.take("play");
         assert_eq!(plays.len(), 1);
-        assert_eq!(plays[0][..2], [w.parked.clone(), st("Sing")]);
+        assert_eq!(plays[0][..2], [w.bard.clone(), st("Sing")]);
         assert_eq!(s.c.key_get(&plays[0][2], "dloop"), V::B(true));
-        s.c.set(&w.parked, p.e_anim, st("Sing"));
-        ev(&mut s, SENTINEL, 77.0, z(2, 0, 2), &w.other);
+        s.c.set(&w.bard, p.e_anim, st("Sing"));
+        ev(&mut s, SENTINEL, 55.0, z(2, 0, 2), &w.other);
         let plays = s.c.take("play");
-        assert_eq!(plays[0][..2], [w.parked.clone(), st("IdlePose")]);
+        assert_eq!(plays[0][..2], [w.bard.clone(), st("IdlePose")]);
+        // an unknown activity uid: nothing (stage 1); the host: its own
+        // SingAction plays the song, nothing here (stage 0)
+        ev(&mut s, SENTINEL, 56.0, z(1, 0, 2), &w.other);
+        s.c.set(&w.game, p.g_auth, V::B(true));
+        ev(&mut s, SENTINEL, 55.0, z(1, 0, 2), &w.other);
+        s.c.set(&w.game, p.g_auth, V::B(false));
+        assert!(s.c.take("play").is_empty());
         assert_eq!(
             s.c.take("println"),
             vec![
                 vec![st("mp: work recv 0 2 0 3")],
                 vec![st("mp: work recv 1 2 0 4")],
-                vec![st("mp: work recv 2 2 0 5")]
+                vec![st("mp: work recv 2 2 0 5")],
+                vec![st("mp: work recv 1 2 0 1")],
+                vec![st("mp: work recv 1 2 0 0")]
             ]
         );
 

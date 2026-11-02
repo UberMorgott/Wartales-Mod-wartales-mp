@@ -738,14 +738,15 @@ onActionDone's end `netFade` -> `spectFade` (not replicated when the activity
 has a unit with an owner). shim.log: `mp: spectate <id> 1` on each watching
 spectator. Unit-less activities (BoardPuzzle, a solved NinePuzzle) stay shared
 as in vanilla. Mini-games seen only through the activity camera (LockPick: the
-3D lock in front of it; NinePuzzle, CylinderPuzzle: the board; Sing: the bard's
-stage, shown by the camera switch) give a spectator the vanilla start
-(`g = false`, `mp: spectate <id> 0`); the window and tutorial rules above still
-apply (a client spectator's LockPick is the replicated window, whose `init`
-builds the lock from the synced lockData). `_cancel__impl` (every machine's end)
-starts with `spectEnd(this)`: on a spectator of Sing, the end half of the vanilla
-stage pair (the fade-in shows `target.obj` and hides its HandTool; onActionDone's
-closure, which a client spectator never runs, reverts it). Not covered: the unit choice before the start (the host's shared
+3D lock in front of it; NinePuzzle, CylinderPuzzle: the board) give a spectator
+the vanilla start (`g = false`, `mp: spectate <id> 0`); the window and tutorial
+rules above still apply (a client spectator's LockPick is the replicated window,
+whose `init` builds the lock from the synced lockData). The bard's song (Sing)
+is watched from the spectator's own camera: the bard (the activity's unitView)
+is a child of the stage `target.obj`, which only the skipped fade-in shows (and
+hides its HandTool), so spectPre runs that start half itself (`spectStage`),
+and `_cancel__impl` (every machine's end) starts with `spectEnd(this)`, the end
+half (onActionDone's closure, which a spectator does not run). Not covered: the unit choice before the start (the host's shared
 ChooseUnit, the clients' wait Interactive): which player starts it is known on
 the host only (`conds` is not synced). All players need this build. Skipped
 (logged) on mismatch.
@@ -778,7 +779,12 @@ once (onEnd: that idle looped), the end loops the idle. `mirror.rs` also holds w
 validate (types, fields, ping RPC, Entity.play, WaitEvent, logging) and the
 shared one-shot / idle anim code. shim.log: `mp: work send <code> <kind>
 <camp> <uid>`, `mp: work recv <code> <kind> <camp> <stage>` (3 start, 4 hit, 5
-end; 1 no worker). All players need this build (an older one shows a far-away
+end; 1 no worker; 0 the song on the host). The bard's song (Sing, kind 2) is
+replicated, but a client spectator's SingAction never registers, so
+`SingAction.startSong` sends start and hit for it too: y is the activity's own
+hxbit uid and the worker `refs.get(y).unitView` (the bard on the stage; a coop
+activity never calls addUnitToElement), "Sing" looped until the end; the host
+skips it (its hidden SingAction gets the startSing RPC). All players need this build (an older one shows a far-away
 ping with its sound). Skipped (logged) on mismatch.## Install
 
 Two ways, pick one:

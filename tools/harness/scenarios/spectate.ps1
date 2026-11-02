@@ -5,7 +5,7 @@
 #
 #   .\tools\harness\scenarios\spectate.ps1 -Case lockpick|woodcut|ruins|forge|sing
 # Run after scenarios\up.ps1. shim.log: `mp: spectate <id> 1` (watching from its
-# own camera) or `0` (camera activity: LockPick, NinePuzzle, CylinderPuzzle, Sing).
+# own camera) or `0` (camera activity: LockPick, NinePuzzle, CylinderPuzzle).
 param([ValidateSet('lockpick', 'woodcut', 'ruins', 'forge', 'sing')][string]$Case = 'lockpick')
 . (Join-Path $PSScriptRoot 'common.ps1')
 switch ($Case) {
@@ -43,8 +43,9 @@ switch ($Case) {
         T A 'snap np-host'; T B 'snap np-guest'
     }
     'sing' {
-        # the bard's song in Cortia's tavern (T2Tavern): a camera activity, the
-        # guest sees the stage; at the end its stage is hidden again (spectEnd)
+        # the bard's song in Cortia's tavern (T2Tavern): the guest keeps its own
+        # camera and sees the bard on the stage (spectStage, work recv 4); at the
+        # end the stage is hidden again (spectEnd)
         Go-Place 'T2Tavern'
         T A 'job Bard'
         T B 'snap sg-before-guest'

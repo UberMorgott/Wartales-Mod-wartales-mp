@@ -43,14 +43,19 @@
 //     `this.cameraSave = ...` (so _cancel restores no camera). The rest of
 //     _start (start cost on the host, GC entry, trait level, the start sound)
 //     runs as is.
+//     The bard's song (Sing): the unit's unitView is a child of the stage
+//     (`target.obj`), which only the skipped fade-in shows (and hides its
+//     HandTool), so a watching spectator's spectPre runs that start half
+//     itself (`spectStage`): the bard stands and sings on the tavern stage
+//     while the spectator keeps its camera and input.
 //   _cancel__impl (every machine's end): `spectEnd(this)` first: on a
-//     spectator of Sing the end half of the vanilla stage pair (the fade-in
-//     shows `target.obj`, hides its HandTool; onActionDone's closure, which a
-//     client spectator never runs, hides / shows them back).
-//     Exception (CAMERA_ACTIVITIES: LockPick, NinePuzzle, CylinderPuzzle,
-//     Sing): seen only through the activity camera (the lock in front of it,
-//     the puzzle board; the bard, whose stage the camera switch shows), so
-//     spectPre gives false and the spectator gets the vanilla start.
+//     spectator of Sing the end half of the vanilla stage pair
+//     (onActionDone's closure, which a spectator does not run, hides the
+//     stage and shows its HandTool again).
+//     Exception (CAMERA_ACTIVITIES: LockPick, NinePuzzle, CylinderPuzzle):
+//     seen only through the activity camera (the lock in front of it, the
+//     puzzle board), so spectPre gives false and the spectator gets the
+//     vanilla start.
 //   onReady closure: showTutorial(..., cb) -> spectTut: a spectator gets no
 //     tutorial; cb (the window closure) runs at once on the host and not at
 //     all on a client spectator: the mini-game windows are built for the
@@ -83,10 +88,11 @@ use super::*;
 use hlbc::types::{RefGlobal, ValBool};
 
 /// Activities whose mini-game is only seen through the activity camera (the
-/// ruins puzzle boards, the bard's stage that the camera switch shows): their
-/// spectators keep the vanilla camera move, locks and inventory; the rest of
-/// the pass (no tutorial, no client window, hidden host window) still applies.
-const CAMERA_ACTIVITIES: [&str; 4] = ["LockPick", "NinePuzzle", "CylinderPuzzle", "Sing"];
+/// lock, the ruins puzzle boards): their spectators keep the vanilla camera
+/// move, locks and inventory; the rest of the pass (no tutorial, no client
+/// window, hidden host window) still applies. Not Sing: the bard stands on the
+/// tavern stage, which spectStage shows in the spectator's own view.
+const CAMERA_ACTIVITIES: [&str; 3] = ["LockPick", "NinePuzzle", "CylinderPuzzle"];
 
 pub(crate) struct Plan {
     act_t: RefType,
@@ -688,6 +694,7 @@ fn add_pre(
     code: &mut Bytecode,
     p: &Plan,
     spect: RefFun,
+    stage: RefFun,
     tag: RefGlobal,
     sp: RefGlobal,
     cam_ids: &[RefGlobal],
@@ -765,8 +772,14 @@ fn add_pre(
             "log",
         );
     }
-    // watching from its own camera: no camera change, the wait Interactive gone
+    // watching from its own camera: no camera change, the wait Interactive
+    // gone; the bard's stage shown as the skipped fade-in would
     a.label("watch");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: stage,
+        arg0: act,
+    });
     int(&mut a, code, m, 1);
     a.op(Opcode::Bool {
         dst: g,
@@ -1060,18 +1073,20 @@ fn add_help(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
     push_fn(code, vec![p.act_t], p.void_, r.0, a.finish(), p.dbg_file)
 }
 
-/// `spectEnd(act)`, at `_cancel__impl` entry (the end every machine runs): on a
-/// spectator of the bard's song, the end half of vanilla's Sing stage pair. The
-/// fade-in of `_start` shows the stage (`target.obj.flags |= 2`) and hides its
-/// `HandTool`; the reverse (`target.obj.flags &= ~2`, HandTool shown) sits in
-/// onActionDone's closure, which a client spectator never runs (no window).
-/// Idempotent where that closure runs as well (the host).
-fn add_end(
+/// Vanilla's Sing stage pair on a spectator of the bard's song: `_start`'s
+/// fade-in shows the stage (`target.obj.flags |= 2`, the parent of the unit's
+/// unitView: the bard) and hides its `HandTool`; onActionDone's closure does
+/// the reverse. A spectator runs neither (changeCamera = false; a client has no
+/// window), so `show` builds `spectStage(act)` (the start half, from spectPre)
+/// and `!show` builds `spectEnd(act)` (the end half, at `_cancel__impl` entry,
+/// the end every machine runs). Idempotent where the closures run as well.
+fn add_stage(
     code: &mut Bytecode,
     p: &Plan,
     spect: RefFun,
     sing: RefGlobal,
     hand: RefGlobal,
+    show: bool,
 ) -> Result<RefFun> {
     let mut r = Regs(vec![p.act_t]);
     let act = Reg(0);
@@ -1158,12 +1173,25 @@ fn add_end(
         obj: o,
         field: p.o3_flags,
     });
-    int(&mut a, code, m, !2);
-    a.op(Opcode::And {
-        dst: fl,
-        a: fl,
-        b: m,
-    });
+    // visible bit (2): set on one of stage / HandTool, cleared on the other
+    let flip = |a: &mut Asm, code: &mut Bytecode, set: bool| {
+        if set {
+            int(a, code, m, 2);
+            a.op(Opcode::Or {
+                dst: fl,
+                a: fl,
+                b: m,
+            });
+        } else {
+            int(a, code, m, !2);
+            a.op(Opcode::And {
+                dst: fl,
+                a: fl,
+                b: m,
+            });
+        }
+    };
+    flip(&mut a, code, show);
     a.op(Opcode::SetField {
         obj: o,
         field: p.o3_flags,
@@ -1184,12 +1212,7 @@ fn add_end(
         obj: h,
         field: p.o3_flags,
     });
-    int(&mut a, code, m, 2);
-    a.op(Opcode::Or {
-        dst: fl,
-        a: fl,
-        b: m,
-    });
+    flip(&mut a, code, !show);
     a.op(Opcode::SetField {
         obj: h,
         field: p.o3_flags,
@@ -1260,25 +1283,26 @@ fn add_fade(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
     push_fn(code, args, p.void_, r.0, a.finish(), p.dbg_file)
 }
 
-/// New functions, in this order: spect, spectPre, spectInv, spectTut,
-/// spectWin, spectHelp, spectFade, spectEnd.
-fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 8]> {
+/// New functions, in this order: spect, spectStage, spectPre, spectInv,
+/// spectTut, spectWin, spectHelp, spectFade, spectEnd.
+fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 9]> {
     let tag = str_global(code, p.str_t, "mp: spectate ");
     let sp = str_global(code, p.str_t, " ");
     let spect = add_spect(code, p)?;
+    let sing = str_global(code, p.str_t, "Sing");
+    let hand = str_global(code, p.str_t, "HandTool");
+    let stage = add_stage(code, p, spect, sing, hand, true)?;
     let cam_ids: Vec<RefGlobal> = CAMERA_ACTIVITIES
         .iter()
         .map(|s| str_global(code, p.str_t, s))
         .collect();
-    let pre = add_pre(code, p, spect, tag, sp, &cam_ids)?;
+    let pre = add_pre(code, p, spect, stage, tag, sp, &cam_ids)?;
     let inv = add_inv(code, p)?;
     let tut = add_tut(code, p, spect)?;
     let win = add_win(code, p, spect)?;
     let help = add_help(code, p, spect)?;
     let fade = add_fade(code, p)?;
-    let sing = str_global(code, p.str_t, "Sing");
-    let hand = str_global(code, p.str_t, "HandTool");
-    let end = add_end(code, p, spect, sing, hand)?;
+    let end = add_stage(code, p, spect, sing, hand, false)?;
 
     // _cancel__impl: spectEnd(this) first (a spectator's end of the Sing stage)
     {
@@ -1437,8 +1461,8 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 8]> {
     eprintln!(
         "patched coop spectate: Activity._start fn@{} (gate fn@{}, inventory fn@{}), onReady fn@{} \
          tutorial -> fn@{}, window closure fn@{} setWindow -> fn@{} / addHelpIcon -> fn@{}, \
-         addHelpIcon__impl gated (spect fn@{}), end fade fn@{} -> fn@{}, _cancel__impl -> spectEnd fn@{}: other players keep \
-         their scene and watch the worker",
+         addHelpIcon__impl gated (spect fn@{}), end fade fn@{} -> fn@{}, Sing stage fn@{} / _cancel__impl -> spectEnd fn@{}: \
+         other players keep their scene and watch the worker",
         code.functions[p.start_fi].findex.0,
         pre.0,
         inv.0,
@@ -1450,9 +1474,10 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 8]> {
         spect.0,
         code.functions[p.fade_fi].findex.0,
         fade.0,
+        stage.0,
         end.0
     );
-    Ok([spect, pre, inv, tut, win, help, fade, end])
+    Ok([spect, stage, pre, inv, tut, win, help, fade, end])
 }
 
 /// Keeps shared mini-game windows off the other players' screens, or leaves
@@ -1485,7 +1510,7 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 8);
+        assert_eq!(back.functions.len(), n + 9);
         let sites = [
             p.start_fi,
             p.ready_fi,
@@ -1502,8 +1527,17 @@ mod tests {
             );
         }
         let nf = |k: usize| back.functions[n + k].findex;
-        let (spect, pre, inv, tut, win, help, fade, end) =
-            (nf(0), nf(1), nf(2), nf(3), nf(4), nf(5), nf(6), nf(7));
+        let (spect, stage, pre, inv, tut, win, help, fade, end) = (
+            nf(0),
+            nf(1),
+            nf(2),
+            nf(3),
+            nf(4),
+            nf(5),
+            nf(6),
+            nf(7),
+            nf(8),
+        );
         for &fi in &sites {
             let f = &back.functions[fi];
             check_types(&back, f, 0..f.ops.len());
@@ -1617,6 +1651,7 @@ mod tests {
             p.str_add,
             p.str_cmp,
             spect,
+            stage,
         ];
         for f in &back.functions[n..] {
             for op in &f.ops {
@@ -1847,7 +1882,7 @@ mod tests {
             eprintln!("skipped: {HLBOOT} not found");
             return;
         };
-        let (pre, inv) = (code.functions[n + 1].findex, code.functions[n + 2].findex);
+        let (pre, inv) = (code.functions[n + 2].findex, code.functions[n + 3].findex);
         let mut s = sim(&code, n, &p);
         let w = world(&mut s, &p);
         let it = s.c.obj(&[]);
@@ -1899,37 +1934,49 @@ mod tests {
         assert!(s.c.log.is_empty());
     }
 
-    /// spectEnd at _cancel: a spectator of the song hides the stage again and
-    /// shows its HandTool (the other bits kept); nothing for the player or
-    /// another activity.
+    /// The Sing stage pair on a spectator: spectPre (watching, no camera) shows
+    /// the stage and hides its HandTool, spectEnd at _cancel reverts both (the
+    /// other bits kept); nothing for the player or another activity.
     #[test]
-    fn cancel_end() {
+    fn sing_stage() {
         let Some((code, n, p)) = patched() else {
             eprintln!("skipped: {HLBOOT} not found");
             return;
         };
-        let end = code.functions[n + 7].findex;
+        let (pre, end) = (code.functions[n + 2].findex, code.functions[n + 8].findex);
         let mut s = sim(&code, n, &p);
         let w = world(&mut s, &p);
-        let hand = s.c.obj(&[(p.o3_flags, V::I(1))]);
-        let obj = s.c.obj(&[(p.o3_flags, V::I(3))]);
+        let hand = s.c.obj(&[(p.o3_flags, V::I(3))]);
+        let obj = s.c.obj(&[(p.o3_flags, V::I(1))]);
         s.c.key_set(&obj, "HandTool".into(), hand.clone());
         let tgt = s.c.obj(&[(p.e_obj, obj.clone())]);
         s.c.set(&w.act, p.a_target, tgt);
         let inf = s.c.get(&w.act, p.a_inf);
+        let flags = |s: &Sim| (s.c.get(&obj, p.o3_flags), s.c.get(&hand, p.o3_flags));
         // another activity: untouched
+        s.run(pre, vec![w.act.clone()]);
         s.run(end, vec![w.act.clone()]);
-        assert_eq!(s.c.get(&obj, p.o3_flags), V::I(3));
+        assert_eq!(flags(&s), (V::I(1), V::I(3)));
         s.c.set(&inf, p.i_id, V::S("Sing".into()));
-        // the player: untouched
+        // the player: untouched, vanilla camera start
         s.c.set(&w.unit, p.u_owner, w.me.clone());
+        s.c.set(&w.act, p.a_cc, V::B(true));
+        assert_eq!(s.run(pre, vec![w.act.clone()]), V::B(false));
         s.run(end, vec![w.act.clone()]);
-        assert_eq!(s.c.get(&obj, p.o3_flags), V::I(3));
-        // a spectator of the song
+        assert_eq!(flags(&s), (V::I(1), V::I(3)));
+        assert_eq!(s.c.get(&w.act, p.a_cc), V::B(true));
+        // a spectator of the song: own camera, stage shown, then hidden again
         s.c.set(&w.unit, p.u_owner, w.other.clone());
+        s.c.take("println");
+        assert_eq!(s.run(pre, vec![w.act.clone()]), V::B(true));
+        assert_eq!(s.c.get(&w.act, p.a_cc), V::B(false));
+        assert_eq!(flags(&s), (V::I(3), V::I(1)));
+        assert_eq!(
+            s.c.take("println"),
+            vec![vec![V::S("mp: spectate Sing 1".into())]]
+        );
         s.run(end, vec![w.act.clone()]);
-        assert_eq!(s.c.get(&obj, p.o3_flags), V::I(1));
-        assert_eq!(s.c.get(&hand, p.o3_flags), V::I(3));
+        assert_eq!(flags(&s), (V::I(1), V::I(3)));
         assert!(s.c.log.is_empty());
     }
 
@@ -1941,7 +1988,7 @@ mod tests {
             return;
         };
         let f = |k: usize| code.functions[n + k].findex;
-        let (tut, win, help, fade) = (f(3), f(4), f(5), f(6));
+        let (tut, win, help, fade) = (f(4), f(5), f(6), f(7));
         let mut s = sim(&code, n, &p);
         let w = world(&mut s, &p);
         let root = s.c.obj(&[]);
