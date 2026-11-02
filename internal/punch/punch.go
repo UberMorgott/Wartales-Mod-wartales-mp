@@ -77,15 +77,18 @@ type Socket struct {
 	done    chan struct{}
 
 	mu      sync.Mutex
-	stun    map[string]stunWaiter // pending binding requests by transaction id
-	targets map[string]target     // addresses being punched
-	heard   map[string]time.Time  // last punch or pong from an address
-	news    chan struct{}         // closed and replaced on every hear
-	peers   map[string]*peer      // tunnels by peer address, both roles
-	keep    *net.UDPAddr          // STUN server for the keepalive
-	keepTx  string                // its pending transaction
-	mapped  *net.UDPAddr          // last address STUN saw
+	stun    map[string]stunWaiter   // pending binding requests by transaction id
+	targets map[string]target       // addresses being punched
+	heard   map[string]time.Time    // last punch or pong from an address
+	news    chan struct{}           // closed and replaced on every hear
+	peers   map[string]*peer        // tunnels by peer address, both roles
+	fwds    map[string]net.Listener // guest role: loopback forwarders by host address
+	keep    *net.UDPAddr            // STUN server for the keepalive
+	keepTx  string                  // its pending transaction
+	mapped  *net.UDPAddr            // last address STUN saw
 	closed  bool
+
+	dialMu sync.Mutex // one tunnel dial at a time (Dial and the forwarders' redials)
 }
 
 type stunWaiter struct {
@@ -100,13 +103,12 @@ type target struct {
 
 // peer is one tunnel to one address, whoever opened it. Both ends splice
 // the streams they accept into their relay port; the end that joins over it
-// also gets fwd, the loopback listener whose connections become streams.
+// has a loopback forwarder for that address (Socket.fwds) whose connections
+// become streams.
 type peer struct {
 	view *view
 	mux  *smux.Session
-	conv uint32       // the KCP conversation
-	fwd  net.Listener // guarded by Socket.mu
-	dead bool         // guarded by Socket.mu: dropped, fwd must not be set
+	conv uint32 // the KCP conversation
 }
 
 // isKCP reports whether a datagram is a KCP segment (no crypt, no FEC):
@@ -136,6 +138,7 @@ func Open(port int, relay string, servers []string, logger *log.Logger) (*Socket
 		heard:   map[string]time.Time{},
 		news:    make(chan struct{}),
 		peers:   map[string]*peer{},
+		fwds:    map[string]net.Listener{},
 	}
 	go s.read()
 	go s.tick()
@@ -158,11 +161,14 @@ func (s *Socket) Close() error {
 	}
 	s.closed = true
 	close(s.done)
-	peers := s.peers
-	s.peers = map[string]*peer{}
+	peers, fwds := s.peers, s.fwds
+	s.peers, s.fwds = map[string]*peer{}, map[string]net.Listener{}
 	s.mu.Unlock()
 	for _, p := range peers {
 		s.drop(p)
+	}
+	for _, f := range fwds {
+		_ = f.Close()
 	}
 	return s.conn.Close()
 }
@@ -446,18 +452,34 @@ func (e *NoAnswerError) Error() string {
 // to the same address is reused, whoever opened it. Without an answer within
 // AnswerWait it returns a *NoAnswerError and keeps punching for Budget, so the
 // host's reply-code punches find the way open.
+//
+// The loopback address stays the same for that host for the socket's life: a
+// tunnel that dies (a lossy line past the keepalive) is redialed by the next
+// connection to it, so the game's saved server id keeps working when it
+// reconnects.
 func (s *Socket) Dial(host string) (string, error) {
 	ha, err := net.ResolveUDPAddr("udp4", host)
 	if err != nil {
 		return "", err
 	}
+	if _, err := s.tunnel(ha); err != nil {
+		return "", err
+	}
+	return s.forward(ha)
+}
+
+// tunnel returns the live tunnel to ha, opening a new one when there is none.
+func (s *Socket) tunnel(ha *net.UDPAddr) (*peer, error) {
+	s.dialMu.Lock()
+	defer s.dialMu.Unlock()
 	key := ha.String()
 	s.mu.Lock()
 	p := s.peers[key]
 	s.mu.Unlock()
 	if p != nil && !p.mux.IsClosed() {
-		return s.forward(p)
+		return p, nil
 	}
+	host := key
 	s.arm(ha)
 
 	self := make(chan Result, 1)
@@ -473,27 +495,27 @@ func (s *Socket) Dial(host string) (string, error) {
 			e.Reply, _ = code.EncodeReply(code.Endpoint{IP: r.Mapped.IP, Port: uint16(r.Mapped.Port)}) //nolint:gosec // a port
 		}
 		s.log.Printf("punch: no answer from %s within %v; our mapping %v (%s)", host, wait, r.Mapped, r.Mapping)
-		return "", e
+		return nil, e
 	}
 	v := newView(s)
 	sess, err := kcp.NewConn2(ha, nil, 0, 0, v)
 	if err != nil {
 		_ = v.Close()
-		return "", err
+		return nil, err
 	}
 	tune(sess)
 	mux, err := smux.Client(sess, muxConfig())
 	if err != nil {
 		_ = sess.Close()
 		_ = v.Close()
-		return "", err
+		return nil, err
 	}
 	p = &peer{view: v, mux: mux, conv: sess.GetConv()}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		s.drop(p)
-		return "", net.ErrClosed
+		return nil, net.ErrClosed
 	}
 	old := s.peers[key]
 	s.addLocked(key, p)
@@ -502,7 +524,7 @@ func (s *Socket) Dial(host string) (string, error) {
 		s.drop(old)
 	}
 	s.log.Printf("punch: tunnel to %s open", key)
-	return s.forward(p)
+	return p, nil
 }
 
 // waitHeard waits until addr answered recently, or for d.
@@ -526,41 +548,56 @@ func (s *Socket) waitHeard(key string, d time.Duration) bool {
 	}
 }
 
-// forward returns the tunnel's loopback listener, opening it on first use:
-// every connection to it is a new stream.
-func (s *Socket) forward(p *peer) (string, error) {
+// forward returns the loopback listener for host ha, opening it on first use:
+// every connection to it is a new stream of the live tunnel, redialed first
+// when the tunnel is gone. A failed redial closes that connection only; the
+// game sees a refused connect and retries.
+func (s *Socket) forward(ha *net.UDPAddr) (string, error) {
+	key := ha.String()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if p.dead {
+	if s.closed {
 		return "", net.ErrClosed
 	}
-	if p.fwd != nil {
-		return p.fwd.Addr().String(), nil
+	if f := s.fwds[key]; f != nil {
+		return f.Addr().String(), nil
 	}
 	var lc net.ListenConfig
 	fwd, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
 	}
-	p.fwd = fwd
+	s.fwds[key] = fwd
 	go func() {
 		for {
 			c, err := fwd.Accept()
 			if err != nil {
 				return
 			}
-			go func() {
-				st, err := p.mux.OpenStream()
-				if err != nil {
-					_ = c.Close()
-					return
-				}
-				splice(c, st)
-			}()
+			go s.stream(c, ha)
 		}
 	}()
 	s.log.Printf("punch: joining over %s", fwd.Addr())
 	return fwd.Addr().String(), nil
+}
+
+// stream splices one forwarder connection into the tunnel to ha.
+func (s *Socket) stream(c net.Conn, ha *net.UDPAddr) {
+	for try := 0; try < 2; try++ {
+		p, err := s.tunnel(ha)
+		if err != nil {
+			s.log.Printf("punch: redial %s failed: %v", ha, err)
+			break
+		}
+		st, err := p.mux.OpenStream()
+		if err != nil {
+			s.drop(p) // dead but not noticed yet: redial once
+			continue
+		}
+		splice(c, st)
+		return
+	}
+	_ = c.Close()
 }
 
 // addLocked registers a new tunnel (s.mu held): it is served at once and
@@ -581,15 +618,8 @@ func (s *Socket) addLocked(key string, p *peer) {
 	go s.serve(p, key)
 }
 
-// drop closes a tunnel and its listener.
+// drop closes a tunnel; its forwarder stays and redials on the next connection.
 func (s *Socket) drop(p *peer) {
-	s.mu.Lock()
-	p.dead = true
-	fwd := p.fwd
-	s.mu.Unlock()
-	if fwd != nil {
-		_ = fwd.Close()
-	}
 	_ = p.mux.Close() // closes the KCP session
 	_ = p.view.Close()
 }

@@ -281,6 +281,29 @@ func TestPunchGuestRestartSameAddress(t *testing.T) {
 	roundTrip(t, fwd, "after restart")
 }
 
+// A tunnel that dies is redialed by the next connection to the same
+// forwarder: the game's saved route keeps working when it reconnects.
+func TestPunchForwarderRedials(t *testing.T) {
+	host := open(t, echo(t))
+	guest := open(t, "")
+	fwd, err := guest.Dial(local(host))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, fwd, "before the loss")
+	guest.mu.Lock()
+	p := guest.peers[local(host)]
+	guest.mu.Unlock()
+	guest.drop(p)
+	roundTrip(t, fwd, "after the loss")
+	guest.mu.Lock()
+	q := guest.peers[local(host)]
+	guest.mu.Unlock()
+	if q == nil || q == p {
+		t.Fatal("no new tunnel after the redial")
+	}
+}
+
 // Roles swap: the former host dials the former guest, whose tunnel it
 // serves; Dial must open its own instead of reusing the served one.
 func TestPunchRoleSwap(t *testing.T) {
