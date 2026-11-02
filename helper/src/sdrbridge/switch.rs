@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -106,7 +106,7 @@ impl Switch {
     pub fn disconnect(&self, peer: u64) {
         let c = self.inner.mu.lock().unwrap().clients.get(&peer).cloned();
         if let Some(c) = c {
-            let _ = c.shutdown(Shutdown::Both);
+            crate::conn::close_tcp(&c);
         }
     }
 }
@@ -119,7 +119,7 @@ impl Drop for Switch {
             let _ = h.join();
         }
         for c in self.inner.mu.lock().unwrap().clients.values() {
-            let _ = c.shutdown(Shutdown::Both);
+            crate::conn::close_tcp(&c);
         }
         let _ = std::fs::remove_dir_all(&self.inner.dir);
     }
@@ -149,7 +149,7 @@ fn write_frame(mut c: &TcpStream, typ: u8, peer: u64, payload: &[u8]) -> io::Res
 impl Inner {
     fn serve(&self, c: Arc<TcpStream>) {
         self.serve_authed(&c);
-        let _ = c.shutdown(Shutdown::Both);
+        crate::conn::close_tcp(&c);
     }
 
     fn serve_authed(&self, c: &Arc<TcpStream>) {

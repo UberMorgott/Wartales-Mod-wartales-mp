@@ -15,7 +15,7 @@ use rcgen::{
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use rustls::{ServerConfig, ServerConnection};
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -301,11 +301,8 @@ impl Conn for TlsConn {
                 let _ = s.tls.write_tls(&mut &self.sock);
             }
         }
-        let _ = self.sock.shutdown(Shutdown::Both);
-        // On Windows shutdown does not wake a recv already blocked in the
-        // kernel; cancelling it does (later reads see the shutdown and return 0).
-        use std::os::windows::io::AsRawSocket;
-        unsafe { windows_sys::Win32::System::IO::CancelIoEx(self.rsock.as_raw_socket() as _, std::ptr::null()) };
+        crate::conn::close_tcp(&self.rsock);
+        crate::conn::close_tcp(&self.sock);
     }
     fn peer_addr(&self) -> Option<SocketAddr> {
         self.sock.peer_addr().ok()

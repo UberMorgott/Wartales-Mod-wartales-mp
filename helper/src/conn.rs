@@ -41,11 +41,21 @@ impl Conn for TcpStream {
         TcpStream::set_write_timeout(self, d)
     }
     fn close(&self) {
-        let _ = self.shutdown(Shutdown::Both); // already closed is fine
+        close_tcp(self);
     }
     fn peer_addr(&self) -> Option<SocketAddr> {
         TcpStream::peer_addr(self).ok()
     }
+}
+
+/// Go's TCPConn.Close for a shared stream: shutdown, then cancel a recv that
+/// is already blocked (on Windows shutdown alone does not wake it; later reads
+/// see the shutdown and return 0). Idempotent.
+pub fn close_tcp(s: &TcpStream) {
+    use std::os::windows::io::AsRawSocket;
+    let _ = s.shutdown(Shutdown::Both); // already closed is fine
+    // SAFETY: the socket handle stays valid while s is borrowed; CancelIoEx only cancels.
+    unsafe { windows_sys::Win32::System::IO::CancelIoEx(s.as_raw_socket() as _, std::ptr::null()) };
 }
 
 /// io::Read + io::Write over a shared Conn (for BufReader, read_exact, ...).
