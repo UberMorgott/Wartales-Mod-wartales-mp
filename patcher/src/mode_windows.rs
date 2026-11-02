@@ -21,12 +21,19 @@
 //
 // Part S: the sheet of a unit outside the troop (`isInTroop() != true`: a
 // tavern recruit, a prisoner, a quest NPC, the dialog's class-unlock preview
-// unit) belongs to the place and closes when the party switches mode. A leave
+// unit) belongs to the place and closes when the party leaves it, never on
+// another player's action inside it (a shared dialog, a confession). A leave
 // goes back to the previous mode (Game.leaveMode -> switchToMode, no
-// constructor), so the close sits in front of Game.switchToMode op 0:
-// `mwStrangers(this)`, on every machine (each switches itself), local only (the
+// constructor), so the close sits in front of Game.leaveMode op 0:
+// `mwStrangers(this)`, on every machine (each leaves itself), local only (the
 // RPC would also close the others' own sheets):
 //   if (!game.get_isMulti()) return;      // solo: vanilla
+//   // modes left while the party stays: a dialog / confession ends
+//   // (DialogOutView), the owned tavern's new service (Tavern.doNewService ->
+//   // syncLeaveMode, enters the same tavern again), its cleaning mode
+//   if (game.mode is DialogOutView | TavernMode | TavernCleanMode) return;
+// shortcut: a real leave of the owned tavern keeps a stranger's sheet open
+// (closed by hand); tell the new service apart if that matters.
 //   for (i = windows.length - 1 .. 0)     // close() removes from the list
 //       if (w is UnitInfo && w.unit != null && w.unit.isInTroop() != true) w.close();
 // force_leave's guard 3 still closes an NPC-locked sheet before the leave (the
@@ -54,11 +61,15 @@ struct Plan {
     bool_t: RefType,
 }
 
-/// Part S: Game.switchToMode and what mwStrangers reads.
+/// Part S: Game.leaveMode and what mwStrangers reads.
 struct SPlan {
     fi: usize,
     game_t: RefType,
     is_multi: RefFun,
+    is_of_type: RefFun,
+    g_mode: (RefField, RefType),
+    /// modes whose leave keeps the party in the place
+    stay_cls: Vec<(RefGlobal, RefType)>,
     bool_t: RefType,
     g_gui: (RefField, RefType),
     u_windows: RefField,
@@ -137,7 +148,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     })
 }
 
-fn plan_switch(code: &Bytecode) -> Result<SPlan> {
+fn plan_leave(code: &Bytecode) -> Result<SPlan> {
     let game_t = obj_type(code, "Game")?;
     let bool_t = prim_type(code, "Bool", |t| matches!(t, Type::Bool))?;
     let dyn_t = prim_type(code, "Dyn", |t| matches!(t, Type::Dyn))?;
@@ -145,15 +156,34 @@ fn plan_switch(code: &Bytecode) -> Result<SPlan> {
     if sig(code, is_multi)? != (vec![game_t], bool_t) {
         bail!("unexpected Game.get_isMulti signature");
     }
-    let f = method(code, game_t, "switchToMode")?;
+    let is_of_type = crate::diag::static_fn(code, "$Std", "isOfType")?.findex;
+    if sig(code, is_of_type)? != (vec![dyn_t, dyn_t], bool_t) {
+        bail!("unexpected Std.isOfType signature");
+    }
+    let mode_t = obj_type(code, "GameMode")?;
+    let g_mode = field(code, game_t, "mode")?;
+    if g_mode.1 != mode_t {
+        bail!("Game.mode is not a GameMode");
+    }
+    let mut stay_cls = vec![];
+    for n in [
+        "world.DialogOutView",
+        "world.tavern.TavernMode",
+        "world.tavern.TavernCleanMode",
+    ] {
+        if !is_sub(code, obj_type(code, n)?, mode_t) {
+            bail!("{n} is not a GameMode");
+        }
+        stay_cls.push(class_global(code, n)?);
+    }
+    let f = method(code, game_t, "leaveMode")?;
     let fi = fun_index(code, f.findex)?;
-    let ui = field(code, game_t, "ui")?.0;
-    // vanilla op 0: `this.ui` (for ui.stopPick()); no jump goes back to it
-    if !matches!(f.ops[0], Opcode::GetThis { field, .. } if field == ui) {
-        bail!("Game.switchToMode: does not start with this.ui (already applied?)");
+    // vanilla op 0: `enterPrev == null ? true : enterPrev`; no jump goes back to it
+    if !matches!(f.ops[0], Opcode::JNotNull { reg: Reg(1), .. }) {
+        bail!("Game.leaveMode: does not start with the enterPrev default (already applied?)");
     }
     if (0..f.ops.len()).any(|i| jump_targets(f, i).contains(&0)) {
-        bail!("Game.switchToMode: a jump targets op 0");
+        bail!("Game.leaveMode: a jump targets op 0");
     }
     let i32_t = prim_type(code, "i32", |t| matches!(t, Type::I32))?;
     let void_t = prim_type(code, "void", |t| matches!(t, Type::Void))?;
@@ -186,6 +216,9 @@ fn plan_switch(code: &Bytecode) -> Result<SPlan> {
         fi,
         game_t,
         is_multi,
+        is_of_type,
+        g_mode,
+        stay_cls,
         bool_t,
         g_gui,
         u_windows,
@@ -228,6 +261,8 @@ fn strangers(code: &mut Bytecode, p: &SPlan, dbg_file: usize) -> Result<RefFun> 
         r.r(p.ui_unit.1),
         r.r(p.in_troop_t),
     );
+    let m = r.r(p.g_mode.1);
+    let dcs: Vec<Reg> = p.stay_cls.iter().map(|c| r.r(c.1)).collect();
     let mut a = Asm::new();
     a.op(Opcode::Call1 {
         dst: b,
@@ -235,6 +270,27 @@ fn strangers(code: &mut Bytecode, p: &SPlan, dbg_file: usize) -> Result<RefFun> 
         arg0: game,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "end");
+    // the party stays in the place (see the header)
+    a.op(Opcode::Field {
+        dst: m,
+        obj: game,
+        field: p.g_mode.0,
+    });
+    a.jmp(Opcode::JNull { reg: m, offset: 0 }, "walk");
+    for (cls, &dc) in p.stay_cls.iter().zip(&dcs) {
+        a.op(Opcode::GetGlobal {
+            dst: dc,
+            global: cls.0,
+        });
+        a.op(Opcode::Call2 {
+            dst: b,
+            fun: p.is_of_type,
+            arg0: m,
+            arg1: dc,
+        });
+        a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
+    }
+    a.label("walk");
     a.op(Opcode::Field {
         dst: gui,
         obj: game,
@@ -325,7 +381,7 @@ fn strangers(code: &mut Bytecode, p: &SPlan, dbg_file: usize) -> Result<RefFun> 
     push_fn(code, vec![p.game_t], p.void_t, r.0, a.finish(), dbg_file)
 }
 
-fn apply_switch(code: &mut Bytecode, p: &SPlan) -> Result<()> {
+fn apply_leave(code: &mut Bytecode, p: &SPlan) -> Result<()> {
     let dbg = code.functions[p.fi]
         .debug_info
         .as_ref()
@@ -343,7 +399,7 @@ fn apply_switch(code: &mut Bytecode, p: &SPlan) -> Result<()> {
         }],
     );
     eprintln!(
-        "patched mode windows fn@{}: a co-op mode switch closes this machine's sheets of units outside the troop (fn@{})",
+        "patched mode windows fn@{}: a co-op leave (not a dialog) closes this machine's sheets of units outside the troop (fn@{})",
         f.findex.0, s.0
     );
     Ok(())
@@ -441,9 +497,9 @@ pub(crate) fn patch_mode_windows(code: &mut Bytecode) {
         Ok(p) => apply(code, &p),
         Err(e) => crate::skipped(format!("mode windows skipped: {e:#}")),
     }
-    // apply_switch fails only in push_fn, before switchToMode is edited
+    // apply_leave fails only in push_fn, before leaveMode is edited
     let snap = Snap::take(code);
-    if let Err(e) = plan_switch(code).and_then(|p| apply_switch(code, &p)) {
+    if let Err(e) = plan_leave(code).and_then(|p| apply_leave(code, &p)) {
         snap.restore(code);
         crate::skipped(format!("mode windows strangers skipped: {e:#}"));
     }
@@ -468,7 +524,7 @@ mod tests {
     use crate::asm::testutil::{check_flow, check_types, game, read, write};
 
     /// closeWindows gets the 8-op guard in front, its jumps land on the vanilla
-    /// body, which is kept as it was; switchToMode gets one call in front of op
+    /// body, which is kept as it was; leaveMode gets one call in front of op
     /// 0; one well-typed function is appended; a second pass is a no-op.
     #[test]
     fn patches_installed_game() {
@@ -476,7 +532,7 @@ mod tests {
         let orig = read(&image);
         let fi = plan(&orig).expect("plan").fi;
         let rfi = plan_rest(&orig).expect("plan_rest").0;
-        let sfi = plan_switch(&orig).expect("plan_switch").fi;
+        let sfi = plan_leave(&orig).expect("plan_leave").fi;
         let mut code = read(&image);
         patch_mode_windows(&mut code);
         let patched = write(&code);
@@ -502,13 +558,13 @@ mod tests {
             assert_eq!(jump_targets(b, i), [8], "op {i}");
         }
         assert!(matches!(b.ops[7], Opcode::Ret { .. }));
-        // part S: one call in front of switchToMode, the rest shifted by one
+        // part S: one call in front of leaveMode, the rest shifted by one
         let (a, b) = (&orig.functions[sfi], &back.functions[sfi]);
         assert_eq!(b.ops.len(), a.ops.len() + 1);
         assert!(matches!(b.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == new.findex));
         check_types(&back, b, 0..1);
         check_flow(b);
-        assert!(plan_switch(&back).is_err());
+        assert!(plan_leave(&back).is_err());
         // part R: one op of startRest__impl becomes the jump past the block
         let (rfi, at, end) = plan_rest(&orig).expect("plan_rest");
         let (a, b) = (&orig.functions[rfi], &back.functions[rfi]);
@@ -536,7 +592,7 @@ mod tests {
         use crate::testsim::{Sim, V};
         let Some(image) = game() else { return };
         let orig = read(&image);
-        let p = plan_switch(&orig).expect("plan_switch");
+        let p = plan_leave(&orig).expect("plan_leave");
         let mut code = read(&image);
         patch_mode_windows(&mut code);
         let sf = code.functions.last().expect("new fn").findex;
@@ -548,6 +604,8 @@ mod tests {
             move |c, f, a| {
                 Some(if f == pp.is_multi {
                     c.key_get(&a[0], "multi")
+                } else if f == pp.is_of_type {
+                    V::B(c.key_get(&a[0], "cls") == a[1])
                 } else if f == pp.base_check {
                     V::B(c.key_get(&a[1], "cls") == a[0])
                 } else if f == pp.in_troop {
@@ -562,6 +620,9 @@ mod tests {
             },
         );
         sim.c.globals.insert(p.ui_cls.0 .0, V::S("ui".into()));
+        for (k, cls) in p.stay_cls.iter().enumerate() {
+            sim.c.globals.insert(cls.0 .0, V::S(format!("stay{k}")));
+        }
         let c = &mut sim.c;
         let sheet = |c: &mut crate::testsim::Core, troop: V| {
             let u = c.obj(&[]);
@@ -587,6 +648,18 @@ mod tests {
         sim.run(sf, vec![g.clone()]);
         assert!(sim.c.take("close").is_empty());
         sim.c.key_set(&g, "multi".into(), V::B(true));
+        // a dialog ends: still in the place, nothing closes
+        let dlg = sim.c.obj(&[]);
+        for k in 0..p.stay_cls.len() {
+            sim.c.key_set(&dlg, "cls".into(), V::S(format!("stay{k}")));
+            sim.c.set(&g, p.g_mode.0, dlg.clone());
+            sim.run(sf, vec![g.clone()]);
+            assert!(sim.c.take("close").is_empty(), "stay{k}");
+        }
+        // the place is left
+        let place = sim.c.obj(&[]);
+        sim.c.key_set(&place, "cls".into(), V::S("place".into()));
+        sim.c.set(&g, p.g_mode.0, place);
         sim.run(sf, vec![g]);
         let closed: Vec<V> = sim
             .c
