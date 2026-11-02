@@ -21,7 +21,7 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | customize_slots | unit | |
 | coop_gates | unit | |
 | force_leave | unit | |
-| npc_talk | unit | |
+| npc_inspect | unit | |
 | dialog_recruit | unit | |
 | dialog_inventory (reworked 2026-11-02) | PASS | the f9047d8 hide is gone (owner: panels stay over a shared dialog); co-op skips the never-restored hide in playConfessionSetup and Ruins.onSwitched. Runs `20261102-104644`, `20261102-105454`: host and guest `invVisible` true in world.Confession (before: false on both). Ruins entry unit only |
 | camp_talk | unit | gate refusal not exercised |
