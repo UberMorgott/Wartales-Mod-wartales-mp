@@ -1039,7 +1039,8 @@ mod tests {
                     .unwrap_or_default()
             })
             .collect();
-        assert_eq!(names.len(), 2);
+        // forge, work and rest_report's rrRecv (which logs nothing)
+        assert_eq!(names.len(), 3);
         assert!(names.contains(&"mp: forge recv".to_string()));
         assert!(names.contains(&"mp: work recv".to_string()));
     }
