@@ -33,6 +33,7 @@
 //       st.netInitGrid(); st.clientBeginBattle(); st.initClients(); st.netAfterGen(false);
 //     } catch (_) {}
 //     h.flushSend(); h.targetClient = prev;   // the replay reached `client` only
+//     (a throwing flushSend still resets targetClient, then rethrows)
 //     println(LOG)
 //
 // hxbit's NetworkHost.send writes to targetClient alone when it is set (the
@@ -390,20 +391,33 @@ fn add_rejoin(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         arg1: ok,
     });
     a.op(Opcode::EndTrap { exc: e });
-    // Both paths: what was written goes to `c` only, then the target is reset.
-    let restore = |a: &mut Asm| {
-        a.op(Opcode::Call1 {
-            dst: v,
-            fun: p.flush_send,
-            arg0: h,
-        });
-        a.op(Opcode::SetField {
-            obj: h,
-            field: p.target,
-            src: prev,
-        });
+    a.op(Opcode::Bool {
+        dst: ok,
+        value: ValBool(true),
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "send");
+    a.label("caught");
+    a.op(Opcode::Bool {
+        dst: ok,
+        value: ValBool(false),
+    });
+    // Both paths: what was written goes to `c` only, then the target is reset,
+    // also when the flush throws (rethrown after the reset).
+    a.label("send");
+    a.jmp(Opcode::Trap { exc: e, offset: 0 }, "unsent");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.flush_send,
+        arg0: h,
+    });
+    a.op(Opcode::EndTrap { exc: e });
+    let reset = Opcode::SetField {
+        obj: h,
+        field: p.target,
+        src: prev,
     };
-    restore(&mut a);
+    a.op(reset.clone());
+    a.jmp(Opcode::JFalse { cond: ok, offset: 0 }, "end");
     a.op(Opcode::GetGlobal {
         dst: txt,
         global: log,
@@ -413,10 +427,11 @@ fn add_rejoin(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         fun: p.println,
         arg0: txt,
     });
+    a.jmp(Opcode::JAlways { offset: 0 }, "end");
+    a.label("unsent");
+    a.op(reset);
+    a.op(Opcode::Rethrow { exc: e });
     a.label("end");
-    a.op(Opcode::Ret { ret: v });
-    a.label("caught");
-    restore(&mut a);
     a.op(Opcode::Ret { ret: v });
     push_fn(
         code,
@@ -526,7 +541,7 @@ mod tests {
         let f = &back.functions[nf];
         check_types(&back, f, 0..f.ops.len());
         check_flow(f);
-        assert_eq!(traps_ok(f), 1);
+        assert_eq!(traps_ok(f), 2);
         let (a, b) = (&orig.functions[p.join_fi], &back.functions[p.join_fi]);
         shifted(a, b, p.at, 1);
         check_types(&back, b, p.at..p.at + 1);

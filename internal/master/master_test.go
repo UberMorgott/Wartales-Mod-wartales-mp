@@ -1108,9 +1108,8 @@ func (w *wsClient) callErr(t *testing.T, cmd string, args any) string {
 // TestDirectLobbyNamesPlayersByGameIDs: a lobby on the DIRECT relay names
 // every member by the id its own game calls itself (here Steam ids), exactly
 // as an SDR lobby and the players' saves do (LoadMultiGame.isHostIn,
-// LobbyState.userCanJoin compare them). Lobby.isSteamOnly@24596 would then be
-// true and the game would bypass our relay; the lobby id's DirectLobbyMark is
-// what keeps it on instance/get (patcher direct_lobby.rs).
+// LobbyState.userCanJoin compare them). Lobby.isSteamOnly@24596 is then true;
+// the host's game asks instance/get anyway (patcher start_transport.rs).
 func TestDirectLobbyNamesPlayersByGameIDs(t *testing.T) {
 	addr := startMaster(t)
 	const hostID, guestID = "S0011223344556677", "S7766554433221100"
@@ -1182,7 +1181,8 @@ func TestJoinWithoutGameIDIsRefused(t *testing.T) {
 // host has no verified public endpoint the lobby runs over SDR, which means
 // every id the master emits for it is the player's REAL Steam id (the game
 // derives the peer's SteamID64 from it, UserID.hx:113), so that
-// Lobby.isSteamOnly is true on every game and no instance/get is ever asked.
+// Lobby.isSteamOnly is true on every game (the host asks instance/get anyway,
+// patcher start_transport.rs, and startAnswer gives it the Steam path).
 func TestSDRLobbyEmitsRealSteamIDs(t *testing.T) {
 	addr := startMasterWith(t, lanEndpoint, SDRStatus{Known: true, OK: true})
 	const hostSteam = "S0011223344556677"

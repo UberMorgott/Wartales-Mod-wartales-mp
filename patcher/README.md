@@ -18,8 +18,7 @@ small functions (`ItemTip(icon.item)`, a vertical `Flow` of `SkillTip` per
 untouched and logs `<pass> skipped: <why>`; `wartales_tips_patch` then refuses
 the whole image, naming every mismatching pass, and the shim serves the game
 unpatched: a build the co-op set does not fully fit never runs half-patched.
-Only the print-only diagnostics (`diag`, `activity_diag`, `camp_choice`) are
-skipped alone. "Skipped (logged)" below means exactly that.
+Only the print-only diagnostics (`diag`) are skipped alone. "Skipped (logged)" below means exactly that.
 
 It also carries one gameplay patch, **enemy friendly fire**: an area attack
 cast by a non-player unit also hits that unit's own allies (never the caster),
@@ -169,11 +168,9 @@ so the whole list is newest first.
 **Loot level** (`src/loot_level.rs`): `battle.Debrief.genLoot` keeps a dead
 enemy's worn item as a drop candidate through one closure per slot (nine
 copies, Debrief.hx:521-531). Each one skipped an item whose `requireLevel` is
-above `getReferenceLevel(1.0)` (the best unit's level), and for armor called
-`Unit.canEquip`, which checks the unit's level too. The `JSGte` level compare
-becomes a `JAlways` to the same target, and `canEquip` + `JFalse` becomes
-`hasCantEquipReasons` + `JTrue` (armor / helmet kind, animal and item-flag
-checks kept, level dropped). Same op count; drop chance, pity counter,
+above `getReferenceLevel(1.0)` (the best unit's level). The `JSGte` level
+compare becomes a `JAlways` to the same target (armor's `canEquip` loop is
+skipped by the armor drop below). Same op count; drop chance, pity counter,
 NoEquipDrop, ForceDropWeapon, quality and repair stay vanilla. Loot is
 generated on the host.
 
@@ -310,16 +307,6 @@ gamepad, keyboard events and other tooltip content retain native handling.
 The guarded predicate fails open and changes no persistent input fields.
 This repairs a source-proven cycle; the reported multiplayer session has not
 been reproduced live with the new DLL.
-
-**Camp choice diagnostics** (`src/camp_choice.rs`): records the outgoing
-`Dialog.setClick` request, whether the host resolves its button ID, the chosen
-confession gain, and the recipient's aptitude points before and after the grant.
-Lines start with `mp: dialog choice` or `mp: confession`. In FriendlyFire's
-training choice, Target is the attacker and Self is the injured speaker; the
-attacker receives the aptitude point with a Strength/Dexterity offer. These
-probes preserve the existing choice and reward behavior. Both machines need
-the diagnostic DLL to trace the client-to-host boundary; read each machine's
-`%LOCALAPPDATA%\wartales-mp\shim.log` after reproducing the issue.
 
 **Co-op barrier never hangs** (`src/barrier.rs`): every mode switch (town,
 tavern, place, battle start) waits on the host for each client's
@@ -543,12 +530,14 @@ captured and the guests waiting forever. The dropped fade is now queued: the
 running fade's onEnd is wrapped to run first, then start the new fade with the
 same arguments. Skipped (logged) on mismatch.
 
-**Direct lobby** (`src/direct_lobby.rs`): lobby members are named by their
-games' own ids on both transports (internal/master `idOf`), so a lobby of
-Steam players looks Steam-only to `Lobby.isSteamOnly` (only caller
-`setupPlatform`). A prologue returns false when `mpLobby.id` ends in 'D', the
-mark our master gives every direct-relay lobby (`DirectLobbyMark`): the host
-asks `instance/get` and plays over our relay. Skipped (logged) on mismatch.
+**Start transport** (`src/start_transport.rs`): lobby members are named by
+their games' own ids on both transports (internal/master `idOf`), so
+`Lobby.isSteamOnly` says nothing about how the guests joined. Its test at the
+top of `setupPlatform` becomes a `JAlways`: the host always asks
+`instance/get`, and our master answers from the guests' links (relay, the
+host's Steam id, or a reason). The answer callback gets a Steam case
+(`p(serverID, null)`, the vanilla Steam path) and an Unknown case (the reason
+shown, then the vanilla failure). Skipped (logged) on mismatch.
 
 **Style guard** (`src/style_guard.rs`): domkit's `Properties.applyStyle` saves
 the static `APPLY_LOOPS`, counts style passes in it and restores it at the end;

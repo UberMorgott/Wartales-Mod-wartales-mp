@@ -26,7 +26,6 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | dialog_inventory (reworked 2026-11-02) | PASS | the f9047d8 hide is gone (owner: panels stay over a shared dialog); co-op skips the never-restored hide in playConfessionSetup and Ruins.onSwitched. Runs `20261102-104644`, `20261102-105454`: host and guest `invVisible` true in world.Confession (before: false on both). Ruins entry unit only |
 | camp_talk | unit | gate refusal not exercised |
 | camp_any_unit | unit | |
-| camp_choice | PASS | R2 S7: aptitude 1 -> 2 logged on host, both dumps |
 | hold_speed | unit | |
 | loot_level (higher-level drops) | unit | |
 | armor_any | unit | |
@@ -42,7 +41,6 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | drop_in | PASS | R2 S4; R6: guest WM_CLOSE, relaunch, `join FW00009QNCC` into the running game |
 | returning_units | PASS | R2 S4: guest owns its units again after rejoin |
 | diag | PASS | R6: `mp: error stack` lines in shim.log |
-| activity_diag | unit | |
 | follow | unit | |
 | marker_names | PASS | R5/R6 shots: player labels on the world map |
 | skill_cost | unit | |
@@ -60,7 +58,6 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | mode_windows (2026-11-02) | PASS | runs `20261102-095606` (before) / `20261102-100056`, `20261102-100624` (fix): host and guest UnitInfo + Paths (dump `gwins`) closed by town entry and the camp confession before, kept by both after; `console battle` still closes them. Part R: run `20261102-105118` guest UnitInfo kept through camp entry, rest start and the RestReport |
 | stale_lobby | unit | needs a lobby left mid-connect |
 | log_error_cast | PASS | R1 S1 (relay connect failure path) |
-| direct_lobby | PASS | R1 S1, R6 join by code |
 | window_drag (+ 6f1219b, reset / HUD bar fixes) | PASS | R8: double click on the chest header after a resize -> vanilla spot and height (dump `chest` y 373 h 227, `chestc` h 170; was y -359 h 599), `A-025022-reset2.png`, `A-025049-reset3.png`; full-height resize stops above the HUD bottom bar (chest y 372 + h 599 = 971 < `hudbar` y 1014), `A-025037-cfull.png`; R9 relaunch vanilla `A-030538-relaunch.png`; R3 own inventory; R5 chest min/mid/full (dump `chestc` + shots), other player's panel min/mid/full + header move; R6 chest above inventory on world map and in camp (`B-020850-b-overlap.png`, `B-020908-b-camp.png`) |
 | take_all | unit | |
 | tavern_resume | unit | |

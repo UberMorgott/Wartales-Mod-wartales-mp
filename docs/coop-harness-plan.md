@@ -44,7 +44,7 @@ Status: slices 1 and 2 implemented (2026-10-08, see section 8). Plan Codex revie
 | Chest panel offset/scroll/click (c010d28, fcccf61, 9bc1af9) | partial | item moved after click | yes | **yes** (layout) |
 | Battle camera (020c3b4) | no | camera target in dump | yes | **yes** |
 | Loot changes (loot_level.rs) | yes if logged | loot list after battle in dump | optional | no |
-| Confession skill point (camp_choice.rs) | **yes** (diagnostics already log before/after) | points before/after | optional | no (UI click needed to choose) |
+| Confession skill point | yes (aptitude in `dump`; camp_choice log lines removed 2026-11-02) | points before/after | optional | no (UI click needed to choose) |
 | Steam-invite / SDR join | — | — | — | **untestable on one PC** |
 
 ## 5. Estimate

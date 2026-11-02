@@ -207,7 +207,7 @@ pub(crate) mod testutil {
     }
 
     /// Each Trap is closed by an EndTrap on its register, nothing jumps out of
-    /// the protected block, and the handler follows a Ret.
+    /// the protected block, and nothing falls through into the handler.
     pub(crate) fn traps_ok(f: &Function) -> usize {
         let n = f.ops.len();
         let mut traps = 0;
@@ -223,7 +223,10 @@ pub(crate) mod testutil {
                 .find(|&j| matches!(f.ops[j], Opcode::EndTrap { exc: e } if e == exc))
                 .expect("EndTrap");
             assert!(handler > end);
-            assert!(matches!(f.ops[handler - 1], Opcode::Ret { .. }));
+            assert!(matches!(
+                f.ops[handler - 1],
+                Opcode::Ret { .. } | Opcode::Rethrow { .. } | Opcode::JAlways { .. }
+            ));
             for j in i + 1..end {
                 assert!(!matches!(
                     f.ops[j],
