@@ -223,6 +223,8 @@ struct Out {
     /// Bytes 3..6 of a game frame (>= 7 bytes): its session.
     sid: Option<[u8; 4]>,
     data: Vec<u8>,
+    /// Steam took it during the current flush (swept at its end).
+    sent: bool,
 }
 
 /// One followed peer (see sdr.c "Lost-peer close").
@@ -1030,32 +1032,31 @@ impl Transport {
     // that session's (its code 8 excepted). A backlog Steam can never take is
     // given up and the session the game holds is doomed: it always gets its close.
 
-    fn backlog_unlink(st: &mut State, i: usize) {
-        let o = st.out.remove(i).expect("index in range");
-        st.out_bytes -= OUT_COST + o.data.len();
-        if let Some(n) = st.out_peers.get_mut(&o.peer) {
-            *n -= 1;
-            if *n == 0 {
-                st.out_peers.remove(&o.peer);
-            }
-        }
-    }
-
-    /// Removes held messages matching f; how many.
+    /// Removes held messages matching f in one pass; how many.
     fn backlog_remove(st: &mut State, f: impl Fn(&Out) -> bool) -> u64 {
+        let State {
+            out,
+            out_bytes,
+            out_peers,
+            ..
+        } = st;
         let mut n = 0;
-        let mut i = 0;
-        while i < st.out.len() {
-            if f(&st.out[i]) {
-                Self::backlog_unlink(st, i);
-                n += 1;
-            } else {
-                i += 1;
+        out.retain(|o| {
+            if !f(o) {
+                return true;
             }
-        }
+            *out_bytes -= OUT_COST + o.data.len();
+            if let Some(k) = out_peers.get_mut(&o.peer) {
+                *k -= 1;
+                if *k == 0 {
+                    out_peers.remove(&o.peer);
+                }
+            }
+            n += 1;
+            false
+        });
         n
     }
-
     /// Drops what is held for the session of peer the game closed: all of the
     /// peer's, or with a known closed sid only that session's, its goodbye
     /// (code 8) excepted.
@@ -1112,9 +1113,12 @@ impl Transport {
         let api = st.api.expect("ready");
         let mut blocked: Vec<u64> = Vec::new();
         let mut i = 0;
+        // Sent messages are only marked and swept once at the end: removing
+        // each from the middle (behind a blocked peer) would be quadratic.
+        let mut sent = false;
         while i < st.out.len() && blocked.len() < st.out_peers.len() {
             let o = &st.out[i];
-            if blocked.contains(&o.peer) {
+            if o.sent || blocked.contains(&o.peer) {
                 i += 1;
                 continue;
             }
@@ -1137,12 +1141,24 @@ impl Transport {
             }
             let (peer, sid) = (o.peer, o.sid);
             if res != RESULT_OK {
+                st.out.retain(|o| !o.sent); // already accounted
+                sent = false;
                 self.backlog_give_up(st, peer, sid, &format!("SendMessageToUser = EResult {res}"));
                 i = 0; // the list changed: start over
                 blocked.clear();
                 continue;
             }
-            Self::backlog_unlink(st, i);
+            let o = &mut st.out[i];
+            o.sent = true;
+            st.out_bytes -= OUT_COST + o.data.len();
+            if let Some(k) = st.out_peers.get_mut(&peer) {
+                *k -= 1;
+                if *k == 0 {
+                    st.out_peers.remove(&peer);
+                }
+            }
+            sent = true;
+            i += 1;
             st.sent += 1;
             if !st.out_peers.contains_key(&peer) {
                 self.logf(&format!(
@@ -1150,6 +1166,9 @@ impl Transport {
                     st.held, st.out_bytes
                 ));
             }
+        }
+        if sent {
+            st.out.retain(|o| !o.sent); // already accounted
         }
     }
 
@@ -1185,6 +1204,7 @@ impl Transport {
             channel,
             sid,
             data: data.to_vec(),
+            sent: false,
         });
         st.held += 1;
         true
