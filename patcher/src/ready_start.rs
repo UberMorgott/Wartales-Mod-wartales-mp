@@ -113,7 +113,7 @@ const LOG_ABSENT: &str = "mp: ready: a player who never connected is no longer w
 const LOG_ABSENT_FAIL: &str = "mp: ready: counting an absent player failed, retrying later: ";
 /// Seconds every connected player has been counted before a save player who
 /// never connected stops holding the start.
-const WAIT_ABSENT: f64 = 60.0;
+const WAIT_ABSENT: f64 = 15.0;
 
 type F = (RefField, RefType);
 
