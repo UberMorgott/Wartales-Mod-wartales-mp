@@ -13,16 +13,14 @@
 #
 # The expected bytecode image is computed inside shimcheck: the needle patches
 # from hlpatch.h, then the same wartales-tips library the DLL was linked with
-# (-TipsLib, default: the build output under -PatcherDir, i.e. patcher\).
+# (-TipsLib, default: the build output of helper\).
 #
-#   .\shim\check.ps1 [-OutDir <path>] [-Hlboot <path to hlboot.dat>] [-PatcherDir <path>] [-TipsLib <path to libwartales_tips.a>] [-Test]
+#   .\shim\check.ps1 [-OutDir <path>] [-Hlboot <path to hlboot.dat>] [-TipsLib <path to libwartales_mp.a>] [-Test]
 
 [CmdletBinding()]
 param(
     [string]$OutDir = (Join-Path $PSScriptRoot '..\dist'),
     [string]$Hlboot = 'D:\Steam\steamapps\common\Wartales\hlboot.dat',
-    [Alias('TipsRepo')]
-    [string]$PatcherDir = (Join-Path $PSScriptRoot '..\patcher'),
     [string]$TipsLib = '',
     # A build.ps1 -Test output: dist-test\, the harness tips lib, seam required.
     [switch]$Test
@@ -36,7 +34,7 @@ $OutDir = (Resolve-Path $OutDir).Path
 $dll = Join-Path $OutDir 'winmm.dll'
 if (-not (Test-Path -LiteralPath $dll)) { throw "missing $dll (run shim\build.ps1 first)" }
 if (-not (Test-Path -LiteralPath $Hlboot)) { throw "missing $Hlboot" }
-if (-not $TipsLib) { $TipsLib = Join-Path $PatcherDir ('{0}\x86_64-pc-windows-gnu\release\libwartales_tips.a' -f $(if ($Test) { 'target-test' } else { 'target' })) }
+if (-not $TipsLib) { $TipsLib = Join-Path $PSScriptRoot ('..\helper\{0}\x86_64-pc-windows-gnu\release\libwartales_mp.a' -f $(if ($Test) { 'target-test' } else { 'target' })) }
 
 # The release dll and its helper carry no harness test seam (a -Test build must).
 $seam = if ($Test) { 'present' } else { 'absent' }

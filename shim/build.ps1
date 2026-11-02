@@ -10,12 +10,12 @@
 #      hlpatchgen (internal/hlpatch)    -> proxy\hlpatch.h
 #   2. go build                          -> wartales-mp.exe   (the final helper)
 #   3. objcopy wraps that exe            -> embed.o           (a linkable blob)
-#   3b. cargo builds patcher\ (Rust crate wartales-tips) -> libwartales_tips.a (structural
-#       bytecode patch: hover tooltips in the starting-troop preview)
-#   4. gcc links proxy.c (+ sdr/bridge/lobby/splash.c) + stubs + MinHook + embed.o + libwartales_tips.a + .def -> winmm.dll
+#   3b. cargo builds helper\ (Rust crate wartales-mp, patcher\ = wartales-tips linked in as an
+#       rlib) -> libwartales_mp.a (the bytecode patcher, proxy\tips.h, and the co-op helper)
+#   4. gcc links proxy.c (+ sdr/bridge/lobby/splash.c) + stubs + MinHook + embed.o + libwartales_mp.a + .def -> winmm.dll
 # The single file to drop into the game folder is <OutDir>\winmm.dll.
 #
-#   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-PatcherDir <path>] [-Release] [-Test]
+#   .\shim\build.ps1 [-OutDir <path>] [-SystemDll <path to real winmm.dll>] [-Release] [-Test]
 #
 # -Release produces the artifact uploaded to GitHub: symbols are stripped
 # (-ldflags "-s -w" for the exe, -s -Wl,--strip-all for the DLL) and BOTH stages
@@ -28,8 +28,6 @@
 param(
     [string]$OutDir    = (Join-Path $PSScriptRoot '..\dist'),
     [string]$SystemDll = (Join-Path $env:WINDIR 'System32\winmm.dll'),
-    [Alias('TipsRepo')]
-    [string]$PatcherDir = (Join-Path $PSScriptRoot '..\patcher'),
     [switch]$Release,
     [switch]$Test
 )
@@ -122,24 +120,25 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'objcopy failed' }
 } finally { Pop-Location }
 
-# 3b. Build the wartales-tips static library from patcher\ (Rust, windows-gnu target so it
-#     links with MinGW gcc). Its C ABI is declared in proxy\tips.h; the extra
-#     system libs are what the Rust std runtime pulls in.
-if (-not (Test-Path -LiteralPath (Join-Path $PatcherDir 'Cargo.toml'))) { throw "missing wartales-tips crate at $PatcherDir (Cargo.toml not found; pass -PatcherDir)" }
-$PatcherDir = (Resolve-Path $PatcherDir).Path
-Push-Location $PatcherDir
+# 3b. Build the one Rust static library from helper\ (windows-gnu target so it
+#     links with MinGW gcc): the bytecode patcher (patcher\, C ABI in
+#     proxy\tips.h) plus the co-op helper. Two Rust staticlibs cannot share a
+#     DLL (each carries its own std), hence one crate depending on the other.
+#     The extra system libs are what the Rust std runtime pulls in.
+$crate = Join-Path $repo 'helper'
+Push-Location $crate
 try {
     $cargoTest = if ($Test) { @('--features', 'harness', '--target-dir', 'target-test') } else { @() }
     & cargo build --release --target x86_64-pc-windows-gnu @cargoTest
-    if ($LASTEXITCODE -ne 0) { throw 'cargo build failed for wartales-tips' }
+    if ($LASTEXITCODE -ne 0) { throw 'cargo build failed for helper' }
 } finally { Pop-Location }
-$tipsLib = Join-Path $PatcherDir ('{0}\x86_64-pc-windows-gnu\release\libwartales_tips.a' -f $(if ($Test) { 'target-test' } else { 'target' }))
+$tipsLib = Join-Path $crate ('{0}\x86_64-pc-windows-gnu\release\libwartales_mp.a' -f $(if ($Test) { 'target-test' } else { 'target' }))
 if (-not (Test-Path -LiteralPath $tipsLib)) { throw "cargo build produced no $tipsLib" }
 $tipsLinkLibs = @('-lntdll', '-luserenv', '-ldbghelp')
-Write-Host "wartales-tips: $tipsLib"
+Write-Host "rust: $tipsLib"
 
 # 4. Link the proxy DLL: our code + generated thunks + MinHook + embedded exe
-#    + the wartales-tips static library.
+#    + the Rust static library.
 $mhsrc = @(
     (Join-Path $minhook 'src\hook.c')
     (Join-Path $minhook 'src\buffer.c')

@@ -8,3 +8,7 @@
 /patcher/target-test/
 /patcher/dist/*.exe
 /patcher/dist/*.zip
+
+# helper/ (Rust, wartales-mp)
+/helper/target/
+/helper/target-test/

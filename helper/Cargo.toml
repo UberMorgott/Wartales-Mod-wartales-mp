@@ -1,0 +1,26 @@
+[package]
+name = "wartales-mp"
+version = "0.1.0"
+edition = "2021"
+license = "CC-BY-NC-4.0"
+description = "Wartales direct co-op helper (master, relay, proxy-link, punch, NAT), linked into winmm.dll"
+
+[lib]
+name = "wartales_mp"
+crate-type = ["rlib", "staticlib"]
+
+[features]
+# Local co-op test harness: only for shim\build.ps1 -Test, never shipped.
+harness = ["wartales-tips/harness"]
+
+[dependencies]
+# Linked as an rlib: its C ABI (wartales_tips_*) ships inside this one staticlib.
+wartales-tips = { path = "../patcher" }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+# unwind, not abort: every thread entry catches a panic and logs it; abort would kill the game.
+panic = "unwind"
+codegen-units = 1
+lto = "thin"
