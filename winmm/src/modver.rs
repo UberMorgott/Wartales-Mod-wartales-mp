@@ -141,7 +141,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
         Err(e) => return Err(format!("open {}: {e}", path.display())),
         Ok(f) => f,
     };
-    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut ctx = crate::log::Hasher::new(crate::log::Alg::Sha256);
     let mut buf = vec![0u8; 1 << 16];
     loop {
         match f.read(&mut buf) {
@@ -151,7 +151,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
             Err(e) => return Err(format!("{}: {e}", path.display())),
         }
     }
-    Ok(crate::wsx::hex(ctx.finish().as_ref()))
+    Ok(crate::wsx::hex(&ctx.finish()))
 }
 
 /// The commit this helper was built from, or "" when the build carries no

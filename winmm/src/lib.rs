@@ -14,7 +14,6 @@ pub mod pe;
 pub mod applog;
 pub mod code;
 pub mod hlpatch;
-pub mod install;
 pub mod link;
 pub mod master;
 pub mod modver;

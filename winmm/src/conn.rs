@@ -1,6 +1,6 @@
 //! `Conn` is Go's `net.Conn`: one byte stream that one thread reads while
-//! others write, and that any thread can close to unblock the reader. TCP,
-//! the master's TLS, the SDR bridge's per-peer streams and the in-memory
+//! others write, and that any thread can close to unblock the reader. TCP, the
+//! SDR bridge's per-peer streams and the in-memory
 //! `pipe` of the tests all implement it, so the protocols on top (wsx, link)
 //! are written once.
 

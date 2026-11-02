@@ -6,8 +6,6 @@
 //! the id its game calls itself (master idOf), on both transports, so saves
 //! and games agree on who a player is.
 
-use ring::digest::{digest, SHA256};
-
 use crate::wsx::hex;
 
 /// The platform characters mpman.UserID.getPlatform@25195 accepts: S = Steam,
@@ -33,8 +31,11 @@ const STEAM_XOR: u64 = 0x0110_0001;
 /// Maps whatever id a player reports (normally a Steam "S<steamid>") onto a
 /// stable Session id, the same across reconnects and both proxy-link ends.
 pub fn mint(raw: &str) -> String {
-    let sum = digest(&SHA256, format!("wartales-mp/uid/{raw}").as_bytes());
-    format!("{}{}", SESSION as char, hex(&sum.as_ref()[..10]))
+    let sum = crate::log::digest(
+        crate::log::Alg::Sha256,
+        format!("wartales-mp/uid/{raw}").as_bytes(),
+    );
+    format!("{}{}", SESSION as char, hex(&sum[..10]))
 }
 
 /// Whether id already has the shape mint produces.
