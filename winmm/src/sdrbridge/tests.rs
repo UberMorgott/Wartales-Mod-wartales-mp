@@ -1,8 +1,10 @@
 use super::switch::Switch;
 use super::*;
-use std::io::{BufRead, BufReader};
+use crate::conn::Io;
+use std::io::{BufRead, BufReader, Read};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 /// Runs a bridge; dropping it stops Run and joins it (Go's goleak check).
 struct Running {
@@ -29,18 +31,8 @@ fn run(b: &Arc<Bridge>) -> Running {
 fn start(sw: &Switch, id: u64) -> (Arc<Bridge>, Running) {
     let b = Bridge::new(sw.add(id), Log::discard());
     let r = run(&b);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let (ok, why) = b.ready();
-        if ok && sw.connected(id) {
-            return (b, r);
-        }
-        assert!(
-            Instant::now() < deadline,
-            "bridge never became ready: {why}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(b.ready().0);
+    (b, r)
 }
 
 fn read_line(c: &ConnRef) -> io::Result<String> {
@@ -49,38 +41,9 @@ fn read_line(c: &ConnRef) -> io::Result<String> {
     Ok(s)
 }
 
-#[test]
-fn parse_status_cases() {
-    let st = parse_status("ok bridge=127.0.0.1:52669 token=50e80f126cce8178c774a2e18fbad573\n");
-    assert!(
-        st.known
-            && st.ok
-            && st.bridge == "127.0.0.1:52669"
-            && st.token == "50e80f126cce8178c774a2e18fbad573",
-        "{st:?}"
-    );
-    let st = parse_status("ok bridge=none");
-    assert!(
-        st.ok && st.bridge.is_empty() && !st.reason.is_empty(),
-        "{st:?}"
-    );
-    let st = parse_status("unavailable steam_api64.dll is not loaded in this process");
-    assert!(
-        st.known && !st.ok && st.reason == "steam_api64.dll is not loaded in this process",
-        "{st:?}"
-    );
-    let st = parse_status("pending Steam API not initialised yet");
-    assert!(
-        !st.known && !st.ok && st.reason == "Steam API not initialised yet",
-        "{st:?}"
-    );
-    let st = read_status(&std::env::temp_dir().join("sdrbridge-missing-status"));
-    assert!(!st.known && !st.ok, "{st:?}");
-}
-
-/// Two helpers, each behind its own fake shim identity; a stream dialed by one
-/// arrives at the other's OnPeer, bytes flow both ways in order, and closing
-/// one side ends the other's reads.
+/// Two bridges, each on its own identity; a stream dialed by one arrives at
+/// the other's OnPeer, bytes flow both ways in order, and closing one side
+/// ends the other's reads.
 #[test]
 fn streams_over_the_switch() {
     const HOST: u64 = 76_561_197_960_265_728 + 111;
@@ -126,25 +89,42 @@ fn streams_over_the_switch() {
     );
 }
 
-/// A send to nobody comes back as ERR and ends the stream with the reason.
+/// A send Steam refuses fails with its EResult (the ERR of the old bridge).
 #[test]
 fn dial_unknown_peer_is_reported() {
     let sw = Switch::new();
     let (b, _r) = start(&sw, 76_561_197_960_265_728 + 1);
-    let c = b.dial(76_561_197_960_265_728 + 999).unwrap();
-    // The ERR answering Dial's own FIN may already have ended the stream.
-    let err = match c.write_all(b"anyone?") {
-        Ok(()) => c.read(&mut [0u8; 8]).unwrap_err(),
-        Err(e) => e,
-    };
+    let err = b
+        .dial(76_561_197_960_265_728 + 999)
+        .err()
+        .expect("dial to nobody succeeded");
+    assert!(err.to_string().contains("EResult 3"), "dial err = {err}");
+}
+
+/// A refused write ends the stream with the reason, for later reads too.
+#[test]
+fn refused_write_ends_the_stream() {
+    const HOST: u64 = 76_561_197_960_265_728 + 611;
+    let sw = Switch::new();
+    let _host = sw.add(HOST);
+    let guest = sw.add(76_561_197_960_265_728 + 622);
+    let b = Bridge::new(guest.clone(), Log::discard());
+    let c = b.dial(HOST).unwrap();
+    guest.set_status(Status::default()); // Steam now refuses every send
+    let err = c.write_all(b"x").unwrap_err();
     assert!(
-        err.to_string().contains("EResult 3"),
-        "read err = {err}, want the ERR text"
+        err.to_string().contains("SDR: SDR not ready"),
+        "write err = {err}"
+    );
+    let err = c.read(&mut [0u8; 1]).unwrap_err();
+    assert!(
+        err.to_string().contains("SDR: SDR not ready"),
+        "read err = {err}"
     );
 }
 
-/// Without a usable status nothing can be dialed, and the reason names the
-/// shim's verdict.
+/// Without a ready transport nothing can be dialed, and the reason names its
+/// verdict.
 #[test]
 fn not_ready() {
     let sw = Switch::new();
@@ -158,16 +138,24 @@ fn not_ready() {
         err.kind() == NOT_READY && err.to_string().contains("steam_api64.dll is not loaded"),
         "dial err = {err}"
     );
-    let b2 = Bridge::new(
-        std::env::temp_dir().join("sdrbridge-absent-status"),
-        Log::discard(),
-    );
+    let ep = sw.pending(5, "Steam API not initialised yet");
+    let b2 = Bridge::new(ep.clone(), Log::discard());
     let (ok, why) = b2.ready();
-    assert!(!ok && why.contains("initialising"), "ready = {ok}, {why:?}");
+    assert!(
+        !ok && why.contains("initialising") && why.contains("not initialised"),
+        "ready = {ok}, {why:?}"
+    );
+    assert!(!b2.status().known);
+    ep.set_status(Status {
+        known: true,
+        ok: true,
+        reason: String::new(),
+    });
+    assert!(b2.ready().0, "pending -> ok not seen");
 }
 
-/// Reconnecting without a delivered close, including a helper restart while
-/// the host still holds its old stream.
+/// Reconnecting without a delivered close, including a restart while the
+/// host still holds its old stream.
 #[test]
 fn redial_resets_remote_stream() {
     const HOST: u64 = 76_561_197_960_265_728 + 311;
@@ -203,45 +191,41 @@ fn redial_resets_remote_stream() {
     second.close();
 }
 
+/// Publications go straight to the transport; invalid ones never do, and a
+/// stopped bridge withdraws the advert.
 #[test]
-fn lobby_invite_replays_latest_after_connect_and_reconnect() {
+fn lobby_invite_published_and_withdrawn() {
     const HOST: u64 = 76_561_197_960_265_728 + 455;
     let sw = Switch::new();
     let b = Bridge::new(sw.add(HOST), Log::discard());
-    b.set_lobby_invite("OLD");
-    b.set_lobby_invite("LATEST");
-    let _r = run(&b);
-    let expect = |want: &str| {
-        let ev = sw
-            .lobby_invites
+    let next = || {
+        sw.lobby_invites
             .lock()
             .unwrap()
             .recv_timeout(Duration::from_secs(3))
-            .expect("lobby state was not delivered");
-        assert!(
-            ev.peer == HOST && ev.invite == want,
-            "published = {ev:?}, want {want:?}"
-        );
+            .expect("lobby state was not delivered")
     };
-    expect("LATEST");
-    sw.disconnect(HOST);
-    expect("LATEST");
-    b.set_lobby_invite("");
-    expect("");
-    sw.disconnect(HOST);
-    expect("");
+    b.set_lobby_invite(&"x".repeat(33));
+    b.set_lobby_invite("bad\nframe");
+    b.set_lobby_invite("bad frame");
+    b.set_lobby_invite("LATEST");
+    let ev = next();
+    assert!(ev.peer == HOST && ev.invite == "LATEST", "{ev:?}");
+    let r = run(&b);
+    drop(r);
+    assert_eq!(next().invite, "", "stop did not withdraw the advert");
 }
 
-/// Losing the shim ends every open stream with NOT_READY.
+/// Stopping the bridge ends every open stream with NOT_READY.
 #[test]
-fn shim_drop_ends_streams() {
+fn stop_ends_streams() {
     const HOST: u64 = 76_561_197_960_265_728 + 511;
     const GUEST: u64 = 76_561_197_960_265_728 + 522;
     let sw = Switch::new();
     let (_hb, _hr) = start(&sw, HOST);
-    let (gb, _gr) = start(&sw, GUEST);
+    let (gb, gr) = start(&sw, GUEST);
     let gc = gb.dial(HOST).unwrap();
-    sw.disconnect(GUEST);
+    drop(gr);
     let err = gc.read(&mut [0u8; 1]).unwrap_err();
     assert_eq!(err.kind(), NOT_READY, "{err}");
 }
@@ -250,7 +234,8 @@ fn shim_drop_ends_streams() {
 /// reads fail.
 #[test]
 fn overflow_drains_then_fails() {
-    let b = Bridge::new("", Log::discard());
+    let sw = Switch::new();
+    let b = Bridge::new(sw.add(7), Log::discard());
     let p = b.new_peer(&mut b.mu.lock().unwrap(), 7);
     for _ in 0..=PEER_QUEUE {
         p.push(vec![OP_DATA, b'x']);
@@ -265,19 +250,23 @@ fn overflow_drains_then_fails() {
     assert!(err.to_string().contains("stream overflow"), "{err}");
 }
 
-/// Fake shim socket: a FIN frame blocks until released.
+/// Fake transport: a FIN blocks until released.
 struct ResetWire {
     fin: Mutex<Option<mpsc::Sender<()>>>,
     release: Mutex<mpsc::Receiver<()>>,
     data_frames: Mutex<usize>,
 }
 
-impl Conn for ResetWire {
-    fn read(&self, _: &mut [u8]) -> io::Result<usize> {
-        Ok(0)
+impl Wire for ResetWire {
+    fn status(&self) -> Status {
+        Status {
+            known: true,
+            ok: true,
+            reason: String::new(),
+        }
     }
-    fn write_all(&self, p: &[u8]) -> io::Result<()> {
-        if p[FRAME_HEAD] == OP_FIN {
+    fn send(&self, _: u64, p: &[u8]) -> Result<(), String> {
+        if p[0] == OP_FIN {
             drop(self.fin.lock().unwrap().take());
             let _ = self.release.lock().unwrap().recv();
         } else {
@@ -285,13 +274,12 @@ impl Conn for ResetWire {
         }
         Ok(())
     }
-    fn set_read_timeout(&self, _: Option<Duration>) -> io::Result<()> {
-        Ok(())
+    fn recv(&self) -> Vec<(u64, Vec<u8>)> {
+        Vec::new()
     }
-    fn set_write_timeout(&self, _: Option<Duration>) -> io::Result<()> {
-        Ok(())
+    fn set_lobby_invite(&self, _: &str) -> bool {
+        true
     }
-    fn close(&self) {}
 }
 
 #[test]
@@ -303,12 +291,8 @@ fn dial_retires_old_stream_before_reset() {
         release: Mutex::new(release_rx),
         data_frames: Mutex::new(0),
     });
-    let b = Bridge::new("", Log::discard());
-    let old = {
-        let mut s = b.mu.lock().unwrap();
-        s.conn = Some(wire.clone());
-        b.new_peer(&mut s, 123)
-    };
+    let b = Bridge::new(wire.clone(), Log::discard());
+    let old = b.new_peer(&mut b.mu.lock().unwrap(), 123);
     let dialed = {
         let b = b.clone();
         std::thread::spawn(move || b.dial(123).map(|_| ()))
@@ -326,6 +310,7 @@ fn dial_retires_old_stream_before_reset() {
         let old = old.clone();
         std::thread::spawn(move || old.close())
     };
+    let t0 = Instant::now();
     drop(release_tx);
     dialed.join().unwrap().unwrap();
     assert!(
@@ -333,32 +318,10 @@ fn dial_retires_old_stream_before_reset() {
         "old write succeeded after reset"
     );
     closed.join().unwrap();
+    assert!(t0.elapsed() < Duration::from_secs(5));
     assert_eq!(
         *wire.data_frames.lock().unwrap(),
         0,
         "stale data followed reset"
-    );
-}
-
-#[test]
-fn set_lobby_invite_does_not_wait_for_wire() {
-    let b = Bridge::new("", Log::discard());
-    let _w = b.wmu.lock().unwrap();
-    let (tx, done) = mpsc::channel();
-    let b2 = b.clone();
-    std::thread::spawn(move || {
-        b2.set_lobby_invite("FIRST");
-        b2.set_lobby_invite("LATEST");
-        let _ = tx.send(());
-    });
-    done.recv_timeout(Duration::from_secs(1))
-        .expect("setter blocked on the wire");
-    b.set_lobby_invite(&"x".repeat(33));
-    b.set_lobby_invite("bad\nframe");
-    b.set_lobby_invite("bad frame");
-    assert_eq!(
-        b.mu.lock().unwrap().lobby_invite,
-        "LATEST",
-        "invalid payload changed desired invite"
     );
 }
