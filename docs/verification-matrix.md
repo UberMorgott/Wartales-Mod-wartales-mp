@@ -56,6 +56,7 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | debrief_diag | unit | removed (2026-10-26): print-only, the rebuild churn it traced is gone with `debrief` |
 | debrief_enable | unit | merged into `debrief` (2026-10-26, patch consolidation) |
 | window_close | unit | |
+| mode_windows (2026-11-02) | PASS | runs `20261102-095606` (before) / `20261102-100056`, `20261102-100624` (fix): host and guest UnitInfo + Paths (dump `gwins`) closed by town entry and the camp confession before, kept by both after; `console battle` still closes them. Part R (camp rest) unit only |
 | stale_lobby | unit | needs a lobby left mid-connect |
 | log_error_cast | PASS | R1 S1 (relay connect failure path) |
 | direct_lobby | PASS | R1 S1, R6 join by code |
