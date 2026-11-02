@@ -77,6 +77,7 @@ mod skill_cost;
 mod skill_result;
 mod skill_sync;
 mod skill_vars;
+mod skillbar_compact;
 mod stale_lobby;
 mod style_guard;
 mod take_all;
@@ -188,6 +189,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loot_level::patch_loot_order(&mut code);
     loot_level::patch_loot_pity(&mut code);
     weapon_set::patch_weapon_set(&mut code);
+    skillbar_compact::patch_skillbar_compact(&mut code);
     job_xp::patch_job_xp(&mut code);
     job_confirm::patch_job_confirm(&mut code);
     barrier::patch_barrier(&mut code);

@@ -281,6 +281,13 @@ struct Ctx {
     battle_state: (RefField, RefType),
     state_camera: (RefField, RefType),
     battle_drag: (RefField, RefType),
+    /// Battle.skillBar, its skillsLayout (pages of SkillIcon) and
+    /// currentSkillBarIndex, SkillIcon.skill (dump `sbar`).
+    battle_sbar: (RefField, RefType),
+    sb_layout: RefField,
+    sb_cur: RefField,
+    icon_t: RefType,
+    icon_skill: RefField,
     /// GameUI.worldButtonsBar: the HUD bottom bar.
     ui_bar: (RefField, RefType),
     /// mpman.Storage.setUserData (the `ud` verb clears one key).
@@ -876,6 +883,11 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             }
             dm
         },
+        battle_sbar: field(code, battle_t, "skillBar")?,
+        sb_layout: typed(code, obj_type(code, "battle.ui.win.SkillBar")?, "skillsLayout", arr_t)?,
+        sb_cur: typed(code, obj_type(code, "battle.ui.win.SkillBar")?, "currentSkillBarIndex", i32_t)?,
+        icon_t: obj_type(code, "ui.comp.SkillIcon")?,
+        icon_skill: typed(code, obj_type(code, "ui.comp.SkillIcon")?, "skill", skill_t)?,
         ui_bar: field(code, game_ui.1, "worldButtonsBar")?,
         set_ud: sfn("mpman.$Storage", "setUserData", &[str_t, dyn_t], void_t)?,
         state_t,
@@ -1629,6 +1641,14 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let bst = r.r(c.battle_state.1);
     let cam = r.r(c.state_camera.1);
     let drg = r.r(c.battle_drag.1);
+    let (sbar, sbpage, sbarr, sbicon, sbj, sbm) = (
+        r.r(c.battle_sbar.1),
+        r.r(c.arr_t),
+        r.r(c.arr_arr.1),
+        r.r(c.icon_t),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+    );
     let hbar = r.r(c.ui_bar.1);
     let gwui = r.r(c.global_ui.1);
     let invp = r.r(c.inv_panel.1);
@@ -3031,6 +3051,59 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.lit(code, ",\"dragMode\":");
     w.a.fld(drg, battle, c.battle_drag.0);
     w.obj_q(drg);
+    // the skill bar pages as shown: skill id per slot (null = empty slot)
+    w.lit(code, ",\"sbar\":");
+    w.a.fld(sbar, battle, c.battle_sbar.0);
+    w.a.if_null(sbar, "sb_none");
+    w.a.fld(list, sbar, c.sb_layout);
+    w.a.if_null(list, "sb_none");
+    w.lit(code, "{\"idx\":");
+    w.a.fld(sbm, sbar, c.sb_cur);
+    w.val(sbm);
+    w.lit(code, ",\"pages\":[");
+    w.a.fld(n, list, c.arr_len);
+    w.a.int(ix, k0);
+    w.a.loop_head("sbp_loop");
+    w.a.jmp(Opcode::JSGte { a: ix, b: n, offset: 0 }, "sbp_end");
+    w.a.int(kk, k0);
+    w.a.jmp(Opcode::JEq { a: ix, b: kk, offset: 0 }, "sbp_first");
+    w.lit(code, ",");
+    w.a.label("sbp_first");
+    w.a.fld(arr, list, c.arr_arr.0);
+    w.a.op(Opcode::GetArray { dst: d, array: arr, index: ix });
+    w.a.op(Opcode::Incr { dst: ix });
+    w.a.op(Opcode::SafeCast { dst: sbpage, src: d });
+    w.lit(code, "[");
+    w.a.if_null(sbpage, "sbs_end");
+    w.a.fld(sbm, sbpage, c.arr_len);
+    w.a.int(sbj, k0);
+    w.a.loop_head("sbs_loop");
+    w.a.jmp(Opcode::JSGte { a: sbj, b: sbm, offset: 0 }, "sbs_end");
+    w.a.int(kk, k0);
+    w.a.jmp(Opcode::JEq { a: sbj, b: kk, offset: 0 }, "sbs_first");
+    w.lit(code, ",");
+    w.a.label("sbs_first");
+    w.a.fld(sbarr, sbpage, c.arr_arr.0);
+    w.a.op(Opcode::GetArray { dst: d, array: sbarr, index: sbj });
+    w.a.op(Opcode::Incr { dst: sbj });
+    w.a.op(Opcode::Null { dst: s });
+    w.a.op(Opcode::SafeCast { dst: sbicon, src: d });
+    w.a.if_null(sbicon, "sbs_q");
+    w.a.fld(skill, sbicon, c.icon_skill);
+    w.a.if_null(skill, "sbs_q");
+    w.a.fld(s, skill, c.skill_id);
+    w.a.label("sbs_q");
+    w.str_q(s);
+    w.a.go("sbs_loop");
+    w.a.label("sbs_end");
+    w.lit(code, "]");
+    w.a.go("sbp_loop");
+    w.a.label("sbp_end");
+    w.lit(code, "]}");
+    w.a.go("sb_end");
+    w.a.label("sb_none");
+    w.lit(code, "null");
+    w.a.label("sb_end");
     w.lit(code, ",\"currentUnit\":");
     w.a.fld(bu, battle, c.battle_cur);
     w.a.if_null(bu, "no_cur");

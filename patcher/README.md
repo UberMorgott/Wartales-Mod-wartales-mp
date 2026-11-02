@@ -151,6 +151,15 @@ both slots always take the class's `inf.weaponTypes` (minus Shield) without
 the exact-type flag. All equip paths (inventory highlight / drop, autoUnequip,
 localEquipSlot, load-time recoverInvalidEquips) read these slots; the class
 check (`hasCantEquipReasons`) is unchanged. Same op count.
+**Skill bar compact** (`src/skillbar_compact.rs`): `SkillBar.init` rebuilds
+`this.skillsLayout` (pages of 10 SkillIcon) from the unit's saved positions,
+which keep ids of skills it no longer has, so pages have holes. Right before
+init first reads `nbActiveSkillBar` a new `compact(bar)` repacks the icons in
+page order into full pages of 10 (last padded with null) and, when the current
+page is gone, switches to the last one. Display only: the saved layout changes
+only through the vanilla drag save (`saveOrderedSkills`, host-owned RPC). The
+passive panel's `addChildAt(icon, 0)` takes `children.length` instead, so
+passives keep their order. +2 ops in init, one new function.
 **Save kind** (`src/save_kind.rs`): vanilla names every save of a campaign
 `header.gameName`, so auto, quick and manual saves look alike in the load
 list. `LoadGame.getSaveName` (row title, detail panel, save-over / delete
