@@ -67,6 +67,7 @@ mod ready_start;
 mod returning_units;
 mod rpc_cancel;
 mod save_kind;
+mod save_list;
 mod save_order;
 mod scroll_hit;
 mod shield_total;
@@ -248,6 +249,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     scroll_hit::patch_scroll_hit(&mut code);
     save_kind::patch_save_kind(&mut code);
     save_order::patch_save_order(&mut code);
+    save_list::patch_save_list(&mut code);
     patch_queue::patch_patch_queue(&mut code);
     jit_names::patch_jit_names(&mut code);
     }
