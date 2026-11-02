@@ -199,10 +199,12 @@ impl Socket {
     /// segments gets no flood back (and a reset is smaller than any segment).
     fn reset_locked(&self, st: &mut State, key: Key) {
         let now = Instant::now();
-        if st
-            .resets
-            .get(&key)
-            .is_some_and(|t| now.duration_since(*t) < RESET_EVERY)
+        // At most 256 resets a second in all: spoofed convs can't grow the table.
+        if st.resets.len() >= 256
+            || st
+                .resets
+                .get(&key)
+                .is_some_and(|t| now.duration_since(*t) < RESET_EVERY)
         {
             return;
         }
@@ -220,10 +222,10 @@ impl Socket {
         let mut st = self.st();
         if st.streams.contains_key(&key) {
             Self::remove_locked(&mut st, key);
+            drop(st);
             logf!(self.log, "punch: stream {conv:08x} reset by {from}");
+            self.cv.notify_all();
         }
-        drop(st);
-        self.cv.notify_all();
     }
 
     /// Opens our side of a stream the other end opened. Only an OPEN message
