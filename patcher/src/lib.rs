@@ -72,6 +72,7 @@ mod save_kind;
 mod save_order;
 mod scroll_hit;
 mod skill_cost;
+mod skill_result;
 mod skill_sync;
 mod skill_vars;
 mod stale_lobby;
@@ -196,6 +197,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     skill_cost::patch_skill_cost(&mut code);
     prepared_skill::patch_prepared_skill(&mut code);
     skill_sync::patch_skill_sync(&mut code);
+    skill_result::patch_skill_result(&mut code);
     skill_vars::patch_skill_vars(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
     camp_chest::patch_camp_chest(&mut code);

@@ -220,6 +220,16 @@ client only (`!Game.isAuth`), when the list of `battle.currentUnit` is emptied,
 `Battle.update` redraws the skill bar, as after an action).
 Host and solo are unchanged. Skipped (logged) on mismatch.
 
+**Skill result** (`src/skill_result.rs`): a client's skill request locks its
+battle (`lockCounter++`) until the host's answer, whose callback only did
+`lockCounter--`. A skill that ends synchronously on the host (weapon swap) has
+its broadcast `battleUnlock` reach the client while that lock still holds, so
+`battleUnlock__impl` skipped `setUIDirty` and the client's skill bar kept the
+old weapon's passive until the next action. The callback now ends like
+`battleUnlock__impl`: `if (!isLocked()) setUIDirty()`. Host and solo are
+unchanged (the callback exists on the client path only). Skipped (logged) on
+mismatch.
+
 **Loading draw** (`src/loading_draw.rs`, issue #3): `Game.render` drew
 `Main.loadingS2d` only once `Game.state` exists. A joining client waits for the
 host between `Game.init` (which creates the loading scene) and `Game.start`
