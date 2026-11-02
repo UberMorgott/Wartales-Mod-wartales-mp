@@ -82,11 +82,22 @@
 // game has, gives it back to a game without one, forgets it with no
 // options.multi (solo), and takes a listed player who sent ReadyToStart off it.
 //
-// No timer of its own: a parked Join is bounded by the barrier's JOIN_CAP
-// (the client is disconnected, and so no longer waited for).
+// A parked Join is bounded by the barrier's JOIN_CAP (the client is
+// disconnected, and so no longer waited for).
 //
-// Not handled: a player whose client never connects to the host at all is
-// still waited for (it cannot be told from one still on its way).
+// A save player whose client never connects to the host at all (a guest whose
+// reload never reconnected: the 4-player world-map reload of 2026-11-02 waited
+// at "ready=3 of=4" for good) cannot be told from one still on its way, so it
+// gets a grace period: readyTick, once the host counted itself and every
+// connected client's ReadyToStart is counted (ready-clients), notes Sys.time
+// (`since`, cleared by readyReset and whenever that stops being true: a new
+// client connects and loads); WAIT_ABSENT s later every player of the count
+// (state.players, not game.me, not in playersRemoved, not ready) with no
+// connected client is marked ready and the vanilla handler is run forced for a
+// counted client (its log line names that client, the "never connected" line
+// the player): the count goes up by one each, the last starts gameplay. It
+// joins later as a late joiner. A forced run the count did not take (the
+// handler threw) uncounts it again and retries after WAIT_ABSENT.
 //
 // Validated before editing; a mismatch skips the pass (logged).
 
@@ -98,6 +109,11 @@ use hlbc::types::{RefEnumConstruct, RefGlobal, RefInt, ValBool};
 const LOG_FORCED: &str = "mp: ready: a player who left is no longer waited for: ";
 const LOG_HOLD: &str = "mp: ready: start held: a connected player has not joined yet";
 const LOG_REPLAY: &str = "mp: ready: every connected player joined, the held start goes ahead";
+const LOG_ABSENT: &str = "mp: ready: a player who never connected is no longer waited for: ";
+const LOG_ABSENT_FAIL: &str = "mp: ready: counting an absent player failed, retrying later: ";
+/// Seconds every connected player has been counted before a save player who
+/// never connected stops holding the start.
+const WAIT_ABSENT: f64 = 60.0;
 
 type F = (RefField, RefType);
 
@@ -130,6 +146,10 @@ struct Plan {
     user_id: RefField,
     player_t: RefType,
     player_user: RefField,
+    /// Game.me: the host's own player (never waited for).
+    game_me: F,
+    f64_t: RefType,
+    sys_time: RefFun,
     game_auth: RefField,
     game_started: RefField,
     game_reloading: RefField,
@@ -297,6 +317,12 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
     let player_t = obj_type(code, "ent.BasePlayer")?;
     let player_user = typed(player_t, "user", str_t)?;
+    let game_me = field(code, game_t, "me")?;
+    if !is_sub(code, game_me.1, player_t) {
+        bail!("Game.me is not an ent.BasePlayer");
+    }
+    let f64_t = prim("f64", |t| matches!(t, Type::F64))?;
+    let sys_time = native(code, "sys_time", &[], f64_t)?;
     let arr_len = typed(arr_t, "length", i32_t)?;
     let arr_raw = field(code, arr_t, "array")?;
     let contains = proto(code, arr_t, "contains")?;
@@ -528,6 +554,9 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         user_id,
         player_t,
         player_user,
+        game_me,
+        f64_t,
+        sys_time,
         game_auth,
         game_started,
         game_reloading,
@@ -573,6 +602,8 @@ struct Globals {
     held: RefGlobal,
     /// The last lobby's options.multi.playersRemoved (never reset).
     removed: RefGlobal,
+    /// Sys.time() since every connected client is counted (0: not so).
+    since: RefGlobal,
 }
 
 /// readyReset(): fresh lists, nothing forced or held.
@@ -624,6 +655,13 @@ fn add_reset(code: &mut Bytecode, p: &Plan, g: &Globals) -> Result<RefFun> {
     ops.push(Opcode::SetGlobal {
         global: g.held,
         src: c,
+    });
+    let f0 = float_const(code, 0.0);
+    let t0 = r.r(p.f64_t);
+    ops.push(Opcode::Float { dst: t0, ptr: f0 });
+    ops.push(Opcode::SetGlobal {
+        global: g.since,
+        src: t0,
     });
     ops.push(Opcode::Ret { ret: v });
     push_fn(code, vec![], p.void_t, r.0, ops, p.dbg_file)
@@ -1295,6 +1333,10 @@ fn add_tick(
     let i0 = int_const(code, 0);
     let log = str_global(code, p.str_t, LOG_FORCED);
     let log_replay = str_global(code, p.str_t, LOG_REPLAY);
+    let log_absent = str_global(code, p.str_t, LOG_ABSENT);
+    let log_absent_fail = str_global(code, p.str_t, LOG_ABSENT_FAIL);
+    let f0 = float_const(code, 0.0);
+    let f_wait = float_const(code, WAIT_ABSENT);
     let cls_t = code.globals[p.cwt_cls.0];
     let mut r = Regs(vec![p.game_t]);
     let game = Reg(0);
@@ -1337,6 +1379,16 @@ fn add_tick(
         r.r(p.void_t),
         r.r(p.i32_t),
         r.r(p.dyn_t),
+    );
+    let (ready_c, sur, me, cnt0, now, since, dt, lim) = (
+        r.r(p.arr_t),
+        r.r(p.nc_t),
+        r.r(p.game_me.1),
+        r.r(p.i32_t),
+        r.r(p.f64_t),
+        r.r(p.f64_t),
+        r.r(p.f64_t),
+        r.r(p.f64_t),
     );
     let mut a = Asm::new();
     let fld =
@@ -1523,7 +1575,7 @@ fn add_tick(
             b: cnt,
             offset: 0,
         },
-        "replay",
+        "absent0",
     );
     a.op(Opcode::Int { dst: i, ptr: i0 });
     a.loop_head("gone");
@@ -1534,7 +1586,7 @@ fn add_tick(
             b: len,
             offset: 0,
         },
-        "replay",
+        "absent0",
     );
     next(&mut a, seen_c, i, c, false);
     next(&mut a, seen_u, i, uid, true);
@@ -1681,6 +1733,264 @@ fn add_tick(
     a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
     a.jmp(Opcode::JAlways { offset: 0 }, "gone");
 
+    // 2b. Every connected client counted for WAIT_ABSENT s: a save player whose
+    // client never came (back) is counted too, through a counted client.
+    a.label("absent0");
+    fld(&mut a, cnt, game, p.game_ready);
+    a.jmp(
+        Opcode::JSGte {
+            a: zero,
+            b: cnt,
+            offset: 0,
+        },
+        "unsince",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: ready_c,
+        global: g.ready_c,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: ready_c,
+            offset: 0,
+        },
+        "unsince",
+    );
+    a.op(Opcode::Null { dst: sur });
+    a.op(Opcode::Int { dst: i, ptr: i0 });
+    a.loop_head("elig");
+    fld(&mut a, len, clients, p.arr_len);
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: len,
+            offset: 0,
+        },
+        "elig_end",
+    );
+    next(&mut a, clients, i, c, true);
+    a.jmp(Opcode::JNull { reg: c, offset: 0 }, "elig");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.contains,
+        arg0: ready_c,
+        arg1: c,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "unsince");
+    a.op(Opcode::Mov { dst: sur, src: c });
+    a.jmp(Opcode::JAlways { offset: 0 }, "elig");
+    a.label("elig_end");
+    a.jmp(Opcode::JNull { reg: sur, offset: 0 }, "unsince");
+    a.op(Opcode::Call0 {
+        dst: now,
+        fun: p.sys_time,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: since,
+        global: g.since,
+    });
+    a.op(Opcode::Float { dst: dt, ptr: f0 });
+    a.jmp(
+        Opcode::JSLt {
+            a: dt,
+            b: since,
+            offset: 0,
+        },
+        "timed",
+    );
+    a.op(Opcode::SetGlobal {
+        global: g.since,
+        src: now,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "replay");
+    a.label("timed");
+    a.op(Opcode::Sub {
+        dst: dt,
+        a: now,
+        b: since,
+    });
+    a.op(Opcode::Float {
+        dst: lim,
+        ptr: f_wait,
+    });
+    a.jmp(
+        Opcode::JSLt {
+            a: dt,
+            b: lim,
+            offset: 0,
+        },
+        "replay",
+    );
+    fld(&mut a, st, game, p.game_state.0);
+    a.jmp(Opcode::JNull { reg: st, offset: 0 }, "replay");
+    fld(&mut a, prox, st, p.state_players.0);
+    a.jmp(
+        Opcode::JNull {
+            reg: prox,
+            offset: 0,
+        },
+        "replay",
+    );
+    fld(&mut a, pa, prox, p.proxy_array.0);
+    a.op(Opcode::SafeCast {
+        dst: players,
+        src: pa,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: players,
+            offset: 0,
+        },
+        "replay",
+    );
+    fld(&mut a, me, game, p.game_me.0);
+    a.op(Opcode::Int { dst: j, ptr: i0 });
+    a.loop_head("ab");
+    fld(&mut a, len, players, p.arr_len);
+    a.jmp(
+        Opcode::JSGte {
+            a: j,
+            b: len,
+            offset: 0,
+        },
+        "replay",
+    );
+    next(&mut a, players, j, pl, true);
+    a.jmp(Opcode::JNull { reg: pl, offset: 0 }, "ab");
+    fld(&mut a, pu, pl, p.player_user);
+    a.jmp(Opcode::JNull { reg: pu, offset: 0 }, "ab");
+    // the host itself
+    a.jmp(Opcode::JNull { reg: me, offset: 0 }, "notme");
+    fld(&mut a, uid2, me, p.player_user);
+    a.jmp(
+        Opcode::JEq {
+            a: uid2,
+            b: pu,
+            offset: 0,
+        },
+        "ab",
+    );
+    a.label("notme");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.contains,
+        arg0: ready,
+        arg1: pu,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "ab");
+    fld(&mut a, opt, game, p.game_options.0);
+    a.jmp(Opcode::JNull { reg: opt, offset: 0 }, "conn");
+    fld(&mut a, multi, opt, p.opt_multi.0);
+    a.jmp(
+        Opcode::JNull {
+            reg: multi,
+            offset: 0,
+        },
+        "conn",
+    );
+    fld(&mut a, rem, multi, p.multi_removed.0);
+    a.jmp(Opcode::JNull { reg: rem, offset: 0 }, "conn");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.contains,
+        arg0: rem,
+        arg1: pu,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "ab");
+    // connected (still syncing, or under a client the count skipped): not absent
+    a.label("conn");
+    a.op(Opcode::Int { dst: i, ptr: i0 });
+    a.loop_head("ac");
+    fld(&mut a, len, clients, p.arr_len);
+    a.jmp(
+        Opcode::JSGte {
+            a: i,
+            b: len,
+            offset: 0,
+        },
+        "absent",
+    );
+    next(&mut a, clients, i, c2, true);
+    a.jmp(Opcode::JNull { reg: c2, offset: 0 }, "ac");
+    user_of(&mut a, c2, uid2, "ac");
+    a.jmp(
+        Opcode::JNotEq {
+            a: uid2,
+            b: pu,
+            offset: 0,
+        },
+        "ac",
+    );
+    a.jmp(Opcode::JAlways { offset: 0 }, "ab");
+    a.label("absent");
+    a.op(Opcode::Call2 {
+        dst: n,
+        fun: p.push,
+        arg0: ready,
+        arg1: pu,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: txt,
+        global: log_absent,
+    });
+    a.op(Opcode::Call2 {
+        dst: txt,
+        fun: p.str_add,
+        arg0: txt,
+        arg1: pu,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: txt,
+    });
+    fld(&mut a, cnt0, game, p.game_ready);
+    forced_ready(&mut a, sur, "caught3");
+    fld(&mut a, b, game, p.game_started);
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "end");
+    fld(&mut a, cnt, game, p.game_ready);
+    a.jmp(
+        Opcode::JNotEq {
+            a: cnt,
+            b: cnt0,
+            offset: 0,
+        },
+        "ab",
+    );
+    // the count did not take it: uncount, say so, try again after WAIT_ABSENT
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.remove,
+        arg0: ready,
+        arg1: pu,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: txt,
+        global: log_absent_fail,
+    });
+    a.op(Opcode::Call2 {
+        dst: txt,
+        fun: p.str_add,
+        arg0: txt,
+        arg1: pu,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: txt,
+    });
+    a.op(Opcode::SetGlobal {
+        global: g.since,
+        src: now,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "replay");
+    a.label("unsince");
+    a.op(Opcode::Float { dst: dt, ptr: f0 });
+    a.op(Opcode::SetGlobal {
+        global: g.since,
+        src: dt,
+    });
+
     // 3. A held start with no connected client left unsynced: replay it.
     a.label("replay");
     a.op(Opcode::GetGlobal {
@@ -1728,6 +2038,7 @@ fn apply(code: &mut Bytecode, p: Plan) -> Result<()> {
         forced: global(p.bool_t),
         held: global(p.nc_t),
         removed: global(p.arr_t),
+        since: global(p.f64_t),
     };
     let handler = code.functions[p.join_fi].findex;
     // Appended in this order (the tests' `k` indices).
@@ -1984,6 +2295,7 @@ mod tests {
         S(String),
         R(usize),
         E(usize),
+        F(f64),
     }
 
     enum H {
@@ -2011,6 +2323,8 @@ mod tests {
         clients: usize,
         players: usize,
         removed: usize,
+        /// Sys.time()
+        now: f64,
     }
 
     impl<'a> Sim<'a> {
@@ -2027,6 +2341,7 @@ mod tests {
                 clients: 0,
                 players: 0,
                 removed: 0,
+                now: 0.0,
             };
             s.game = s.obj();
             let host = s.obj();
@@ -2037,10 +2352,13 @@ mod tests {
             let opt = s.obj();
             let multi = s.obj();
             s.removed = s.arr();
-            for u in players {
+            for (k, u) in players.iter().enumerate() {
                 let pl = s.obj();
                 s.set(pl, p.player_user, V::S(u.to_string()));
                 s.list(s.players).push(V::R(pl));
+                if k == 0 {
+                    s.set(s.game, p.game_me.0, V::R(pl));
+                }
             }
             s.set(s.game, p.game_auth, V::B(true));
             s.set(s.game, p.game_started, V::B(false));
@@ -2202,6 +2520,9 @@ mod tests {
             if f == p.println {
                 return V::Null;
             }
+            if f == p.sys_time {
+                return V::F(self.now);
+            }
             if f == p.str_add {
                 let (V::S(a), V::S(b)) = (&args[0], &args[1]) else {
                     panic!()
@@ -2260,6 +2581,13 @@ mod tests {
                     Opcode::Null { dst } | Opcode::Type { dst, .. } => r[rg(dst)] = V::Null,
                     Opcode::Bool { dst, value } => r[rg(dst)] = V::B(value.0),
                     Opcode::Int { dst, ptr } => r[rg(dst)] = V::I(code.ints[ptr.0]),
+                    Opcode::Float { dst, ptr } => r[rg(dst)] = V::F(code.floats[ptr.0]),
+                    Opcode::Sub { dst, a, b } => {
+                        let (V::F(x), V::F(y)) = (&r[rg(a)], &r[rg(b)]) else {
+                            panic!("sim: Sub on non-floats")
+                        };
+                        r[rg(dst)] = V::F(x - y);
+                    }
                     Opcode::Incr { dst } => r[rg(dst)] = V::I(int(&r[rg(dst)]) + 1),
                     Opcode::Decr { dst } => r[rg(dst)] = V::I(int(&r[rg(dst)]) - 1),
                     Opcode::Field { dst, obj, field } => {
@@ -2330,6 +2658,12 @@ mod tests {
                     Opcode::JSGte { a, b, offset }
                     | Opcode::JSLt { a, b, offset }
                     | Opcode::JULt { a, b, offset } => {
+                        if let (V::F(x), V::F(y), Opcode::JSLt { .. }) = (&r[rg(a)], &r[rg(b)], op) {
+                            if x < y {
+                                jump(&mut pc, *offset);
+                            }
+                            continue;
+                        }
                         let (x, y) = (int(&r[rg(a)]), int(&r[rg(b)]));
                         let hit = match op {
                             Opcode::JSGte { .. } => x >= y,
@@ -2379,6 +2713,67 @@ mod tests {
         let mut code = read(&image);
         patch_ready_start(&mut code);
         Some((orig, code))
+    }
+
+    /// The 2026-11-02 reload: a 4-player save, C's client never reconnects.
+    /// Vanilla waits at ready=3 of 4 for good; patched, WAIT_ABSENT s after
+    /// A and B are counted C is counted too and gameplay starts for A and B.
+    /// A client that connects meanwhile restarts the wait.
+    #[test]
+    fn player_who_never_connects_is_waited_for_a_while() {
+        let Some((orig, code)) = images() else { return };
+        let p = plan(&orig).expect("plan");
+        for (img, fixed) in [(&orig, false), (&code, true)] {
+            let nf = fixed.then_some(orig.functions.len());
+            let mut s = Sim::new(img, &p, &["host", "a", "b", "c"], nf);
+            s.now = 100.0;
+            let a = s.connect("a");
+            s.frame();
+            s.ready(a);
+            s.now = 150.0;
+            s.frame();
+            // b still loading: no wait yet
+            let b = s.connect("b");
+            s.now = 170.0;
+            s.frame();
+            s.ready(b);
+            assert_eq!(s.ready_count(), V::I(3));
+            s.now = 171.0;
+            s.frame(); // the wait starts here
+            s.now = 171.0 + WAIT_ABSENT - 1.0;
+            s.frame();
+            assert!(!s.started(), "still within the grace period");
+            s.now = 171.0 + WAIT_ABSENT + 0.5;
+            s.frame();
+            assert_eq!(s.started(), fixed, "fixed={fixed}");
+            if fixed {
+                assert_eq!(s.ready_count(), V::I(4));
+                // only the counted clients get the start
+                let sent: Vec<&Ev> = s.events.iter().filter(|e| matches!(e, Ev::Send(_))).collect();
+                assert_eq!(sent, [&Ev::Send(a), &Ev::Send(b)]);
+            }
+        }
+        // A newly connected client that is still loading restarts the wait.
+        let mut s = Sim::new(&code, &p, &["host", "a", "b", "c"], Some(orig.functions.len()));
+        s.now = 10.0;
+        let a = s.connect("a");
+        s.ready(a);
+        s.frame(); // wait starts at 10
+        s.now = 10.0 + WAIT_ABSENT - 5.0;
+        let b = s.connect("b");
+        s.frame(); // b loading: wait cleared
+        s.now = 10.0 + WAIT_ABSENT + 1.0;
+        s.frame();
+        assert!(!s.started(), "b is loading");
+        s.ready(b);
+        s.frame(); // wait restarts here
+        s.now += WAIT_ABSENT - 1.0;
+        s.frame();
+        assert!(!s.started());
+        s.now += 2.0;
+        s.frame();
+        assert!(s.started());
+        assert_eq!(s.ready_count(), V::I(4));
     }
 
     /// Host + A + B load a save; B's client drops before ReadyToStart (a Join
