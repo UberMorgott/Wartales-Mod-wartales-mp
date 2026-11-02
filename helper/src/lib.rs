@@ -5,3 +5,7 @@
 //! (`wartales_tips_*`, shim/proxy/tips.h) ships in the same library.
 
 pub use wartales_tips;
+
+pub mod log;
+pub use log::{rand_bytes, Log};
+pub mod conn;

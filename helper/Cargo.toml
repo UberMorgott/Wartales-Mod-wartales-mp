@@ -17,6 +17,14 @@ harness = ["wartales-tips/harness"]
 # Linked as an rlib: its C ABI (wartales_tips_*) ships inside this one staticlib.
 wartales-tips = { path = "../patcher" }
 anyhow = "1"
+ring = "0.17.14"
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring", "pem"] }
+kcp = "0.6.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+quick-xml = "0.42"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [profile.release]
 opt-level = 3
