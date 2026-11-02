@@ -9,8 +9,8 @@
 use crate::conn::{Conn, ConnRef};
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, SanType, SerialNumber,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
 };
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use rustls::{ServerConfig, ServerConnection};
@@ -29,11 +29,13 @@ const CA_KEY_FILE: &str = "ca.key";
 const LEAF_CERT_FILE: &str = "master.crt";
 const LEAF_KEY_FILE: &str = "master.key";
 
-const DAY: Duration = Duration::from_secs(86400);
+const DAY: Duration = Duration::from_hours(24);
 
 /// Where the generated certificates live.
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("ProgramData").filter(|v| !v.is_empty()).map(PathBuf::from);
+    let base = std::env::var_os("ProgramData")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
     base.unwrap_or_else(std::env::temp_dir).join("wartales-mp")
 }
 
@@ -64,7 +66,8 @@ fn generate() -> Result<[String; 4]> {
         let mut p = CertificateParams::default();
         p.distinguished_name = DistinguishedName::new();
         p.distinguished_name.push(DnType::CommonName, cn);
-        p.distinguished_name.push(DnType::OrganizationName, "wartales-mp");
+        p.distinguished_name
+            .push(DnType::OrganizationName, "wartales-mp");
         p.not_before = now - Duration::from_secs(3600);
         p.not_after = now + 3652 * DAY; // ~10 years
         p.serial_number = Some(serial());
@@ -75,23 +78,37 @@ fn generate() -> Result<[String; 4]> {
     let ca_key = KeyPair::generate_for(alg)?;
     let mut ca = params("wartales-mp local CA", vec![]);
     ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
+    ca.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
     let ca_cert = ca.self_signed(&ca_key)?;
     let ca_pem = ca_key.serialize_pem();
     let issuer = Issuer::new(ca, ca_key);
 
     let leaf_key = KeyPair::generate_for(alg)?;
-    let mut sans: Vec<SanType> =
-        MASTER_HOSTS.iter().map(|h| Ok(SanType::DnsName((*h).try_into()?))).collect::<Result<_>>()?;
+    let mut sans: Vec<SanType> = MASTER_HOSTS
+        .iter()
+        .map(|h| Ok(SanType::DnsName((*h).try_into()?)))
+        .collect::<Result<_>>()?;
     sans.push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
     sans.push(SanType::IpAddress(IpAddr::V6(Ipv6Addr::LOCALHOST)));
     let mut leaf = params(MASTER_HOSTS[0], sans);
-    leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+    leaf.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
     leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     leaf.use_authority_key_identifier_extension = true;
     let leaf_cert = leaf.signed_by(&leaf_key, &issuer)?;
 
-    Ok([ca_cert.pem(), ca_pem, leaf_cert.pem(), leaf_key.serialize_pem()])
+    Ok([
+        ca_cert.pem(),
+        ca_pem,
+        leaf_cert.pem(),
+        leaf_key.serialize_pem(),
+    ])
 }
 
 /// A random positive 127-bit serial, as Go's rand.Int(2^127).
@@ -111,7 +128,9 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
 
 /// Is the PEM cert at path parseable and valid for at least 24 more hours?
 fn cert_valid(path: &Path) -> bool {
-    let Ok(der) = CertificateDer::from_pem_file(path) else { return false };
+    let Ok(der) = CertificateDer::from_pem_file(path) else {
+        return false;
+    };
     not_after(&der).is_some_and(|t| SystemTime::now() + DAY < t)
 }
 
@@ -155,15 +174,15 @@ fn not_after(der: &[u8]) -> Option<SystemTime> {
         (0x18, 14) => (s.get(..4)?.parse().ok()?, s.get(4..)?),
         _ => return None,
     };
-    let f = |i: usize| -> Option<i64> { rest.get(i..i + 2)?.parse().ok() };
-    let (mon, day, h, m, sec) = (f(0)?, f(2)?, f(4)?, f(6)?, f(8)?);
+    let two = |i: usize| -> Option<i64> { rest.get(i..i + 2)?.parse().ok() };
+    let (mon, day, hour, min, sec) = (two(0)?, two(2)?, two(4)?, two(6)?, two(8)?);
     // days_from_civil (H. Hinnant)
     let y = if mon <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let doy = (153 * (if mon > 2 { mon - 3 } else { mon + 9 }) + 2) / 5 + day - 1;
-    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
-    let secs = days * 86400 + h * 3600 + m * 60 + sec;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    let secs = days * 86400 + hour * 3600 + min * 60 + sec;
     Some(UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).ok()?))
 }
 
@@ -171,13 +190,15 @@ fn not_after(der: &[u8]) -> Option<SystemTime> {
 pub fn tls_config(dir: &Path) -> Result<Arc<ServerConfig>> {
     let (crt, key) = (dir.join(LEAF_CERT_FILE), dir.join(LEAF_KEY_FILE));
     let certs = CertificateDer::pem_file_iter(&crt)
-        .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+        .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)
         .with_context(|| format!("load {}", crt.display()))?;
-    let key = PrivateKeyDer::from_pem_file(&key).with_context(|| format!("load {}", key.display()))?;
-    let cfg = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+    let key =
+        PrivateKeyDer::from_pem_file(&key).with_context(|| format!("load {}", key.display()))?;
+    let cfg =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
     Ok(Arc::new(cfg))
 }
 
@@ -189,7 +210,12 @@ pub fn accept_tls(stream: TcpStream, cfg: Arc<ServerConfig>) -> io::Result<ConnR
     Ok(Arc::new(TlsConn {
         rsock: stream.try_clone()?,
         sock: stream,
-        st: Mutex::new(State { tls, raw: Vec::new(), eof: false, failed: None }),
+        st: Mutex::new(State {
+            tls,
+            raw: Vec::new(),
+            eof: false,
+            failed: None,
+        }),
         send: Mutex::new(()),
         closed: AtomicBool::new(false),
     }))
@@ -215,7 +241,9 @@ struct TlsConn {
 
 impl TlsConn {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.st.lock().unwrap_or_else(|e| e.into_inner())
+        self.st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Sends whatever rustls has queued; takes `send` before releasing the state lock.
@@ -227,7 +255,10 @@ impl TlsConn {
         if out.is_empty() {
             return Ok(s);
         }
-        let g = self.send.lock().unwrap_or_else(|e| e.into_inner());
+        let g = self
+            .send
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         drop(s);
         (&self.sock).write_all(&out)?;
         drop(g);
@@ -331,13 +362,20 @@ mod tests {
         let tcp = TcpStream::connect(ln.local_addr().unwrap()).unwrap();
         let server = accept_tls(ln.accept().unwrap().0, cfg).unwrap();
         let mut roots = RootCertStore::empty();
-        roots.add(CertificateDer::from_pem_file(dir.join(CA_CERT_FILE)).unwrap()).unwrap();
-        let ccfg = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        let cc = ClientConnection::new(Arc::new(ccfg), "master.shirogames.com".try_into().unwrap()).unwrap();
+        roots
+            .add(CertificateDer::from_pem_file(dir.join(CA_CERT_FILE)).unwrap())
+            .unwrap();
+        let client_cfg =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        let cc = ClientConnection::new(
+            Arc::new(client_cfg),
+            "master.shirogames.com".try_into().unwrap(),
+        )
+        .unwrap();
         tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         (server, StreamOwned::new(cc, tcp))
     }
@@ -384,7 +422,9 @@ mod tests {
         let mut b = [0u8; 4];
         client.read_exact(&mut b).unwrap(); // drives the handshake, then the push arrives
         assert_eq!(&b, b"push");
-        finished.recv_timeout(Duration::from_secs(10)).expect("push deadlocked behind the blocked read");
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("push deadlocked behind the blocked read");
         push.join().unwrap();
         client.write_all(b"x").unwrap();
         let mut b = [0u8; 1];
@@ -406,11 +446,13 @@ mod tests {
         let s2 = server.clone();
         let t = std::thread::spawn(move || {
             let mut b = [0u8; 8];
-            tx.send(s2.read(&mut b).map(|n| n == 0).unwrap_or(true)).unwrap();
+            tx.send(s2.read(&mut b).map_or(true, |n| n == 0)).unwrap();
         });
         std::thread::sleep(Duration::from_millis(100));
         server.close();
-        assert!(rx.recv_timeout(Duration::from_secs(5)).expect("close did not unblock read"));
+        assert!(rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("close did not unblock read"));
         t.join().unwrap();
         assert!(server.write_all(b"late").is_err(), "write after close");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -428,7 +470,7 @@ mod tests {
         server.write_all(&big).unwrap();
         let mut got = vec![0u8; big.len()];
         client.read_exact(&mut got).unwrap();
-        assert!(got == big);
+        assert_eq!(got, big);
         client.write_all(b"x").unwrap();
         reader.join().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -445,7 +487,11 @@ mod tests {
         }
         ensure_certs(&dir).unwrap();
         for f in [CA_CERT_FILE, CA_KEY_FILE, LEAF_CERT_FILE, LEAF_KEY_FILE] {
-            assert_eq!(std::fs::read(dir.join(f)).unwrap(), std::fs::read(src.join(f)).unwrap(), "{f} rewritten");
+            assert_eq!(
+                std::fs::read(dir.join(f)).unwrap(),
+                std::fs::read(src.join(f)).unwrap(),
+                "{f} rewritten"
+            );
         }
         let (server, mut client) = pair(&dir);
         let t = echo_once(server);
@@ -460,7 +506,8 @@ mod tests {
     #[test]
     fn expiring_cert_is_regenerated() {
         let dir = temp_dir("expiry");
-        let now = rcgen::date_time_ymd(1970, 1, 1) + SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now = rcgen::date_time_ymd(1970, 1, 1)
+            + SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let write = |f: &str, after: Duration| {
             let key = KeyPair::generate().unwrap();
             let mut p = CertificateParams::default();
@@ -476,15 +523,30 @@ mod tests {
         ensure_certs(&dir).unwrap();
         assert!(cert_valid(&dir.join(LEAF_CERT_FILE)));
         let leaf = CertificateDer::from_pem_file(dir.join(LEAF_CERT_FILE)).unwrap();
-        let days = not_after(&leaf).unwrap().duration_since(SystemTime::now()).unwrap().as_secs() / 86400;
+        let days = not_after(&leaf)
+            .unwrap()
+            .duration_since(SystemTime::now())
+            .unwrap()
+            .as_secs()
+            / 86400;
         assert!((3650..=3652).contains(&days), "{days} days");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn not_after_of_rsa_fixture() {
-        let der = CertificateDer::from_pem_file(Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/rsa/master.crt")).unwrap();
+        let der = CertificateDer::from_pem_file(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/rsa/master.crt"),
+        )
+        .unwrap();
         // openssl: notAfter=Oct 30 20:41:19 2036 GMT
-        assert_eq!(not_after(&der).unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs(), 2109012079);
+        assert_eq!(
+            not_after(&der)
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            2_109_012_079
+        );
     }
 }

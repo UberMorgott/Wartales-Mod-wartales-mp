@@ -66,8 +66,13 @@ pub struct StunResult {
 }
 
 enum Waiter {
-    Ask { server: SocketAddr, got: mpsc::SyncSender<SocketAddr> },
-    Keep { server: SocketAddr },
+    Ask {
+        server: SocketAddr,
+        got: mpsc::SyncSender<SocketAddr>,
+    },
+    Keep {
+        server: SocketAddr,
+    },
 }
 
 #[derive(Default)]
@@ -82,10 +87,10 @@ struct State {
     streams: HashMap<tunnel::Key, tunnel::Stream>,
     gone: HashMap<tunnel::Key, Instant>, // ended streams: their late packets open nothing
     fwds: HashMap<SocketAddr, SocketAddr>, // guest role: loopback forwarders by host address
-    keep: Option<SocketAddr>,        // STUN server for the keepalive
-    keep_tx: Option<[u8; 12]>,       // its pending transaction
-    mapped: Option<SocketAddr>,      // last address STUN saw
-    threads: Vec<JoinHandle<()>>,    // joined by close
+    keep: Option<SocketAddr>,            // STUN server for the keepalive
+    keep_tx: Option<[u8; 12]>,           // its pending transaction
+    mapped: Option<SocketAddr>,          // last address STUN saw
+    threads: Vec<JoinHandle<()>>,        // joined by close
 }
 
 /// The helper's UDP socket.
@@ -98,7 +103,7 @@ pub struct Socket {
     nonce: u32, // tells our streams from those of an earlier socket on the same address
     epoch: Instant,
     st: Mutex<State>,
-    cv: Condvar, // any hear, KCP input or stream end
+    cv: Condvar,        // any hear, KCP input or stream end
     dial_mu: Mutex<()>, // one tunnel dial at a time (dial and the forwarders' redials)
 }
 
@@ -108,7 +113,10 @@ pub fn open(port: u16, relay: &str, servers: &[&str], log: Log) -> anyhow::Resul
     let udp = match UdpSocket::bind(("0.0.0.0", port)) {
         Ok(u) => u,
         Err(e) => {
-            logf!(log, "punch: UDP {port} unavailable ({e}); using any free port");
+            logf!(
+                log,
+                "punch: UDP {port} unavailable ({e}); using any free port"
+            );
             UdpSocket::bind("0.0.0.0:0")?
         }
     };
@@ -117,7 +125,10 @@ pub fn open(port: u16, relay: &str, servers: &[&str], log: Log) -> anyhow::Resul
         me: me.clone(),
         udp: Arc::new(udp),
         relay: relay.to_string(),
-        servers: servers.iter().map(|s| s.to_string()).collect(),
+        servers: servers
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         log,
         nonce: rand_u32(),
         epoch: Instant::now(),
@@ -133,11 +144,16 @@ pub fn open(port: u16, relay: &str, servers: &[&str], log: Log) -> anyhow::Resul
 
 impl Socket {
     fn st(&self) -> MutexGuard<'_, State> {
-        self.st.lock().unwrap_or_else(|e| e.into_inner())
+        self.st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn wait<'a>(&self, st: MutexGuard<'a, State>, d: Duration) -> MutexGuard<'a, State> {
-        self.cv.wait_timeout(st, d).unwrap_or_else(|e| e.into_inner()).0
+        self.cv
+            .wait_timeout(st, d)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
     }
 
     fn me(&self) -> Arc<Socket> {
@@ -154,7 +170,10 @@ impl Socket {
         st.threads.retain(|h| !h.is_finished());
         st.threads.push(std::thread::spawn(move || {
             if let Err(p) = catch_unwind(AssertUnwindSafe(f)) {
-                let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+                let msg = p
+                    .downcast_ref::<&str>()
+                    .map(std::string::ToString::to_string)
+                    .or_else(|| p.downcast_ref::<String>().cloned());
                 logf!(log, "punch: thread panicked: {}", msg.unwrap_or_default());
             }
         }));
@@ -167,7 +186,9 @@ impl Socket {
 
     /// The socket's local address.
     pub fn local_addr(&self) -> SocketAddr {
-        self.udp.local_addr().expect("a bound socket has an address")
+        self.udp
+            .local_addr()
+            .expect("a bound socket has an address")
     }
 
     /// Stops everything and joins every thread; tunnels close with it. The
@@ -183,7 +204,10 @@ impl Socket {
                 self.drop_peer_locked(&mut st, a);
             }
             st.stun.clear(); // wakes the STUN askers
-            (std::mem::take(&mut st.fwds), std::mem::take(&mut st.threads))
+            (
+                std::mem::take(&mut st.fwds),
+                std::mem::take(&mut st.threads),
+            )
         };
         self.cv.notify_all();
         for a in fwds.values() {
@@ -258,14 +282,19 @@ impl Socket {
             let mut st = self.st();
             st.targets.retain(|a, until| {
                 if now > *until {
-                    logf!(self.log, "punch: stopped punching {a} ({} spent)", go_dur(BUDGET));
+                    logf!(
+                        self.log,
+                        "punch: stopped punching {a} ({} spent)",
+                        go_dur(BUDGET)
+                    );
                     return false;
                 }
                 to.push(*a);
                 true
             });
-            st.heard.retain(|_, at| now.duration_since(*at) <= HEARD_FRESH);
-            if n % tunnel::PING_TICKS == 0 {
+            st.heard
+                .retain(|_, at| now.duration_since(*at) <= HEARD_FRESH);
+            if n.is_multiple_of(tunnel::PING_TICKS) {
                 to.extend(st.peers.keys());
             }
             self.expire_locked(&mut st, now);
@@ -275,7 +304,7 @@ impl Socket {
         for a in to {
             self.send(PUNCH_MSG, a);
         }
-        if let Some(k) = keep.filter(|_| n % KEEPALIVE_TICKS == 0) {
+        if let Some(k) = keep.filter(|_| n.is_multiple_of(KEEPALIVE_TICKS)) {
             self.keepalive(k);
         }
     }
@@ -297,7 +326,7 @@ impl Socket {
         let tx = tx_id(pkt);
         let mut st = self.st();
         let keep = match st.stun.get(&tx) {
-            Some(Waiter::Ask { server, .. }) | Some(Waiter::Keep { server }) if *server != from => return,
+            Some(Waiter::Ask { server, .. } | Waiter::Keep { server }) if *server != from => return,
             Some(Waiter::Ask { got, .. }) => {
                 if let Ok(m) = nat::parse_binding(pkt, &tx) {
                     let _ = got.try_send(m); // a duplicate answer is dropped
@@ -307,7 +336,9 @@ impl Socket {
             Some(Waiter::Keep { .. }) => true,
             None => false,
         };
-        let Ok(m) = nat::parse_binding(pkt, &tx) else { return };
+        let Ok(m) = nat::parse_binding(pkt, &tx) else {
+            return;
+        };
         if keep {
             if let Some(old) = st.mapped.filter(|old| *old != m) {
                 logf!(self.log, "punch: our address moved {old} -> {m}; codes handed out before carry the old one");
@@ -321,17 +352,22 @@ impl Socket {
     /// and stops at two answers (enough to compare) or after STUN_WAIT.
     pub fn endpoint(&self) -> anyhow::Result<StunResult> {
         if let Some(f) = self.st().fixed {
-            return Ok(StunResult { mapped: f, mapping: Mapping::Stable });
+            return Ok(StunResult {
+                mapped: f,
+                mapping: Mapping::Stable,
+            });
         }
         let deadline = Instant::now() + STUN_WAIT;
         let (tx, rx) = mpsc::channel();
         for srv in &self.servers {
             let (me, srv, tx, log) = (self.me.clone(), srv.clone(), tx.clone(), self.log.clone());
             // Not joined: it holds no Arc, and close wakes its wait.
-            std::thread::spawn(move || match catch_unwind(AssertUnwindSafe(|| ask(&me, &srv, deadline))) {
-                Ok(Some(a)) => drop(tx.send(a)),
-                Ok(None) => {}
-                Err(_) => logf!(log, "punch: STUN ask {srv} panicked"),
+            std::thread::spawn(move || {
+                match catch_unwind(AssertUnwindSafe(|| ask(&me, &srv, deadline))) {
+                    Ok(Some(a)) => drop(tx.send(a)),
+                    Ok(None) => {}
+                    Err(_) => logf!(log, "punch: STUN ask {srv} panicked"),
+                }
             });
         }
         drop(tx);
@@ -339,12 +375,16 @@ impl Socket {
         let mut first = None;
         while mapped.len() < 2 {
             let left = deadline.saturating_duration_since(Instant::now());
-            let Ok((server, m)) = rx.recv_timeout(left) else { break };
+            let Ok((server, m)) = rx.recv_timeout(left) else {
+                break;
+            };
             first.get_or_insert((server, m));
             mapped.insert(server.to_string(), m);
         }
         let mapping = nat::classify(&mapped);
-        let Some((server, m)) = first else { bail!("no STUN server answered") };
+        let Some((server, m)) = first else {
+            bail!("no STUN server answered")
+        };
         let mut st = self.st();
         st.mapped = Some(m);
         st.keep = Some(server);
@@ -356,7 +396,11 @@ impl Socket {
     pub fn toward(&self, addr: &str) -> anyhow::Result<()> {
         let a = resolve4(addr)?;
         self.arm(a);
-        logf!(self.log, "punch: punching toward {a} for {} (reply code)", go_dur(BUDGET));
+        logf!(
+            self.log,
+            "punch: punching toward {a} for {} (reply code)",
+            go_dur(BUDGET)
+        );
         Ok(())
     }
 
@@ -382,7 +426,10 @@ impl Socket {
 
     /// Makes sure a live tunnel to ha exists, punching for a new one when not.
     fn tunnel(&self, ha: SocketAddr) -> anyhow::Result<()> {
-        let _one = self.dial_mu.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = self
+            .dial_mu
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         {
             let mut st = self.st();
             if let Some(p) = st.peers.get(&ha) {
@@ -402,7 +449,9 @@ impl Socket {
         if !self.wait_heard(ha, wait) {
             let r = rx.recv().ok().flatten();
             let reply = r
-                .and_then(|r| code::encode_reply(code::Endpoint::new(r.mapped.ip(), r.mapped.port())).ok())
+                .and_then(|r| {
+                    code::encode_reply(code::Endpoint::new(r.mapped.ip(), r.mapped.port())).ok()
+                })
                 .unwrap_or_default();
             logf!(
                 self.log,
@@ -411,13 +460,20 @@ impl Socket {
                 r.map_or("<nil>".to_string(), |r| r.mapped.to_string()),
                 r.map_or(Mapping::None, |r| r.mapping)
             );
-            return Err(NoAnswerError { host: ha.to_string(), self_: r, reply }.into());
+            return Err(NoAnswerError {
+                host: ha.to_string(),
+                self_: r,
+                reply,
+            }
+            .into());
         }
         let mut st = self.st();
         if st.closed {
             bail!("use of closed network connection");
         }
-        st.peers.entry(ha).or_insert_with(|| tunnel::Peer::new(None)); // or the one an OPEN made meanwhile
+        st.peers
+            .entry(ha)
+            .or_insert_with(|| tunnel::Peer::new(None)); // or the one an OPEN made meanwhile
         st.targets.remove(&ha); // the tunnel's own keepalives keep the way open now
         logf!(self.log, "punch: tunnel to {ha} open");
         Ok(())
@@ -428,7 +484,11 @@ impl Socket {
         let end = Instant::now() + d;
         let mut st = self.st();
         loop {
-            if st.heard.get(&key).is_some_and(|t| t.elapsed() < HEARD_FRESH) {
+            if st
+                .heard
+                .get(&key)
+                .is_some_and(|t| t.elapsed() < HEARD_FRESH)
+            {
                 return true;
             }
             let left = end.saturating_duration_since(Instant::now());
@@ -561,7 +621,9 @@ fn tx_id(pkt: &[u8]) -> [u8; 12] {
 }
 
 fn resolve4(addr: &str) -> anyhow::Result<SocketAddr> {
-    addr.to_socket_addrs()?.find(SocketAddr::is_ipv4).ok_or_else(|| anyhow!("no IPv4 address for {addr}"))
+    addr.to_socket_addrs()?
+        .find(SocketAddr::is_ipv4)
+        .ok_or_else(|| anyhow!("no IPv4 address for {addr}"))
 }
 
 fn rand_u32() -> u32 {
@@ -573,10 +635,11 @@ fn rand_u32() -> u32 {
 /// Go's Duration.String for the values logged here (300ms, 5s, 2m0s).
 fn go_dur(d: Duration) -> String {
     let ms = d.as_millis();
+    let secs = |ms: u128| f64::from(u32::try_from(ms).expect("under a minute")) / 1e3;
     match ms {
         0..=999 => format!("{ms}ms"),
-        1000..=59_999 => format!("{}s", ms as f64 / 1e3),
-        _ => format!("{}m{}s", ms / 60_000, (ms % 60_000) as f64 / 1e3),
+        1000..=59_999 => format!("{}s", secs(ms)),
+        _ => format!("{}m{}s", ms / 60_000, secs(ms % 60_000)),
     }
 }
 

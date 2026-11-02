@@ -14,6 +14,8 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use crate::wsx::hex;
+
 const FRAME_HEAD: usize = 13;
 
 /// A helper's desired native Steam lobby state, as published to the shim.
@@ -41,8 +43,14 @@ struct Inner {
 
 #[derive(Default)]
 struct Clients {
-    tokens: HashMap<String, u64>,         // token -> identity
+    tokens: HashMap<String, u64>,          // token -> identity
     clients: HashMap<u64, Arc<TcpStream>>, // identity -> its helper
+}
+
+impl Default for Switch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Switch {
@@ -69,11 +77,15 @@ impl Switch {
                 }
                 if let Ok(c) = c {
                     let i = i.clone();
-                    std::thread::spawn(move || i.serve(Arc::new(c)));
+                    std::thread::spawn(move || i.serve(&Arc::new(c)));
                 }
             }
         });
-        Switch { lobby_invites: Mutex::new(rx), inner, accept: Some(accept) }
+        Switch {
+            lobby_invites: Mutex::new(rx),
+            inner,
+            accept: Some(accept),
+        }
     }
 
     /// Registers a Steam identity and returns the path of a status file that
@@ -99,7 +111,12 @@ impl Switch {
     /// Whether steam_id's helper is authenticated and switched to (a bridge is
     /// ready once AUTH is written, a little before the switch registers it).
     pub fn connected(&self, steam_id: u64) -> bool {
-        self.inner.mu.lock().unwrap().clients.contains_key(&steam_id)
+        self.inner
+            .mu
+            .lock()
+            .unwrap()
+            .clients
+            .contains_key(&steam_id)
     }
 
     /// Simulates the shim dropping its authenticated helper connection.
@@ -119,14 +136,10 @@ impl Drop for Switch {
             let _ = h.join();
         }
         for c in self.inner.mu.lock().unwrap().clients.values() {
-            crate::conn::close_tcp(&c);
+            crate::conn::close_tcp(c);
         }
         let _ = std::fs::remove_dir_all(&self.inner.dir);
     }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn read_frame(mut c: &TcpStream) -> io::Result<(u8, u64, Vec<u8>)> {
@@ -135,21 +148,29 @@ fn read_frame(mut c: &TcpStream) -> io::Result<(u8, u64, Vec<u8>)> {
     let n = u32::from_le_bytes(head[9..13].try_into().unwrap());
     let mut payload = vec![0u8; n as usize];
     c.read_exact(&mut payload)?;
-    Ok((head[0], u64::from_le_bytes(head[1..9].try_into().unwrap()), payload))
+    Ok((
+        head[0],
+        u64::from_le_bytes(head[1..9].try_into().unwrap()),
+        payload,
+    ))
 }
 
 fn write_frame(mut c: &TcpStream, typ: u8, peer: u64, payload: &[u8]) -> io::Result<()> {
     let mut buf = vec![typ];
     buf.extend_from_slice(&peer.to_le_bytes());
-    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    buf.extend_from_slice(
+        &u32::try_from(payload.len())
+            .map_err(io::Error::other)?
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(payload);
     c.write_all(&buf)
 }
 
 impl Inner {
-    fn serve(&self, c: Arc<TcpStream>) {
-        self.serve_authed(&c);
-        crate::conn::close_tcp(&c);
+    fn serve(&self, c: &Arc<TcpStream>) {
+        self.serve_authed(c);
+        crate::conn::close_tcp(c);
     }
 
     fn serve_authed(&self, c: &Arc<TcpStream>) {
@@ -169,7 +190,11 @@ impl Inner {
             if typ != 1 {
                 if typ == 4 && peer == 0 {
                     let invite = String::from_utf8_lossy(&payload).into_owned();
-                    let _ = self.lobby_tx.lock().unwrap().send(LobbyInvite { peer: me, invite });
+                    let _ = self
+                        .lobby_tx
+                        .lock()
+                        .unwrap()
+                        .send(LobbyInvite { peer: me, invite });
                 }
                 continue;
             }

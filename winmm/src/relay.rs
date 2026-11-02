@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, TcpListener};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,7 +39,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How many frames pass between two relay traffic summaries.
-const FRAME_LOG_EVERY: i64 = 512;
+const FRAME_LOG_EVERY: u64 = 512;
 
 struct Client {
     cid: u16,
@@ -47,8 +47,8 @@ struct Client {
     is_host: bool,
     ws: wsx::Conn,
     // bumped by the host's thread
-    frames_out: AtomicI64,
-    bytes_out: AtomicI64,
+    frames_out: AtomicU64,
+    bytes_out: AtomicU64,
 }
 
 #[derive(Default)]
@@ -72,7 +72,9 @@ fn random_password() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut b = [0u8; 24];
     rand_bytes(&mut b);
-    b.iter().map(|&v| ALPHABET[v as usize % ALPHABET.len()] as char).collect()
+    b.iter()
+        .map(|&v| ALPHABET[v as usize % ALPHABET.len()] as char)
+        .collect()
 }
 
 fn addr(c: &ConnRef) -> String {
@@ -117,7 +119,7 @@ impl Conn for Prefixed {
         self.c.set_write_timeout(d)
     }
     fn close(&self) {
-        self.c.close()
+        self.c.close();
     }
     fn peer_addr(&self) -> Option<SocketAddr> {
         self.c.peer_addr()
@@ -138,7 +140,11 @@ impl Server {
 
     /// Owns the public port. Connections that do not look like an HTTP
     /// upgrade are passed to on_link (the proxy-link protocol).
-    pub fn listen_and_serve(self: &Arc<Self>, addr: &str, on_link: impl Fn(ConnRef) + Send + Sync + 'static) -> io::Result<()> {
+    pub fn listen_and_serve(
+        self: &Arc<Self>,
+        addr: &str,
+        on_link: impl Fn(ConnRef) + Send + Sync + 'static,
+    ) -> io::Result<()> {
         let ln = TcpListener::bind(addr)?;
         logf!(self.log, "relay listening on {addr}");
         let on_link: Arc<dyn Fn(ConnRef) + Send + Sync> = Arc::new(on_link);
@@ -170,18 +176,21 @@ impl Server {
         if let (Some(f), Some(a)) = (&self.on_inbound, c.peer_addr()) {
             f(a); // it spoke: the port is reachable from there
         }
-        let c: ConnRef = Arc::new(Prefixed { c, head: Mutex::new(head.to_vec()) });
+        let c: ConnRef = Arc::new(Prefixed {
+            c,
+            head: Mutex::new(head.to_vec()),
+        });
         if &head == b"GET " {
             logf!(self.log, "relay: accepted websocket from {}", addr(&c));
-            self.serve(c);
+            self.serve(&c);
             return;
         }
         on_link(c);
     }
 
     /// Runs one relay websocket connection to completion.
-    fn serve(&self, c: ConnRef) {
-        let r = catch_unwind(AssertUnwindSafe(|| self.serve_ws(&c)));
+    fn serve(&self, c: &ConnRef) {
+        let r = catch_unwind(AssertUnwindSafe(|| self.serve_ws(c)));
         c.close(); // connection is finished either way
         if let Err(p) = r {
             std::panic::resume_unwind(p);
@@ -210,7 +219,12 @@ impl Server {
             let mut st = self.st.lock().unwrap();
             if is_host == (st.host_cid != 0) {
                 drop(st);
-                return logf!(self.log, "relay: {} lost its role during the handshake (ident {:?}), dropped", addr(c), ws.ident);
+                return logf!(
+                    self.log,
+                    "relay: {} lost its role during the handshake (ident {:?}), dropped",
+                    addr(c),
+                    ws.ident
+                );
             }
             let cid = gen_cid(&st.clients);
             let me = Arc::new(Client {
@@ -218,8 +232,8 @@ impl Server {
                 ident: ws.ident.clone(),
                 is_host,
                 ws,
-                frames_out: AtomicI64::new(0),
-                bytes_out: AtomicI64::new(0),
+                frames_out: AtomicU64::new(0),
+                bytes_out: AtomicU64::new(0),
             });
             st.clients.insert(cid, me.clone());
             if is_host {
@@ -232,8 +246,14 @@ impl Server {
 
         let role = if is_host { "host" } else { "client" };
         let _pings = me.ws.keep_alive(PING_INTERVAL, IDLE_TIMEOUT);
-        logf!(self.log, "relay: {role} connected (cid {}, ident {:?}, peer {}, headers {})",
-            me.cid, me.ident, addr(c), applog::trunc(&applog::headers(&me.ws.headers)));
+        logf!(
+            self.log,
+            "relay: {role} connected (cid {}, ident {:?}, peer {}, headers {})",
+            me.cid,
+            me.ident,
+            addr(c),
+            applog::trunc(&applog::headers(&me.ws.headers))
+        );
         if !is_host {
             self.to_host(&pack_connect(me.cid, &me.ident));
         }
@@ -243,8 +263,8 @@ impl Server {
     }
 
     /// Forwards me's frames until its connection ends; returns the in counters.
-    fn pump(&self, me: &Client, role: &str) -> (i64, i64) {
-        let (mut frames_in, mut bytes_in) = (0i64, 0i64);
+    fn pump(&self, me: &Client, role: &str) -> (u64, u64) {
+        let (mut frames_in, mut bytes_in) = (0u64, 0u64);
         loop {
             let (op, payload) = match me.ws.read() {
                 Ok(f) => f,
@@ -254,7 +274,11 @@ impl Server {
                 }
             };
             if op != wsx::OP_BINARY {
-                logf!(self.log, "relay: {role} cid {} sent a non-binary frame (opcode {op}), ignored", me.cid);
+                logf!(
+                    self.log,
+                    "relay: {role} cid {} sent a non-binary frame (opcode {op}), ignored",
+                    me.cid
+                );
                 continue; // the relay carries binary frames only
             }
             if payload.len() < H_SIZE {
@@ -262,20 +286,32 @@ impl Server {
                 continue; // RelayServer drops anything shorter than a header
             }
             frames_in += 1;
-            bytes_in += payload.len() as i64;
+            bytes_in += payload.len() as u64;
             if frames_in % FRAME_LOG_EVERY == 0 {
-                logf!(self.log, "relay: {role} cid {}: {frames_in} frames in ({bytes_in} B)", me.cid);
+                logf!(
+                    self.log,
+                    "relay: {role} cid {}: {frames_in} frames in ({bytes_in} B)",
+                    me.cid
+                );
             }
             if !me.is_host {
                 self.to_host(&pack_to_host(TYPE_DATA, me.cid, &payload));
                 continue;
             }
             let Some((cid, body)) = parse_from_host(&payload) else {
-                logf!(self.log, "relay: bad host frame ({} B): relay: frame too short", payload.len());
+                logf!(
+                    self.log,
+                    "relay: bad host frame ({} B): relay: frame too short",
+                    payload.len()
+                );
                 continue;
             };
             let Some(to) = self.client(cid) else {
-                logf!(self.log, "relay: host addressed unknown client {cid}, dropping {} B", body.len());
+                logf!(
+                    self.log,
+                    "relay: host addressed unknown client {cid}, dropping {} B",
+                    body.len()
+                );
                 continue;
             };
             if let Err(e) = to.ws.write_binary(body) {
@@ -284,7 +320,7 @@ impl Server {
                 continue;
             }
             to.frames_out.fetch_add(1, Ordering::Relaxed);
-            to.bytes_out.fetch_add(body.len() as i64, Ordering::Relaxed);
+            to.bytes_out.fetch_add(body.len() as u64, Ordering::Relaxed);
         }
     }
 
@@ -308,7 +344,9 @@ impl Server {
     /// Drops one guest and tells the host about it.
     fn close_client(&self, cid: u16) {
         let c = self.st.lock().unwrap().clients.remove(&cid);
-        let Some(c) = c.filter(|c| !c.is_host) else { return };
+        let Some(c) = c.filter(|c| !c.is_host) else {
+            return;
+        };
         self.to_host(&pack_to_host(TYPE_DISCONNECT, cid, &[]));
         c.ws.close(); // the guest is being dropped
     }
@@ -322,7 +360,11 @@ impl Server {
         let others: Vec<_> = {
             let mut st = self.st.lock().unwrap();
             st.host_cid = 0;
-            std::mem::take(&mut st.clients).into_iter().filter(|(cid, _)| *cid != c.cid).map(|(_, o)| o).collect()
+            std::mem::take(&mut st.clients)
+                .into_iter()
+                .filter(|(cid, _)| *cid != c.cid)
+                .map(|(_, o)| o)
+                .collect()
         };
         for other in others {
             other.ws.close(); // host is gone; every guest is dropped regardless
@@ -362,8 +404,9 @@ fn pack_to_host(typ: u8, cid: u16, payload: &[u8]) -> Vec<u8> {
 /// The SConnect frame: the identity is length prefixed with a u16 (RelayHost
 /// reads getUInt16 then getString), cut to what the prefix can describe.
 fn pack_connect(cid: u16, ident: &str) -> Vec<u8> {
-    let ident = &ident.as_bytes()[..ident.len().min(u16::MAX as usize)];
-    let mut body = (ident.len() as u16).to_le_bytes().to_vec();
+    let len = u16::try_from(ident.len()).unwrap_or(u16::MAX);
+    let ident = &ident.as_bytes()[..usize::from(len)];
+    let mut body = len.to_le_bytes().to_vec();
     body.extend_from_slice(ident);
     pack_to_host(TYPE_CONNECT, cid, &body)
 }
@@ -392,7 +435,8 @@ mod tests {
     /// The identity string of a SConnect payload.
     fn parse_connect(p: &[u8]) -> Option<String> {
         let n = u16::from_le_bytes([*p.first()?, *p.get(1)?]) as usize;
-        p.get(2..2 + n).map(|s| String::from_utf8_lossy(s).into_owned())
+        p.get(2..2 + n)
+            .map(|s| String::from_utf8_lossy(s).into_owned())
     }
 
     fn pack_from_host(cid: u16, payload: &[u8]) -> Vec<u8> {
@@ -406,8 +450,15 @@ mod tests {
         let payload = [0xDE, 0xAD, 0xBE, 0xEF];
         let frame = pack_to_host(TYPE_DATA, 0x1234, &payload);
         assert_eq!(frame.len(), H_SIZE + payload.len());
-        assert_eq!(frame[..H_SIZE], [TYPE_DATA, 0x34, 0x12], "cid must be little endian on the wire");
-        assert_eq!(parse_to_host(&frame), Some((TYPE_DATA, 0x1234, &payload[..])));
+        assert_eq!(
+            frame[..H_SIZE],
+            [TYPE_DATA, 0x34, 0x12],
+            "cid must be little endian on the wire"
+        );
+        assert_eq!(
+            parse_to_host(&frame),
+            Some((TYPE_DATA, 0x1234, &payload[..]))
+        );
     }
 
     #[test]
@@ -421,19 +472,34 @@ mod tests {
 
     #[test]
     fn disconnect_frame() {
-        assert_eq!(parse_to_host(&pack_to_host(TYPE_DISCONNECT, 40000, &[])), Some((TYPE_DISCONNECT, 40000, &[][..])));
+        assert_eq!(
+            parse_to_host(&pack_to_host(TYPE_DISCONNECT, 40000, &[])),
+            Some((TYPE_DISCONNECT, 40000, &[][..]))
+        );
     }
 
     #[test]
     fn from_host_round_trip() {
-        assert_eq!(parse_from_host(&pack_from_host(513, b"hello")), Some((513, &b"hello"[..])));
+        assert_eq!(
+            parse_from_host(&pack_from_host(513, b"hello")),
+            Some((513, &b"hello"[..]))
+        );
     }
 
     #[test]
     fn short_frames_are_rejected() {
-        assert!(parse_to_host(&[1, 2]).is_none(), "parse_to_host accepted a 2 byte frame");
-        assert!(parse_from_host(&[1]).is_none(), "parse_from_host accepted a 1 byte frame");
-        assert!(parse_connect(&[5, 0, b'a']).is_none(), "parse_connect accepted a truncated identity");
+        assert!(
+            parse_to_host(&[1, 2]).is_none(),
+            "parse_to_host accepted a 2 byte frame"
+        );
+        assert!(
+            parse_from_host(&[1]).is_none(),
+            "parse_from_host accepted a 1 byte frame"
+        );
+        assert!(
+            parse_connect(&[5, 0, b'a']).is_none(),
+            "parse_connect accepted a truncated identity"
+        );
     }
 
     fn quiet() -> Arc<Server> {
@@ -443,7 +509,11 @@ mod tests {
     /// Opens a relay connection over a pipe the way the game does and reports
     /// whether the relay switched protocols. The relay side runs on its own
     /// thread, returned to be joined.
-    fn handshake(s: &Arc<Server>, ident: &str, pass: &str) -> (ConnRef, BufReader<Io>, bool, JoinHandle<()>) {
+    fn handshake(
+        s: &Arc<Server>,
+        ident: &str,
+        pass: &str,
+    ) -> (ConnRef, BufReader<Io>, bool, JoinHandle<()>) {
         handshake_over(s, ident, pass, |c| c)
     }
 
@@ -458,7 +528,7 @@ mod tests {
         let srv = wrap(srv);
         let done = std::thread::spawn({
             let s = s.clone();
-            move || s.serve(srv)
+            move || s.serve(&srv)
         });
         let key = b"0123456789abcdef";
         let x_pass = hex(&sha1(format!("{}{pass}", hex(key)).as_bytes()));
@@ -517,7 +587,13 @@ mod tests {
             .collect();
         let conns: Vec<_> = tries.into_iter().map(|t| t.join().unwrap()).collect();
         wait_host(&s);
-        let hosts = s.st.lock().unwrap().clients.values().filter(|c| c.is_host).count();
+        let hosts =
+            s.st.lock()
+                .unwrap()
+                .clients
+                .values()
+                .filter(|c| c.is_host)
+                .count();
         assert_eq!(hosts, 1, "hosts published");
         for (c, drain, done) in conns {
             c.close();
@@ -544,7 +620,11 @@ mod tests {
         assert!(!ok, "a guest with a wrong password was accepted");
         c.close();
         done.join().unwrap();
-        assert_eq!(s.st.lock().unwrap().clients.len(), 1, "want only the host published");
+        assert_eq!(
+            s.st.lock().unwrap().clients.len(),
+            1,
+            "want only the host published"
+        );
         h.close();
         hdone.join().unwrap();
         hdrain.join().unwrap();
@@ -553,7 +633,7 @@ mod tests {
     /// One unmasked binary frame (the relay takes either).
     fn write_frame(c: &ConnRef, payload: &[u8]) {
         let mut f = vec![0x82, 126];
-        f.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        f.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
         f.extend_from_slice(payload);
         c.write_all(&f).unwrap();
     }
@@ -570,7 +650,7 @@ mod tests {
         } else if n == 127 {
             let mut b = [0u8; 8];
             br.read_exact(&mut b)?;
-            n = u64::from_be_bytes(b) as usize;
+            n = usize::try_from(u64::from_be_bytes(b)).unwrap();
         }
         let mut buf = vec![0u8; n];
         br.read_exact(&mut buf)?;
@@ -601,7 +681,7 @@ mod tests {
             self.0.set_write_timeout(d)
         }
         fn close(&self) {
-            self.0.close()
+            self.0.close();
         }
     }
 
@@ -613,7 +693,8 @@ mod tests {
         let (host, mut hbr, ok, hdone) = handshake(&s, "@host", &s.host_pw);
         assert!(ok, "host refused");
         wait_host(&s);
-        let (stalled, _, ok, sdone) = handshake_over(&s, "stalled", &s.slave_pw, |c| Arc::new(Stalled(c))); // never read again
+        let (stalled, _, ok, sdone) =
+            handshake_over(&s, "stalled", &s.slave_pw, |c| Arc::new(Stalled(c))); // never read again
         assert!(ok, "guest refused");
         let (live, mut lbr, ok, ldone) = handshake(&s, "live", &s.slave_pw);
         assert!(ok, "guest refused");
@@ -636,7 +717,9 @@ mod tests {
                 let _ = tx.send(f);
             }
         });
-        let f = rx.recv_timeout(Duration::from_secs(2)).expect("the live guest's frame is stuck behind the stalled guest");
+        let f = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the live guest's frame is stuck behind the stalled guest");
         assert_eq!(f, b"hello");
         reader.join().unwrap();
         for c in [&host, &stalled, &live] {

@@ -42,10 +42,26 @@ pub struct Info {
 
 /// The fingerprint for the log; None is an older wartales-mp that sent none.
 pub fn describe(i: Option<&Info>) -> String {
-    let Some(i) = i else { return "none (older wartales-mp)".into() };
-    let short = |s: &str| if s.is_empty() { "unknown".to_string() } else { s.chars().take(12).collect() };
-    let build = if i.build.is_empty() { "unknown" } else { &i.build };
-    format!("build {build}, {FILE_DLL} {}, {FILE_RES1} {}", short(&i.dll), short(&i.res1))
+    let Some(i) = i else {
+        return "none (older wartales-mp)".into();
+    };
+    let short = |s: &str| {
+        if s.is_empty() {
+            "unknown".to_string()
+        } else {
+            s.chars().take(12).collect()
+        }
+    };
+    let build = if i.build.is_empty() {
+        "unknown"
+    } else {
+        &i.build
+    };
+    format!(
+        "build {build}, {FILE_DLL} {}, {FILE_RES1} {}",
+        short(&i.dll),
+        short(&i.res1)
+    )
 }
 
 /// The outcome of comparing two fingerprints (Go's `Result`).
@@ -100,8 +116,13 @@ pub fn message(differ: &[&str]) -> String {
 /// unknown; a file that cannot be read is unknown too, and its error is
 /// returned alongside the partial fingerprint.
 fn compute(game_dir: Option<&Path>) -> (Info, Option<String>) {
-    let mut info = Info { build: build().to_string(), ..Info::default() };
-    let Some(dir) = game_dir else { return (info, Some("game folder unknown".into())) };
+    let mut info = Info {
+        build: build().to_string(),
+        ..Info::default()
+    };
+    let Some(dir) = game_dir else {
+        return (info, Some("game folder unknown".into()));
+    };
     let mut errs = Vec::new();
     for (name, slot) in [(FILE_DLL, &mut info.dll), (FILE_RES1, &mut info.res1)] {
         match hash_file(&dir.join(name)) {
@@ -130,7 +151,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
             Err(e) => return Err(format!("{}: {e}", path.display())),
         }
     }
-    Ok(ctx.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(crate::wsx::hex(ctx.finish().as_ref()))
 }
 
 /// The commit this helper was built from, or "" when the build carries no
@@ -179,14 +200,24 @@ impl Session {
                 if let Some(err) = err {
                     logf!(log, "modver: fingerprint incomplete ({err}); unknown files are not compared with other players");
                 }
-                logf!(log, "modver: this player's mod files: {} ({})", describe(Some(&info)), go_ms(start.elapsed()));
+                logf!(
+                    log,
+                    "modver: this player's mod files: {} ({})",
+                    describe(Some(&info)),
+                    go_ms(start.elapsed())
+                );
                 *s2.info.lock().unwrap() = Some(info);
                 s2.ready.notify_all();
             }));
             if run.is_err() {
-                logf!(log, "modver: fingerprint panicked; mod files are not compared");
+                logf!(
+                    log,
+                    "modver: fingerprint panicked; mod files are not compared"
+                );
                 // An empty fingerprint is unchecked; waiters stop waiting for one.
-                *s2.info.lock().unwrap_or_else(|p| p.into_inner()) = Some(Info::default());
+                *s2.info
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Info::default());
                 s2.ready.notify_all();
             }
         });
@@ -195,14 +226,20 @@ impl Session {
 
     /// A Session whose fingerprint is already known (tests, tools).
     pub fn fixed(info: Info) -> Arc<Session> {
-        Arc::new(Session { info: Mutex::new(Some(info)), ready: Condvar::new() })
+        Arc::new(Session {
+            info: Mutex::new(Some(info)),
+            ready: Condvar::new(),
+        })
     }
 
     /// The fingerprint, waiting at most wait for it; None when it is not
     /// ready by then (it is then unchecked).
     pub fn get(&self, wait: Duration) -> Option<Info> {
         let g = self.info.lock().unwrap();
-        let (g, _) = self.ready.wait_timeout_while(g, wait, |i| i.is_none()).unwrap();
+        let (g, _) = self
+            .ready
+            .wait_timeout_while(g, wait, |i| i.is_none())
+            .unwrap();
         g.clone()
     }
 }
@@ -212,24 +249,89 @@ mod tests {
     use super::*;
 
     fn info(build: &str, dll: &str, res1: &str) -> Info {
-        Info { build: build.into(), dll: dll.into(), res1: res1.into() }
+        Info {
+            build: build.into(),
+            dll: dll.into(),
+            res1: res1.into(),
+        }
     }
 
     #[test]
     fn compare_cases() {
+        // (name, local, remote, differ, unchecked, mismatch)
+        type Case<'a> = (
+            &'a str,
+            Option<Info>,
+            Option<Info>,
+            &'a [&'a str],
+            &'a [&'a str],
+            bool,
+        );
         let a = info("1", "d1", "r1");
-        let cases: [(&str, Option<Info>, Option<Info>, &[&str], &[&str], bool); 7] = [
-            ("same", Some(a.clone()), Some(info("2", "d1", "r1")), &[], &[], false),
-            ("res1 differs", Some(a.clone()), Some(info("", "d1", "r2")), &[FILE_RES1], &[], true),
-            ("both differ", Some(a.clone()), Some(info("", "d2", NONE)), &[FILE_DLL, FILE_RES1], &[], true),
-            ("older remote", Some(a.clone()), None, &[], &[FILE_DLL, FILE_RES1], false),
-            ("local unknown", None, Some(a.clone()), &[], &[FILE_DLL, FILE_RES1], false),
-            ("one unknown", Some(a.clone()), Some(info("", "", "r2")), &[FILE_RES1], &[FILE_DLL], true),
-            ("all unknown", Some(Info::default()), Some(Info::default()), &[], &[FILE_DLL, FILE_RES1], false),
+        let cases: [Case; 7] = [
+            (
+                "same",
+                Some(a.clone()),
+                Some(info("2", "d1", "r1")),
+                &[],
+                &[],
+                false,
+            ),
+            (
+                "res1 differs",
+                Some(a.clone()),
+                Some(info("", "d1", "r2")),
+                &[FILE_RES1],
+                &[],
+                true,
+            ),
+            (
+                "both differ",
+                Some(a.clone()),
+                Some(info("", "d2", NONE)),
+                &[FILE_DLL, FILE_RES1],
+                &[],
+                true,
+            ),
+            (
+                "older remote",
+                Some(a.clone()),
+                None,
+                &[],
+                &[FILE_DLL, FILE_RES1],
+                false,
+            ),
+            (
+                "local unknown",
+                None,
+                Some(a.clone()),
+                &[],
+                &[FILE_DLL, FILE_RES1],
+                false,
+            ),
+            (
+                "one unknown",
+                Some(a.clone()),
+                Some(info("", "", "r2")),
+                &[FILE_RES1],
+                &[FILE_DLL],
+                true,
+            ),
+            (
+                "all unknown",
+                Some(Info::default()),
+                Some(Info::default()),
+                &[],
+                &[FILE_DLL, FILE_RES1],
+                false,
+            ),
         ];
         for (name, local, remote, differ, unchecked, mismatch) in cases {
             let r = compare(local.as_ref(), remote.as_ref());
-            assert!(r.differ == differ && r.unchecked == unchecked && r.mismatch() == mismatch, "{name}: {r:?}");
+            assert!(
+                r.differ == differ && r.unchecked == unchecked && r.mismatch() == mismatch,
+                "{name}: {r:?}"
+            );
             assert_eq!(r.compared.len() + r.unchecked.len(), 2, "{name}: {r:?}");
         }
     }
@@ -237,14 +339,19 @@ mod tests {
     #[test]
     fn message_text() {
         let m = message(&[FILE_RES1, FILE_DLL]);
-        for want in ["Версия мода отличается от хоста: скачай архив заново", "res1.pak, winmm.dll", "download the archive again"] {
+        for want in [
+            "Версия мода отличается от хоста: скачай архив заново",
+            "res1.pak, winmm.dll",
+            "download the archive again",
+        ] {
             assert!(m.contains(want), "{m:?} lacks {want:?}");
         }
         assert!(!m.contains(['\n', '<', '>']), "{m:?} is not one plain line");
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("wartales-mp-modver-{name}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("wartales-mp-modver-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -257,10 +364,16 @@ mod tests {
         let (info, err) = compute(Some(&dir));
         assert_eq!(err, None);
         // sha256("winmm build"), computed independently.
-        assert_eq!(info.dll, "faf586ef3c75c89e1a8d38d3c4c73d7a5394e75c7b55191c9298aa96e05ee736");
+        assert_eq!(
+            info.dll,
+            "faf586ef3c75c89e1a8d38d3c4c73d7a5394e75c7b55191c9298aa96e05ee736"
+        );
         assert_eq!(info.res1, NONE);
         let (unknown, err) = compute(None);
-        assert!(err.is_some() && unknown.dll.is_empty() && unknown.res1.is_empty(), "{unknown:?}");
+        assert!(
+            err.is_some() && unknown.dll.is_empty() && unknown.res1.is_empty(),
+            "{unknown:?}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -269,10 +382,17 @@ mod tests {
         let b = serde_json::to_string(&info("abc", "d", NONE)).unwrap();
         assert_eq!(b, r#"{"build":"abc","dll":"d","res1":"none"}"#);
         assert_eq!(serde_json::to_string(&Info::default()).unwrap(), "{}");
-        assert_eq!(serde_json::from_str::<Info>(r#"{"dll":"d"}"#).unwrap(), info("", "d", ""));
+        assert_eq!(
+            serde_json::from_str::<Info>(r#"{"dll":"d"}"#).unwrap(),
+            info("", "d", "")
+        );
         assert!(describe(None).contains("older"));
-        assert_eq!(describe(Some(&info("", "0123456789abcdef", NONE))), "build unknown, winmm.dll 0123456789ab, res1.pak none");
-        assert!(describe(Some(&info("0123456789ab-dirty", "", ""))).starts_with("build 0123456789ab-dirty, "));
+        assert_eq!(
+            describe(Some(&info("", "0123456789abcdef", NONE))),
+            "build unknown, winmm.dll 0123456789ab, res1.pak none"
+        );
+        assert!(describe(Some(&info("0123456789ab-dirty", "", "")))
+            .starts_with("build 0123456789ab-dirty, "));
     }
 
     #[test]
@@ -284,9 +404,17 @@ mod tests {
         let s = Session::new(Some(dir.clone()), log);
         let got = s.get(Duration::from_secs(10)).expect("fingerprint");
         assert_eq!((got.dll.as_str(), got.res1.as_str()), (NONE, NONE));
-        assert!(lines.lock().unwrap().iter().any(|l| l.starts_with("modver: this player's mod files: ")));
+        assert!(lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.starts_with("modver: this player's mod files: ")));
         let slow = Session::default();
-        assert_eq!(slow.get(Duration::from_millis(10)), None, "a pending fingerprint must read as unknown");
+        assert_eq!(
+            slow.get(Duration::from_millis(10)),
+            None,
+            "a pending fingerprint must read as unknown"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

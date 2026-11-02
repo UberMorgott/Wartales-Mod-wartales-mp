@@ -57,6 +57,10 @@ const COMBINED_BODY_LEN: usize = 24; // 15*8/5 exactly
 /// Total symbols of a combined join code.
 pub const COMBINED_LENGTH: usize = COMBINED_BODY_LEN + 1;
 
+// The length tells the three code kinds apart.
+const _: () =
+    assert!(LENGTH != STEAM_LENGTH && STEAM_LENGTH != COMBINED_LENGTH && LENGTH != COMBINED_LENGTH);
+
 /// Flags bit 7: a steam route.
 pub const FLAG_STEAM: u8 = 0x80;
 /// Flags bit 6, together with FLAG_STEAM: the combined layout.
@@ -66,7 +70,7 @@ pub const FLAG_REPLY: u8 = FLAG_BOTH;
 
 /// SteamID64 of account 0 in universe Public, type Individual, instance
 /// Desktop: what every player account is.
-const STEAM_ID_BASE: u64 = 0x0110000100000000;
+const STEAM_ID_BASE: u64 = 0x0110_0001_0000_0000;
 
 /// What an endpoint join code carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +83,11 @@ pub struct Endpoint {
 impl Endpoint {
     /// An endpoint without flags.
     pub fn new(ip: impl Into<IpAddr>, port: u16) -> Self {
-        Endpoint { flags: 0, ip: ip.into(), port }
+        Endpoint {
+            flags: 0,
+            ip: ip.into(),
+            port,
+        }
     }
 
     /// The endpoint as a socket address ("ip:port").
@@ -119,14 +127,21 @@ pub struct Steam {
 impl Steam {
     /// Rebuilds the host's SteamID64.
     pub fn steam_id64(&self) -> u64 {
-        STEAM_ID_BASE | self.account_id as u64
+        STEAM_ID_BASE | u64::from(self.account_id)
     }
 }
 
 /// The account id of a SteamID64, and whether the id is an ordinary player
 /// account (the only kind a steam code can carry).
 pub fn account_id(steam_id64: u64) -> (u32, bool) {
-    (steam_id64 as u32, steam_id64 & !0xffffffff == STEAM_ID_BASE)
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the account id is the low dword"
+    )]
+    (
+        steam_id64 as u32,
+        steam_id64 & !0xffff_ffff == STEAM_ID_BASE,
+    )
 }
 
 /// A decoded join code: the routes it carries. At least one is set; a
@@ -156,7 +171,10 @@ pub fn encode_punch(e: Endpoint, udp_port: u16) -> Result<String> {
 pub fn encode_reply(e: Endpoint) -> Result<String> {
     let ip = e.ip4("reply code")?;
     let [a, b] = e.port.to_be_bytes();
-    Ok(encode(&[FLAG_REPLY, ip[0], ip[1], ip[2], ip[3], a, b], BODY_LEN))
+    Ok(encode(
+        &[FLAG_REPLY, ip[0], ip[1], ip[2], ip[3], a, b],
+        BODY_LEN,
+    ))
 }
 
 /// An endpoint and a steam route as a 25 symbol code.
@@ -193,10 +211,16 @@ pub fn encode_direct(e: Endpoint) -> Result<String> {
 pub fn encode_endpoint(e: Endpoint) -> Result<String> {
     let ip = e.ip4("join code")?;
     if e.flags & (FLAG_STEAM | FLAG_BOTH) != 0 {
-        bail!("endpoint flags 0x{:02x}: bits 7 and 6 are reserved for the layout", e.flags);
+        bail!(
+            "endpoint flags 0x{:02x}: bits 7 and 6 are reserved for the layout",
+            e.flags
+        );
     }
     let [a, b] = e.port.to_be_bytes();
-    Ok(encode(&[e.flags, ip[0], ip[1], ip[2], ip[3], a, b], BODY_LEN))
+    Ok(encode(
+        &[e.flags, ip[0], ip[1], ip[2], ip[3], a, b],
+        BODY_LEN,
+    ))
 }
 
 /// A host SteamID + key as a 16 symbol join code.
@@ -235,7 +259,7 @@ fn decode(norm: &[u8], body: usize, n: usize) -> Result<Vec<u8>> {
     let mut vals = Vec::with_capacity(body + 1);
     for c in &norm[..=body] {
         match ALPHABET.iter().position(|a| a == c) {
-            Some(v) => vals.push(v as u8),
+            Some(v) => vals.push(u8::try_from(v)?), // v < 32
             None => bail!("invalid join code"),
         }
     }
@@ -260,7 +284,11 @@ fn decode(norm: &[u8], body: usize, n: usize) -> Result<Vec<u8>> {
 /// accepted.
 pub fn decode_endpoint(s: &str) -> Result<Endpoint> {
     match decode_any(s)? {
-        Code { endpoint: Some(e), steam: None, .. } => Ok(e),
+        Code {
+            endpoint: Some(e),
+            steam: None,
+            ..
+        } => Ok(e),
         _ => bail!("invalid join code: not an endpoint-only code"),
     }
 }
@@ -268,7 +296,11 @@ pub fn decode_endpoint(s: &str) -> Result<Endpoint> {
 /// Parses a steam join code.
 pub fn decode_steam(s: &str) -> Result<Steam> {
     match decode_any(s)? {
-        Code { steam: Some(st), endpoint: None, .. } => Ok(st),
+        Code {
+            steam: Some(st),
+            endpoint: None,
+            ..
+        } => Ok(st),
         _ => bail!("invalid join code: not a steam-only code"),
     }
 }
@@ -291,17 +323,34 @@ pub fn decode_any(s: &str) -> Result<Code> {
     let norm = norm.as_bytes();
     match norm.len() {
         DIRECT_LENGTH | DIRECT_PORT_LENGTH => {
-            let n = if norm.len() == DIRECT_PORT_LENGTH { 6 } else { 4 };
+            let n = if norm.len() == DIRECT_PORT_LENGTH {
+                6
+            } else {
+                4
+            };
             let p = decode(norm, norm.len() - 1, n)?;
             let port = if n == 6 { be16(&p[4..]) } else { DEFAULT_PORT };
-            Ok(Code { endpoint: Some(Endpoint::new(v4(&p), port)), ..Code::default() })
+            Ok(Code {
+                endpoint: Some(Endpoint::new(v4(&p), port)),
+                ..Code::default()
+            })
         }
         LENGTH => {
             let p = decode(norm, BODY_LEN, PAYLOAD_LEN)?;
-            let e = Endpoint { flags: p[0], ip: v4(&p[1..]), port: be16(&p[5..]) };
+            let e = Endpoint {
+                flags: p[0],
+                ip: v4(&p[1..]),
+                port: be16(&p[5..]),
+            };
             match p[0] & (FLAG_STEAM | FLAG_BOTH) {
-                0 => Ok(Code { endpoint: Some(e), ..Code::default() }),
-                FLAG_REPLY => Ok(Code { reply: Some(Endpoint { flags: 0, ..e }), ..Code::default() }),
+                0 => Ok(Code {
+                    endpoint: Some(e),
+                    ..Code::default()
+                }),
+                FLAG_REPLY => Ok(Code {
+                    reply: Some(Endpoint { flags: 0, ..e }),
+                    ..Code::default()
+                }),
                 _ => bail!("invalid join code: layout flags on an endpoint-length code"),
             }
         }
@@ -317,8 +366,15 @@ pub fn decode_any(s: &str) -> Result<Code> {
             if p[0] & (FLAG_STEAM | FLAG_BOTH) != FLAG_STEAM {
                 bail!("invalid join code: wrong layout flags on a steam-length code");
             }
-            let st = Steam { flags: p[0] & !FLAG_STEAM, account_id: be32(&p[1..]), key: be32(&p[5..]) };
-            Ok(Code { steam: Some(st), ..Code::default() })
+            let st = Steam {
+                flags: p[0] & !FLAG_STEAM,
+                account_id: be32(&p[1..]),
+                key: be32(&p[5..]),
+            };
+            Ok(Code {
+                steam: Some(st),
+                ..Code::default()
+            })
         }
         COMBINED_LENGTH => {
             let p = decode(norm, COMBINED_BODY_LEN, COMBINED_PAYLOAD_LEN)?;
@@ -327,8 +383,16 @@ pub fn decode_any(s: &str) -> Result<Code> {
             }
             let flags = p[0] & !(FLAG_STEAM | FLAG_BOTH);
             Ok(Code {
-                endpoint: Some(Endpoint { flags, ip: v4(&p[1..]), port: be16(&p[5..]) }),
-                steam: Some(Steam { flags, account_id: be32(&p[7..]), key: be32(&p[11..]) }),
+                endpoint: Some(Endpoint {
+                    flags,
+                    ip: v4(&p[1..]),
+                    port: be16(&p[5..]),
+                }),
+                steam: Some(Steam {
+                    flags,
+                    account_id: be32(&p[7..]),
+                    key: be32(&p[11..]),
+                }),
                 ..Code::default()
             })
         }
@@ -360,7 +424,11 @@ mod tests {
     use super::*;
 
     fn ep(flags: u8, ip: [u8; 4], port: u16) -> Endpoint {
-        Endpoint { flags, ip: Ipv4Addr::from(ip).into(), port }
+        Endpoint {
+            flags,
+            ip: Ipv4Addr::from(ip).into(),
+            port,
+        }
     }
 
     /// Bumps the symbol at i to the next one in the alphabet.
@@ -400,7 +468,10 @@ mod tests {
     #[test]
     fn decode_rejects_bad_checksum() {
         let s = encode_endpoint(ep(0, [192, 168, 1, 5], 4242)).unwrap();
-        assert!(decode_endpoint(&bump(&s, LENGTH - 1)).is_err(), "wrong checksum");
+        assert!(
+            decode_endpoint(&bump(&s, LENGTH - 1)).is_err(),
+            "wrong checksum"
+        );
         assert!(decode_endpoint(&bump(&s, 0)).is_err(), "corrupted body");
     }
 
@@ -413,8 +484,16 @@ mod tests {
             let IpAddr::V4(ip) = e.ip else { unreachable!() };
             let o = ip.octets();
             let mut acc = 0u64;
-            for b in [e.flags, o[0], o[1], o[2], o[3], (e.port >> 8) as u8, e.port as u8] {
-                acc = acc << 8 | b as u64;
+            for b in [
+                e.flags,
+                o[0],
+                o[1],
+                o[2],
+                o[3],
+                e.port.to_be_bytes()[0],
+                e.port.to_be_bytes()[1],
+            ] {
+                acc = acc << 8 | u64::from(b);
             }
             acc <<= 4;
             let mut s = String::new();
@@ -428,46 +507,89 @@ mod tests {
             s
         };
         // The DESIGN.md example.
-        assert_eq!(decode_endpoint("01C0SJ036YN0M").unwrap(), ep(0, [88, 12, 200, 3], 14250));
-        for e in [ep(0, [88, 12, 200, 3], 14250), ep(0x3f, [255, 255, 255, 255], 65535), ep(0, [0, 0, 0, 0], 0)] {
+        assert_eq!(
+            decode_endpoint("01C0SJ036YN0M").unwrap(),
+            ep(0, [88, 12, 200, 3], 14250)
+        );
+        for e in [
+            ep(0, [88, 12, 200, 3], 14250),
+            ep(0x3f, [255, 255, 255, 255], 65535),
+            ep(0, [0, 0, 0, 0], 0),
+        ] {
             let s = encode_endpoint(e).unwrap();
             assert_eq!(s, legacy(e));
             let c = decode_any(&s).unwrap();
             assert!(c.steam.is_none());
             assert_eq!(c.endpoint.unwrap(), e);
         }
-        assert!(encode_endpoint(ep(FLAG_STEAM, [1, 2, 3, 4], 1)).is_err(), "bit 7 is reserved");
+        assert!(
+            encode_endpoint(ep(FLAG_STEAM, [1, 2, 3, 4], 1)).is_err(),
+            "bit 7 is reserved"
+        );
     }
 
     #[test]
     fn steam_round_trip() {
         for want in [
-            Steam { flags: 0, account_id: 0, key: 0 },
-            Steam { flags: 0, account_id: 0xffffffff, key: 0xffffffff },
-            Steam { flags: 0, account_id: 12345678, key: 0xdeadbeef },
-            Steam { flags: 0x3f, account_id: 1, key: 2 }, // bits 7 and 6 belong to the layout
+            Steam {
+                flags: 0,
+                account_id: 0,
+                key: 0,
+            },
+            Steam {
+                flags: 0,
+                account_id: 0xffff_ffff,
+                key: 0xffff_ffff,
+            },
+            Steam {
+                flags: 0,
+                account_id: 12_345_678,
+                key: 0xdead_beef,
+            },
+            Steam {
+                flags: 0x3f,
+                account_id: 1,
+                key: 2,
+            }, // bits 7 and 6 belong to the layout
         ] {
             let s = encode_steam(want);
             assert_eq!(s.len(), STEAM_LENGTH);
             let got = decode_steam(&s).unwrap();
             assert_eq!(got, want, "code {s}");
-            assert_eq!(got.steam_id64(), 0x0110000100000000 | want.account_id as u64);
+            assert_eq!(
+                got.steam_id64(),
+                0x0110_0001_0000_0000 | u64::from(want.account_id)
+            );
             let c = decode_any(&s).unwrap();
             assert!(c.steam.is_some() && c.endpoint.is_none());
-            assert!(decode_endpoint(&s).is_err(), "Decode must refuse the steam code {s}");
+            assert!(
+                decode_endpoint(&s).is_err(),
+                "Decode must refuse the steam code {s}"
+            );
         }
         // [80][00 bc 61 4e][de ad be ef] as a 75-bit stream, computed independently.
-        let s = encode_steam(Steam { flags: 0, account_id: 12345678, key: 0xdeadbeef });
+        let s = encode_steam(Steam {
+            flags: 0,
+            account_id: 12_345_678,
+            key: 0xdead_beef,
+        });
         assert_eq!(s, "G00BRRAEVTPVXVRS");
         for i in 0..STEAM_LENGTH {
-            assert!(decode_steam(&bump(&s, i)).is_err(), "accepted a corrupted symbol {i}");
+            assert!(
+                decode_steam(&bump(&s, i)).is_err(),
+                "accepted a corrupted symbol {i}"
+            );
         }
     }
 
     #[test]
     fn combined_round_trip() {
         let e = ep(0, [45, 154, 88, 66], 14250);
-        let st = Steam { flags: 0, account_id: 12345678, key: 0xdeadbeef };
+        let st = Steam {
+            flags: 0,
+            account_id: 12_345_678,
+            key: 0xdead_beef,
+        };
         let s = encode_combined(e, st).unwrap();
         assert_eq!(s.len(), COMBINED_LENGTH);
         // [c0][2d 9a 58 42][37 aa][00 bc 61 4e][de ad be ef] as a 120-bit
@@ -475,27 +597,41 @@ mod tests {
         assert_eq!(s, "R0PSMP226YN01F319VFAVFQFF");
         let c = decode_any(&s).unwrap();
         assert_eq!((c.endpoint, c.steam), (Some(e), Some(st)));
-        assert_eq!(c.steam.unwrap().steam_id64(), 0x0110000100BC614E);
+        assert_eq!(c.steam.unwrap().steam_id64(), 0x0110_0001_00BC_614E);
         // The single-route decoders refuse it: a caller that ignores one route
         // would silently lose the cascade.
         assert!(decode_endpoint(&s).is_err());
         assert!(decode_steam(&s).is_err());
         for i in 0..COMBINED_LENGTH {
-            assert!(decode_any(&bump(&s, i)).is_err(), "accepted a corrupted symbol {i}");
+            assert!(
+                decode_any(&bump(&s, i)).is_err(),
+                "accepted a corrupted symbol {i}"
+            );
         }
-        assert!(encode_combined(ep(FLAG_BOTH, [45, 154, 88, 66], 1), st).is_err(), "bit 6 is reserved");
-        assert!(LENGTH != STEAM_LENGTH && STEAM_LENGTH != COMBINED_LENGTH && LENGTH != COMBINED_LENGTH);
+        assert!(
+            encode_combined(ep(FLAG_BOTH, [45, 154, 88, 66], 1), st).is_err(),
+            "bit 6 is reserved"
+        );
     }
 
     #[test]
     fn account_id_of() {
-        assert_eq!(account_id(0x0110000100BC614E), (12345678, true));
-        assert!(!account_id(0x0170000000000001).1, "a clan id is not a player account");
+        assert_eq!(account_id(0x0110_0001_00BC_614E), (12_345_678, true));
+        assert!(
+            !account_id(0x0170_0000_0000_0001).1,
+            "a clan id is not a player account"
+        );
     }
 
     #[test]
     fn decode_rejects_bad_shape() {
-        for s in ["", "ABC", &"Z".repeat(LENGTH + 1), &"!".repeat(LENGTH), &"!".repeat(STEAM_LENGTH)] {
+        for s in [
+            "",
+            "ABC",
+            &"Z".repeat(LENGTH + 1),
+            &"!".repeat(LENGTH),
+            &"!".repeat(STEAM_LENGTH),
+        ] {
             assert!(decode_endpoint(s).is_err(), "{s:?} should have failed");
         }
     }
@@ -518,7 +654,10 @@ mod tests {
                 assert_eq!(got.endpoint, Some(want), "{input}");
             }
             for i in 0..s.len() {
-                assert!(decode_any(&bump(&s, i)).is_err(), "accepted typo at {i} in {s}");
+                assert!(
+                    decode_any(&bump(&s, i)).is_err(),
+                    "accepted typo at {i} in {s}"
+                );
             }
         }
     }
@@ -526,16 +665,37 @@ mod tests {
     /// Codes the Go helper produced, so both builds read each other's codes.
     #[test]
     fn go_vectors() {
-        assert_eq!(encode_direct(ep(0, [45, 154, 88, 66], 14250)).unwrap(), "5PD5GGGX");
-        assert_eq!(encode_direct(ep(0, [192, 168, 1, 7], 4242)).unwrap(), "R2M021RGJ8K");
-        assert_eq!(encode_punch(ep(0, [45, 154, 88, 66], 14250), 8104).unwrap(), "00PSMP226YN1ZA00");
-        assert_eq!(encode_reply(ep(0, [100, 64, 7, 9], 50123)).unwrap(), "81J401R9RF5GX");
+        assert_eq!(
+            encode_direct(ep(0, [45, 154, 88, 66], 14250)).unwrap(),
+            "5PD5GGGX"
+        );
+        assert_eq!(
+            encode_direct(ep(0, [192, 168, 1, 7], 4242)).unwrap(),
+            "R2M021RGJ8K"
+        );
+        assert_eq!(
+            encode_punch(ep(0, [45, 154, 88, 66], 14250), 8104).unwrap(),
+            "00PSMP226YN1ZA00"
+        );
+        assert_eq!(
+            encode_reply(ep(0, [100, 64, 7, 9], 50123)).unwrap(),
+            "81J401R9RF5GX"
+        );
         let mapped: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
-        assert_eq!(encode_direct(Endpoint::new(mapped, 14250)).unwrap(), "R0004084");
+        assert_eq!(
+            encode_direct(Endpoint::new(mapped, 14250)).unwrap(),
+            "R0004084"
+        );
         // A right checksum over a wrong tail or layout is still refused.
-        assert!(decode_any("00000011").unwrap_err().to_string().contains("non-zero padding"));
+        assert!(decode_any("00000011")
+            .unwrap_err()
+            .to_string()
+            .contains("non-zero padding"));
         let layout = encode(&[FLAG_STEAM | FLAG_BOTH, 1, 2, 3, 4, 0, 1], BODY_LEN);
-        assert!(decode_any(&layout).unwrap_err().to_string().contains("layout flags"));
+        assert!(decode_any(&layout)
+            .unwrap_err()
+            .to_string()
+            .contains("layout flags"));
         // ß upper-cases to "SS" in Rust but stays one rune in Go.
         assert!(decode_any("0000ß0J").is_err());
     }
@@ -543,7 +703,10 @@ mod tests {
     #[test]
     fn direct_code_preserves_flags() {
         let want = ep(3, [192, 0, 2, 1], 14250);
-        assert_eq!(decode_endpoint(&encode_direct(want).unwrap()).unwrap(), want);
+        assert_eq!(
+            decode_endpoint(&encode_direct(want).unwrap()).unwrap(),
+            want
+        );
     }
 
     #[test]
@@ -569,7 +732,11 @@ mod tests {
             assert_eq!(decode_endpoint(&s).unwrap().addr(), tcp.addr());
         }
         // A steam code of the same length is still a steam code.
-        let st = Steam { flags: 0, account_id: 0x12345678, key: 0x9abcdef0 };
+        let st = Steam {
+            flags: 0,
+            account_id: 0x1234_5678,
+            key: 0x9abc_def0,
+        };
         let got = decode_any(&encode_steam(st)).unwrap();
         assert!(got.punch.is_none());
         assert_eq!(got.steam.unwrap().account_id, st.account_id);
@@ -581,11 +748,21 @@ mod tests {
         let s = encode_reply(want).unwrap();
         assert_eq!(s.len(), LENGTH);
         let got = decode_any(&s).unwrap();
-        assert_eq!(got, Code { reply: Some(want), ..Code::default() });
-        assert!(decode_endpoint(&s).is_err(), "a reply code must not decode as an endpoint");
+        assert_eq!(
+            got,
+            Code {
+                reply: Some(want),
+                ..Code::default()
+            }
+        );
+        assert!(
+            decode_endpoint(&s).is_err(),
+            "a reply code must not decode as an endpoint"
+        );
         // Old 13-symbol endpoint codes, every legacy flag bit included, still decode.
         for flags in [0, 1, 0x20, 0x3f] {
-            let got = decode_any(&encode_endpoint(ep(flags, [88, 12, 200, 3], 14250)).unwrap()).unwrap();
+            let got =
+                decode_any(&encode_endpoint(ep(flags, [88, 12, 200, 3], 14250)).unwrap()).unwrap();
             assert!(got.reply.is_none());
             assert_eq!(got.endpoint.unwrap().flags, flags);
         }

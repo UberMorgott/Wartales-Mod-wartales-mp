@@ -32,11 +32,11 @@ struct Inner {
 #[derive(Default)]
 struct State {
     bufs: Vec<Vec<u8>>,
-    size: usize,                           // bytes queued or being written
+    size: usize,                          // bytes queued or being written
     err: Option<(io::ErrorKind, String)>, // once set, nothing more is accepted
-    running: bool,                         // a writer thread is draining bufs
-    drain: bool,                           // close c once bufs are written
-    flush_by: Option<Instant>,             // drain's deadline for the writes still running
+    running: bool,                        // a writer thread is draining bufs
+    drain: bool,                          // close c once bufs are written
+    flush_by: Option<Instant>,            // drain's deadline for the writes still running
 }
 
 fn error(e: &(io::ErrorKind, String)) -> io::Error {
@@ -46,7 +46,11 @@ fn error(e: &(io::ErrorKind, String)) -> io::Error {
 impl Queue {
     /// A queue that holds at most budget bytes for c.
     pub fn new(c: ConnRef, budget: usize) -> Self {
-        Queue(Arc::new(Inner { c, budget, st: Mutex::default() }))
+        Queue(Arc::new(Inner {
+            c,
+            budget,
+            st: Mutex::default(),
+        }))
     }
 
     /// Queues bufs to be written back to back, in order with every earlier
@@ -77,11 +81,11 @@ impl Queue {
             let spawned = std::thread::Builder::new().spawn(move || {
                 if catch_unwind(AssertUnwindSafe(|| q.run())).is_err() {
                     crate::applog::append("sendq: writer thread panicked");
-                    q.fail(io::Error::other("sendq: writer panicked"));
+                    q.fail(&io::Error::other("sendq: writer panicked"));
                 }
             });
             if let Err(e) = spawned {
-                self.fail(e);
+                self.fail(&e);
             }
         }
         Ok(())
@@ -106,7 +110,7 @@ impl Queue {
             let mut n = 0;
             for b in &bufs {
                 if let Err(e) = self.write(b) {
-                    self.fail(e);
+                    self.fail(&e);
                     return;
                 }
                 n += b.len();
@@ -127,7 +131,7 @@ impl Queue {
         self.0.c.write_all(b)
     }
 
-    fn fail(&self, err: io::Error) {
+    fn fail(&self, err: &io::Error) {
         let mut st = self.0.st.lock().unwrap();
         st.err.get_or_insert((err.kind(), err.to_string()));
         st.bufs = Vec::new();
@@ -139,7 +143,8 @@ impl Queue {
     /// Drops whatever is queued and closes the connection now.
     pub fn close(&self) {
         let mut st = self.0.st.lock().unwrap();
-        st.err.get_or_insert((io::ErrorKind::NotConnected, CLOSED.into()));
+        st.err
+            .get_or_insert((io::ErrorKind::NotConnected, CLOSED.into()));
         st.bufs = Vec::new();
         drop(st);
         self.0.c.close();
@@ -149,7 +154,8 @@ impl Queue {
     /// and then closes the connection. It does not wait.
     pub fn drain(&self) {
         let mut st = self.0.st.lock().unwrap();
-        st.err.get_or_insert((io::ErrorKind::NotConnected, CLOSED.into()));
+        st.err
+            .get_or_insert((io::ErrorKind::NotConnected, CLOSED.into()));
         st.drain = true;
         if !st.running {
             drop(st);
@@ -217,7 +223,10 @@ mod tests {
         for _ in 0..100 {
             q.send(&[b"frame"]).unwrap();
         }
-        assert!(start.elapsed() < Duration::from_secs(2), "send waited on a peer that does not read");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "send waited on a peer that does not read"
+        );
         q.close();
     }
 
@@ -241,8 +250,15 @@ mod tests {
         let q = Queue::new(stall.clone(), 10);
         q.send(&[&[0; 6]]).unwrap();
         assert_eq!(q.send(&[&[0; 6]]).unwrap_err().to_string(), OVERFLOW);
-        assert_eq!(q.send(&[&[1]]).unwrap_err().to_string(), OVERFLOW, "a send after the overflow");
-        assert!(*stall.closed.lock().unwrap(), "the overflow did not close the peer");
+        assert_eq!(
+            q.send(&[&[1]]).unwrap_err().to_string(),
+            OVERFLOW,
+            "a send after the overflow"
+        );
+        assert!(
+            *stall.closed.lock().unwrap(),
+            "the overflow did not close the peer"
+        );
     }
 
     #[test]

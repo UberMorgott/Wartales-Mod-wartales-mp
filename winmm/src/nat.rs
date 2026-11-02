@@ -24,7 +24,7 @@ use crate::{logf, Log};
 use addr::{describe_ip, is_public_ipv4};
 
 /// How long the UPnP port mapping is requested for; it is refreshed while we run.
-const MAPPING_LEASE: Duration = Duration::from_secs(2 * 3600);
+const MAPPING_LEASE: Duration = Duration::from_hours(2);
 
 /// How old a resolved endpoint may be before it is resolved again: the WAN
 /// address can change between lobbies (observed alternating on a carrier that
@@ -78,11 +78,18 @@ pub struct Mapper {
 impl Mapper {
     /// Creates a mapper for the given public TCP port.
     pub fn new(port: u16, log: Log) -> Self {
-        Mapper { port, log, max_age: DEFAULT_MAX_AGE, st: Mutex::default() }
+        Mapper {
+            port,
+            log,
+            max_age: DEFAULT_MAX_AGE,
+            st: Mutex::default(),
+        }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.st.lock().unwrap_or_else(|e| e.into_inner())
+        self.st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Records that a connection arrived on the port from ip. Only a public
@@ -97,7 +104,11 @@ impl Mapper {
         if st.done && st.verified_from.is_none() {
             st.verified_from = Some(ip);
             st.ep.verified = true;
-            logf!(self.log, "nat: inbound connection from {}: the public endpoint is now VERIFIED reachable", ip.to_canonical());
+            logf!(
+                self.log,
+                "nat: inbound connection from {}: the public endpoint is now VERIFIED reachable",
+                ip.to_canonical()
+            );
         }
         true
     }
@@ -117,7 +128,11 @@ impl Mapper {
         let mut ep = match self.resolve(&mut st) {
             Ok(ep) => ep,
             Err(e) if st.done => {
-                logf!(self.log, "nat: re-resolving the public endpoint failed ({e:#}), keeping {}", st.ep.addr);
+                logf!(
+                    self.log,
+                    "nat: re-resolving the public endpoint failed ({e:#}), keeping {}",
+                    st.ep.addr
+                );
                 return Ok(st.ep.clone());
             }
             Err(e) => return Err(e),
@@ -128,7 +143,11 @@ impl Mapper {
         ep.at = Some(Instant::now());
         // Verification is per address: a new WAN address starts unproven.
         if st.done && st.ep.ip != ep.ip {
-            logf!(self.log, "nat: public address changed {} -> {ip}", st.ep.ip.map_or("<nil>".into(), |i| i.to_string()));
+            logf!(
+                self.log,
+                "nat: public address changed {} -> {ip}",
+                st.ep.ip.map_or("<nil>".into(), |i| i.to_string())
+            );
             st.verified_from = None;
         }
         ep.verified = st.verified_from.is_some() && st.done;
@@ -141,7 +160,12 @@ impl Mapper {
         } else {
             ", unverified"
         };
-        logf!(self.log, "nat: public endpoint {} (source {}{note})", st.ep.addr, st.ep.source);
+        logf!(
+            self.log,
+            "nat: public endpoint {} (source {}{note})",
+            st.ep.addr,
+            st.ep.source
+        );
         Ok(st.ep.clone())
     }
 
@@ -150,19 +174,23 @@ impl Mapper {
         let mut upnp_ip = None;
         match upnp::discover_igd(Duration::from_secs(3)) {
             Ok(igd) => {
-                match igd.add_port_mapping(self.port, "wartales-mp", MAPPING_LEASE) {
-                    Err(e) => logf!(self.log, "nat: AddPortMapping failed: {e:#}"),
-                    Ok(()) => {
-                        st.mapped = true;
-                        logf!(self.log, "nat: UPnP mapped TCP {}", self.port);
-                    }
+                if let Err(e) = igd.add_port_mapping(self.port, "wartales-mp", MAPPING_LEASE) {
+                    logf!(self.log, "nat: AddPortMapping failed: {e:#}");
+                } else {
+                    st.mapped = true;
+                    logf!(self.log, "nat: UPnP mapped TCP {}", self.port);
                 }
                 let ext = igd.external_ip();
                 st.igd = Some(igd);
                 match ext {
                     Ok(ip) if is_public_ipv4(ip) => {
                         logf!(self.log, "nat: external ip {ip} (UPnP)");
-                        return Ok(Endpoint { ip: Some(ip), source: "UPnP", reachable: true, ..Default::default() });
+                        return Ok(Endpoint {
+                            ip: Some(ip),
+                            source: "UPnP",
+                            reachable: true,
+                            ..Default::default()
+                        });
                     }
                     Ok(ip) => {
                         upnp_ip = Some(ip);
@@ -184,12 +212,25 @@ impl Mapper {
             Ok(ip) if is_public_ipv4(ip) => {
                 // Port from the UPnP mapping, address from STUN.
                 let source = if st.mapped { "UPnP+STUN" } else { "STUN" };
-                logf!(self.log, "nat: external ip {ip} (STUN); UPnP said {}", describe_ip(upnp_ip));
-                return Ok(Endpoint { ip: Some(ip), source, reachable: true, ..Default::default() });
+                logf!(
+                    self.log,
+                    "nat: external ip {ip} (STUN); UPnP said {}",
+                    describe_ip(upnp_ip)
+                );
+                return Ok(Endpoint {
+                    ip: Some(ip),
+                    source,
+                    reachable: true,
+                    ..Default::default()
+                });
             }
             Ok(ip) => {
                 stun_ip = Some(ip);
-                logf!(self.log, "nat: STUN reported external ip {}, not usable", describe_ip(stun_ip));
+                logf!(
+                    self.log,
+                    "nat: STUN reported external ip {}, not usable",
+                    describe_ip(stun_ip)
+                );
             }
             Err(e) => logf!(self.log, "nat: STUN failed: {e:#}"),
         }
@@ -204,7 +245,13 @@ impl Mapper {
             bail!("could not determine any address: {warning}");
         };
         logf!(self.log, "nat: falling back to the LAN address {ip}");
-        Ok(Endpoint { ip: Some(ip), source: "LAN", reachable: false, warning, ..Default::default() })
+        Ok(Endpoint {
+            ip: Some(ip),
+            source: "LAN",
+            reachable: false,
+            warning,
+            ..Default::default()
+        })
     }
 
     /// Removes the UPnP mapping we added, if any.
@@ -235,7 +282,10 @@ mod tests {
     /// Only a public source verifies the endpoint.
     #[test]
     fn test_mark_inbound() {
-        let m = Mapper { max_age: Duration::MAX, ..Mapper::new(14250, Log::discard()) };
+        let m = Mapper {
+            max_age: Duration::MAX,
+            ..Mapper::new(14250, Log::discard())
+        };
         {
             let mut st = m.state();
             st.done = true;
@@ -247,9 +297,21 @@ mod tests {
                 ..Default::default()
             };
         }
-        assert!(!m.mark_inbound([192, 168, 1, 7].into()), "a LAN guest must not verify internet reachability");
-        assert!(!m.endpoint().unwrap().verified, "verified without any public inbound");
-        assert!(m.mark_inbound([8, 8, 8, 8].into()), "a public source verifies");
-        assert!(m.endpoint().unwrap().verified, "not verified after a public inbound");
+        assert!(
+            !m.mark_inbound([192, 168, 1, 7].into()),
+            "a LAN guest must not verify internet reachability"
+        );
+        assert!(
+            !m.endpoint().unwrap().verified,
+            "verified without any public inbound"
+        );
+        assert!(
+            m.mark_inbound([8, 8, 8, 8].into()),
+            "a public source verifies"
+        );
+        assert!(
+            m.endpoint().unwrap().verified,
+            "not verified after a public inbound"
+        );
     }
 }

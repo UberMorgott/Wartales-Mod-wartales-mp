@@ -32,7 +32,9 @@ fn fake_stun(delta: u16) -> String {
     std::thread::spawn(move || {
         let mut buf = [0u8; 1500];
         loop {
-            let Ok((n, SocketAddr::V4(from))) = c.recv_from(&mut buf) else { continue };
+            let Ok((n, SocketAddr::V4(from))) = c.recv_from(&mut buf) else {
+                continue;
+            };
             if !nat::is_stun(&buf[..n]) {
                 continue;
             }
@@ -101,14 +103,20 @@ fn round_trip(addr: &str, msg: &[u8]) {
 #[test]
 fn test_endpoint_falls_back_across_servers() {
     // The first server never answers; the other two do, with the same address.
-    let (a, b, c) = (silent(), fake_stun(0), fake_stun(0));
-    let s = open_s(0, "", &[&a, &b, &c]);
+    let (quiet, stun_a, stun_b) = (silent(), fake_stun(0), fake_stun(0));
+    let s = open_s(0, "", &[&quiet, &stun_a, &stun_b]);
     let start = Instant::now();
     let r = s.endpoint().unwrap();
-    assert_eq!(r.mapped, SocketAddr::from((LOOPBACK, s.local_addr().port())));
+    assert_eq!(
+        r.mapped,
+        SocketAddr::from((LOOPBACK, s.local_addr().port()))
+    );
     assert_eq!(r.mapping, Mapping::Stable);
     let d = start.elapsed();
-    assert!(d < Duration::from_secs(2), "two answers took {d:?}: the silent server held the round up");
+    assert!(
+        d < Duration::from_secs(2),
+        "two answers took {d:?}: the silent server held the round up"
+    );
     assert!(s.ready(), "ready false after a STUN answer");
 }
 
@@ -124,7 +132,10 @@ fn test_endpoint_no_server() {
     let a = silent();
     let s = open_s(0, "", &[&a]);
     let r = s.endpoint();
-    assert!(r.is_err() && !s.ready(), "endpoint = {r:?}; want an error and no mapping");
+    assert!(
+        r.is_err() && !s.ready(),
+        "endpoint = {r:?}; want an error and no mapping"
+    );
     assert_eq!(r.unwrap_err().to_string(), "no STUN server answered");
 }
 
@@ -137,7 +148,10 @@ fn test_punch_tunnel_end_to_end() {
     let guest = open_s(0, "", &[&stun]);
     host.toward(&local(&guest)).unwrap();
     let fwd = guest.dial(&local(&host)).unwrap();
-    assert!(fwd.starts_with("127.0.0.1:"), "forwarder {fwd} is not on loopback");
+    assert!(
+        fwd.starts_with("127.0.0.1:"),
+        "forwarder {fwd} is not on loopback"
+    );
     round_trip(&fwd, b"hello over kcp");
     let big = b"0123456789abcdef".repeat(64 * 1024); // 1 MiB: windows and fragments
     let f2 = fwd.clone();
@@ -146,7 +160,11 @@ fn test_punch_tunnel_end_to_end() {
     t.join().unwrap();
 
     // A second join to the same host reuses the live tunnel.
-    assert_eq!(guest.dial(&local(&host)).unwrap(), fwd, "dial again: want the live tunnel");
+    assert_eq!(
+        guest.dial(&local(&host)).unwrap(),
+        fwd,
+        "dial again: want the live tunnel"
+    );
 }
 
 /// Guest-first: a host that lets the punch through answers it, no reply code.
@@ -166,9 +184,15 @@ fn test_punch_no_answer() {
     let guest = open_s(0, "", &[&a, &b]);
     guest.st().wait = Some(Duration::from_millis(300));
     let err = guest.dial(&silent()).unwrap_err();
-    let na = err.downcast_ref::<NoAnswerError>().expect("a NoAnswerError");
+    let na = err
+        .downcast_ref::<NoAnswerError>()
+        .expect("a NoAnswerError");
     let c = code::decode_any(&na.reply).unwrap();
-    assert_eq!(c.reply.unwrap().addr(), na.self_.unwrap().mapped, "reply code vs STUN");
+    assert_eq!(
+        c.reply.unwrap().addr(),
+        na.self_.unwrap().mapped,
+        "reply code vs STUN"
+    );
     for want in [na.reply.as_str(), "Join by code", "Steam invitation"] {
         assert!(err.to_string().contains(want), "error {err} lacks {want:?}");
     }
@@ -177,8 +201,13 @@ fn test_punch_no_answer() {
     let lone = open_s(0, "", &[]);
     lone.st().wait = Some(Duration::from_millis(200));
     let err = lone.dial(&silent()).unwrap_err();
-    let na = err.downcast_ref::<NoAnswerError>().expect("a NoAnswerError");
-    assert!(na.reply.is_empty() && err.to_string().contains("Steam invitation"), "dial without STUN = {err}");
+    let na = err
+        .downcast_ref::<NoAnswerError>()
+        .expect("a NoAnswerError");
+    assert!(
+        na.reply.is_empty() && err.to_string().contains("Steam invitation"),
+        "dial without STUN = {err}"
+    );
 }
 
 /// A guest that restarts on the same UDP address opens new streams with a new
@@ -214,7 +243,10 @@ fn test_punch_forwarder_redials() {
     guest.drop_peer_locked(&mut guest.st(), ha);
     round_trip(&fwd, b"after the loss");
     let st = guest.st();
-    assert!(st.peers.get(&ha).is_some_and(|p| p.last > since), "no new tunnel after the redial");
+    assert!(
+        st.peers.get(&ha).is_some_and(|p| p.last > since),
+        "no new tunnel after the redial"
+    );
 }
 
 /// Roles swap: the former host dials the former guest, whose tunnel it serves.
@@ -246,7 +278,10 @@ fn test_close_leaves_nothing() {
         assert!(s.st().threads.is_empty() && s.st().streams.is_empty() && s.st().peers.is_empty());
     }
     c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    assert!(!matches!(c.read(&mut got), Ok(n) if n > 0), "the stream outlived close");
+    assert!(
+        !matches!(c.read(&mut got), Ok(n) if n > 0),
+        "the stream outlived close"
+    );
     assert!(
         TcpStream::connect_timeout(&fwd.parse().unwrap(), Duration::from_millis(500)).is_err(),
         "the forwarder outlived close"
@@ -260,7 +295,11 @@ fn lossy_shim(host: SocketAddr) -> String {
     x.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
     let addr = x.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
-        let (mut guest, mut held, mut rng) = (None, None::<(Vec<u8>, SocketAddr)>, 0x9e37_79b9_7f4a_7c15u64);
+        let (mut guest, mut held, mut rng) = (
+            None,
+            None::<(Vec<u8>, SocketAddr)>,
+            0x9e37_79b9_7f4a_7c15u64,
+        );
         let mut buf = [0u8; 2048];
         loop {
             let Ok((n, from)) = x.recv_from(&mut buf) else {

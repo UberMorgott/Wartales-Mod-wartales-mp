@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use kcp::Kcp;
 
 use super::{rand_u32, Socket, State, MAX_GUESTS};
-use crate::logf;
 use crate::conn::close_tcp;
+use crate::logf;
 
 /// A stream: the peer address and its KCP conversation.
 pub(super) type Key = (SocketAddr, u32);
@@ -41,7 +41,10 @@ pub(super) struct Peer {
 
 impl Peer {
     pub fn new(nonce: Option<u32>) -> Self {
-        Peer { nonce, last: Instant::now() }
+        Peer {
+            nonce,
+            last: Instant::now(),
+        }
     }
 }
 
@@ -55,7 +58,13 @@ pub(super) struct Stream {
 
 impl Stream {
     fn new(kcp: Kcp<Out>) -> Self {
-        Stream { kcp, tcp: None, last_in: Instant::now(), ended: None, fin_recv: false }
+        Stream {
+            kcp,
+            tcp: None,
+            last_in: Instant::now(),
+            ended: None,
+            fin_recv: false,
+        }
     }
 
     /// Ends our side: FIN to the other end, TCP closed (either direction ending
@@ -77,7 +86,10 @@ impl Stream {
     fn finished(&self, now: Instant) -> bool {
         let stuck = now.duration_since(self.last_in) > TIMEOUT;
         match self.ended {
-            Some(t) => stuck || (self.fin_recv && self.kcp.wait_snd() == 0 && now.duration_since(t) > LINGER),
+            Some(t) => {
+                stuck
+                    || (self.fin_recv && self.kcp.wait_snd() == 0 && now.duration_since(t) > LINGER)
+            }
             None => stuck && self.kcp.wait_snd() > 0,
         }
     }
@@ -106,6 +118,10 @@ pub(super) fn is_kcp(pkt: &[u8]) -> bool {
 }
 
 impl Socket {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "KCP's clock is a wrapping u32 of ms"
+    )]
     fn now_ms(&self) -> u32 {
         self.epoch.elapsed().as_millis() as u32
     }
@@ -113,7 +129,13 @@ impl Socket {
     /// Go's KCP tuning: fast retransmits, a window large enough for save
     /// transfers, and a datagram that fits any path.
     fn new_kcp(&self, conv: u32, to: SocketAddr) -> Kcp<Out> {
-        let mut k = Kcp::new(conv, Out { udp: self.udp.clone(), to });
+        let mut k = Kcp::new(
+            conv,
+            Out {
+                udp: self.udp.clone(),
+                to,
+            },
+        );
         k.set_nodelay(true, 20, 2, true);
         k.set_wndsize(512, 512);
         k.set_mtu(1200).expect("1200 is a valid MTU");
@@ -155,7 +177,11 @@ impl Socket {
         let (from, conv) = key;
         let mut k = self.new_kcp(conv, from);
         let mut m = [0u8; OPEN_LEN];
-        if k.input(pkt).is_err() || k.peeksize().ok() != Some(OPEN_LEN) || k.recv(&mut m).is_err() || &m[..8] != OPEN {
+        if k.input(pkt).is_err()
+            || k.peeksize().ok() != Some(OPEN_LEN)
+            || k.recv(&mut m).is_err()
+            || &m[..8] != OPEN
+        {
             return;
         }
         let nonce = u32::from_le_bytes(m[8..].try_into().expect("4 bytes"));
@@ -170,15 +196,23 @@ impl Socket {
             }
             Some(_) => {}
         }
-        st.peers.entry(from).or_insert_with(|| Peer::new(None)).nonce = Some(nonce);
+        st.peers
+            .entry(from)
+            .or_insert_with(|| Peer::new(None))
+            .nonce = Some(nonce);
         st.targets.remove(&from); // the tunnel's own keepalives keep the way open now
         let _ = k.flush(); // ACKs the OPEN
         st.streams.insert(key, Stream::new(k));
         let me = self.me();
         self.spawn(st, move || {
-            let c = me.relay.parse::<SocketAddr>().map_err(anyhow::Error::from).and_then(|a| {
-                TcpStream::connect_timeout(&a, Duration::from_secs(3)).map_err(anyhow::Error::from)
-            });
+            let c = me
+                .relay
+                .parse::<SocketAddr>()
+                .map_err(anyhow::Error::from)
+                .and_then(|a| {
+                    TcpStream::connect_timeout(&a, Duration::from_secs(3))
+                        .map_err(anyhow::Error::from)
+                });
             if let Err(e) = &c {
                 logf!(me.log, "punch: relay {} for {from}: {e:#}", me.relay);
             }
@@ -252,7 +286,9 @@ impl Socket {
             };
             let mut st = self.st();
             loop {
-                let Some(s) = st.streams.get_mut(&key).filter(|s| s.ended.is_none()) else { return };
+                let Some(s) = st.streams.get_mut(&key).filter(|s| s.ended.is_none()) else {
+                    return;
+                };
                 if s.kcp.wait_snd() < SEND_LIMIT {
                     if s.kcp.wait_snd() == 0 {
                         s.last_in = Instant::now(); // progress is timed from when data is pending
@@ -273,7 +309,9 @@ impl Socket {
         let mut buf = Vec::new();
         let mut st = self.st();
         loop {
-            let Some(s) = st.streams.get_mut(&key) else { return };
+            let Some(s) = st.streams.get_mut(&key) else {
+                return;
+            };
             let Ok(n) = s.kcp.peeksize() else {
                 st = self.wait(st, Duration::from_secs(1));
                 continue;
@@ -305,7 +343,7 @@ impl Socket {
         self.cv.notify_all();
     }
 
-    fn remove_locked(&self, st: &mut State, key: Key) {
+    fn remove_locked(st: &mut State, key: Key) {
         if let Some(mut s) = st.streams.remove(&key) {
             if let Some(c) = s.tcp.take() {
                 close_tcp(&c);
@@ -318,21 +356,37 @@ impl Socket {
     /// next connection.
     pub(super) fn drop_peer_locked(&self, st: &mut State, a: SocketAddr) {
         st.peers.remove(&a);
-        for k in st.streams.keys().filter(|k| k.0 == a).copied().collect::<Vec<_>>() {
-            self.remove_locked(st, k);
+        for k in st
+            .streams
+            .keys()
+            .filter(|k| k.0 == a)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            Self::remove_locked(st, k);
         }
         logf!(self.log, "punch: tunnel {a} closed");
     }
 
     /// Forgets dead tunnels, finished streams and old tombstones (every tick).
     pub(super) fn expire_locked(&self, st: &mut State, now: Instant) {
-        let dead: Vec<_> = st.peers.iter().filter(|(_, p)| now.duration_since(p.last) > TIMEOUT).map(|(a, _)| *a).collect();
+        let dead: Vec<_> = st
+            .peers
+            .iter()
+            .filter(|(_, p)| now.duration_since(p.last) > TIMEOUT)
+            .map(|(a, _)| *a)
+            .collect();
         for a in dead {
             self.drop_peer_locked(st, a);
         }
-        let done: Vec<_> = st.streams.iter().filter(|(_, s)| s.finished(now)).map(|(k, _)| *k).collect();
+        let done: Vec<_> = st
+            .streams
+            .iter()
+            .filter(|(_, s)| s.finished(now))
+            .map(|(k, _)| *k)
+            .collect();
         for k in done {
-            self.remove_locked(st, k);
+            Self::remove_locked(st, k);
         }
         st.gone.retain(|_, t| now.duration_since(*t) < GONE_FOR);
     }

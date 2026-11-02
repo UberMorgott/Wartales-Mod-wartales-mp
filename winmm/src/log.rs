@@ -21,11 +21,14 @@ impl Log {
     pub fn capture() -> (Self, Arc<Mutex<Vec<String>>>) {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let sink = lines.clone();
-        (Log::new(move |s| sink.lock().unwrap().push(s.to_string())), lines)
+        (
+            Log::new(move |s| sink.lock().unwrap().push(s.to_string())),
+            lines,
+        )
     }
 
     pub fn line(&self, s: &str) {
-        (self.0)(s)
+        (self.0)(s);
     }
 }
 
@@ -44,7 +47,9 @@ macro_rules! logf {
 /// Fills buf from the OS CSPRNG.
 pub fn rand_bytes(buf: &mut [u8]) {
     use ring::rand::SecureRandom;
-    ring::rand::SystemRandom::new().fill(buf).expect("OS random source failed");
+    ring::rand::SystemRandom::new()
+        .fill(buf)
+        .expect("OS random source failed");
 }
 
 #[cfg(test)]

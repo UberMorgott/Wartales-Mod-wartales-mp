@@ -63,7 +63,11 @@ mod tests {
             ("rfc1918 172.31 top", "172.31.255.255", false),
             ("just above rfc1918 172", "172.32.0.1", true),
             ("just below rfc1918 172", "172.15.255.255", true),
-            ("rfc1918 192.168 (this user's router)", "192.168.18.187", false),
+            (
+                "rfc1918 192.168 (this user's router)",
+                "192.168.18.187",
+                false,
+            ),
             ("cgnat low", "100.64.0.1", false),
             ("cgnat high", "100.127.255.255", false),
             ("just below cgnat", "100.63.255.255", true),
@@ -81,8 +85,14 @@ mod tests {
             ("ipv4-mapped public", "::ffff:8.8.4.4", true),
         ];
         for (name, ip, public) in cases {
-            let parsed: IpAddr = ip.parse().unwrap_or_else(|_| panic!("bad test address {ip:?}"));
-            assert_eq!(is_public_ipv4(parsed), public, "{name}: is_public_ipv4({ip})");
+            let parsed: IpAddr = ip
+                .parse()
+                .unwrap_or_else(|_| panic!("bad test address {ip:?}"));
+            assert_eq!(
+                is_public_ipv4(parsed),
+                public,
+                "{name}: is_public_ipv4({ip})"
+            );
         }
         // Go's IsPublicIPv4(nil) case: a missing address is not an IpAddr here.
     }

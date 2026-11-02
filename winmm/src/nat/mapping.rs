@@ -48,7 +48,7 @@ impl fmt::Display for Mapping {
 
 /// Compares the mapped addresses that different STUN servers (keyed by server
 /// address) reported for one socket.
-pub fn classify(mapped: &HashMap<String, SocketAddr>) -> Mapping {
+pub fn classify<S: std::hash::BuildHasher>(mapped: &HashMap<String, SocketAddr, S>) -> Mapping {
     let mut all = mapped.values();
     if let Some(first) = all.next() {
         if all.any(|a| a != first) {
@@ -71,14 +71,29 @@ mod tests {
     #[test]
     fn test_classify() {
         let m = |pairs: &[(&str, &str)]| -> HashMap<String, SocketAddr> {
-            pairs.iter().map(|(k, v)| (k.to_string(), v.parse().unwrap())).collect()
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.parse().unwrap()))
+                .collect()
         };
         let cases = [
             ("none", m(&[]), Mapping::None),
             ("one", m(&[("s1", "1.2.3.4:5000")]), Mapping::Unknown),
-            ("same", m(&[("s1", "1.2.3.4:5000"), ("s2", "1.2.3.4:5000")]), Mapping::Stable),
-            ("ports differ", m(&[("s1", "1.2.3.4:5000"), ("s2", "1.2.3.4:5001")]), Mapping::Symmetric),
-            ("ips differ", m(&[("s1", "1.2.3.4:5000"), ("s2", "1.2.3.5:5000")]), Mapping::Symmetric),
+            (
+                "same",
+                m(&[("s1", "1.2.3.4:5000"), ("s2", "1.2.3.4:5000")]),
+                Mapping::Stable,
+            ),
+            (
+                "ports differ",
+                m(&[("s1", "1.2.3.4:5000"), ("s2", "1.2.3.4:5001")]),
+                Mapping::Symmetric,
+            ),
+            (
+                "ips differ",
+                m(&[("s1", "1.2.3.4:5000"), ("s2", "1.2.3.5:5000")]),
+                Mapping::Symmetric,
+            ),
         ];
         for (name, input, want) in cases {
             let got = classify(&input);
@@ -89,8 +104,17 @@ mod tests {
     #[test]
     fn test_parse_binding_port() {
         for xor in [true, false] {
-            let typ = if xor { ATTR_XOR_MAPPED_ADDRESS } else { ATTR_MAPPED_ADDRESS };
-            let resp = response(0x0101, MAGIC_COOKIE, &TEST_TX_ID, &[&attr(typ, &addr_attr("203.0.113.7", 40123, xor))]);
+            let typ = if xor {
+                ATTR_XOR_MAPPED_ADDRESS
+            } else {
+                ATTR_MAPPED_ADDRESS
+            };
+            let resp = response(
+                0x0101,
+                MAGIC_COOKIE,
+                &TEST_TX_ID,
+                &[&attr(typ, &addr_attr("203.0.113.7", 40123, xor))],
+            );
             let got = parse_binding(&resp, &TEST_TX_ID).unwrap();
             assert_eq!(got.to_string(), "203.0.113.7:40123", "xor={xor}");
         }

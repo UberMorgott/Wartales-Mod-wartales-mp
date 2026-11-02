@@ -73,7 +73,7 @@ pub struct Conn {
     pub ident: String,
     pub headers: BTreeMap<String, String>,
     br: Mutex<BufReader<Deadline>>,
-    q: sendq::Queue, // every write goes through it, so none waits on the peer
+    q: sendq::Queue,    // every write goes through it, so none waits on the peer
     idle_ms: AtomicU64, // see keep_alive; 0 = read waits forever
 }
 
@@ -93,12 +93,19 @@ pub type Auth<'a> = dyn Fn(&str) -> Option<String> + 'a;
 /// timeout (on a TLS conn it also covers the lazy TLS handshake) and MAX_REQUEST bytes.
 pub fn accept(c: ConnRef, timeout: Duration, auth: Option<&Auth<'_>>) -> io::Result<Conn> {
     let until = Instant::now() + timeout;
-    let mut br = BufReader::new(Deadline { c: c.clone(), until: Some(until), timed: false });
+    let mut br = BufReader::new(Deadline {
+        c: c.clone(),
+        until: Some(until),
+        timed: false,
+    });
     let headers = read_request(&mut br)?;
 
     let hash = match headers.get("x-hash").filter(|h| !h.is_empty()) {
         Some(h) => h.clone(),
-        None => headers.get("sec-websocket-key").cloned().unwrap_or_default(),
+        None => headers
+            .get("sec-websocket-key")
+            .cloned()
+            .unwrap_or_default(),
     };
     if hash.is_empty() {
         return Err(other("websocket: no Sec-WebSocket-Key"));
@@ -107,10 +114,14 @@ pub fn accept(c: ConnRef, timeout: Duration, auth: Option<&Auth<'_>>) -> io::Res
 
     if let Some(auth) = auth {
         let Some(pass) = auth(&ident) else {
-            return Err(other(format!("websocket: auth refused for ident {ident:?}")));
+            return Err(other(format!(
+                "websocket: auth refused for ident {ident:?}"
+            )));
         };
         if !pass.is_empty() && !check_pass(&hash, &pass, headers.get("x-pass").map_or("", |s| s)) {
-            return Err(other(format!("websocket: bad password for ident {ident:?}")));
+            return Err(other(format!(
+                "websocket: bad password for ident {ident:?}"
+            )));
         }
     }
 
@@ -126,7 +137,13 @@ pub fn accept(c: ConnRef, timeout: Duration, auth: Option<&Auth<'_>>) -> io::Res
     c.write_all(resp.as_bytes())?;
     c.set_write_timeout(None)?;
     br.get_mut().until = None;
-    Ok(Conn { ident, headers, br: Mutex::new(br), q: sendq::Queue::new(c, SEND_BUDGET), idle_ms: AtomicU64::new(0) })
+    Ok(Conn {
+        ident,
+        headers,
+        br: Mutex::new(br),
+        q: sendq::Queue::new(c, SEND_BUDGET),
+        idle_ms: AtomicU64::new(0),
+    })
 }
 
 /// WSConnection.handleRequest: the client sends
@@ -137,7 +154,9 @@ fn check_pass(hash: &str, pass: &str, got: &str) -> bool {
     if got.is_empty() {
         return false;
     }
-    let Some(key) = unbase64(hash) else { return false };
+    let Some(key) = unbase64(hash) else {
+        return false;
+    };
     got == hex(&sha1(format!("{}{pass}", hex(&key)).as_bytes()))
 }
 
@@ -146,7 +165,10 @@ fn read_request(br: &mut impl BufRead) -> io::Result<BTreeMap<String, String>> {
     let mut budget = MAX_REQUEST;
     for i in 0.. {
         let mut line = Vec::new();
-        let n = br.by_ref().take(budget as u64 + 1).read_until(b'\n', &mut line)?;
+        let n = br
+            .by_ref()
+            .take(budget as u64 + 1)
+            .read_until(b'\n', &mut line)?;
         if n > budget {
             return Err(other("websocket: request too large"));
         }
@@ -163,7 +185,10 @@ fn read_request(br: &mut impl BufRead) -> io::Result<BTreeMap<String, String>> {
             continue; // request line
         }
         let Some(p) = line.find(':') else { continue };
-        headers.insert(line[..p].trim().to_lowercase(), line[p + 1..].trim().to_string());
+        headers.insert(
+            line[..p].trim().to_lowercase(),
+            line[p + 1..].trim().to_string(),
+        );
         if headers.len() > 64 {
             return Err(other("websocket: too many headers"));
         }
@@ -208,17 +233,21 @@ fn write_frame(q: &sendq::Queue, opcode: u8, payload: &[u8]) -> io::Result<()> {
     let mut head = [0u8; 10];
     head[0] = 0x80 | opcode;
     let l = payload.len();
-    let n = if l < 126 {
-        head[1] = l as u8;
-        2
-    } else if l < 1 << 16 {
-        head[1] = 126;
-        head[2..4].copy_from_slice(&(l as u16).to_be_bytes());
-        4
-    } else {
-        head[1] = 127;
-        head[2..10].copy_from_slice(&(l as u64).to_be_bytes());
-        10
+    let n = match (u8::try_from(l), u16::try_from(l)) {
+        (Ok(b), _) if b < 126 => {
+            head[1] = b;
+            2
+        }
+        (_, Ok(w)) => {
+            head[1] = 126;
+            head[2..4].copy_from_slice(&w.to_be_bytes());
+            4
+        }
+        _ => {
+            head[1] = 127;
+            head[2..10].copy_from_slice(&(l as u64).to_be_bytes());
+            10
+        }
     };
     q.send(&[&head[..n], payload])
 }
@@ -229,7 +258,10 @@ impl Conn {
     /// the program behind it still runs. Call it before the first read; the
     /// pings stop when the guard is dropped.
     pub fn keep_alive(&self, interval: Duration, idle: Duration) -> KeepAlive {
-        self.idle_ms.store(idle.as_millis() as u64, Ordering::Relaxed);
+        self.idle_ms.store(
+            u64::try_from(idle.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
         let (tx, rx) = mpsc::channel::<()>();
         let q = self.q.clone();
         let t = std::thread::spawn(move || {
@@ -244,7 +276,10 @@ impl Conn {
                 crate::applog::append("wsx: keepalive thread panicked");
             }
         });
-        KeepAlive { stop: Some(tx), t: Some(t) }
+        KeepAlive {
+            stop: Some(tx),
+            t: Some(t),
+        }
     }
 
     /// The next data frame (opcode, payload). Control frames are handled internally.
@@ -262,7 +297,7 @@ impl Conn {
             let rsv = h[0] >> 4 & 7;
             let op = h[0] & 15;
             let masked = h[1] & 0x80 != 0;
-            let mut n = (h[1] & 127) as u64;
+            let mut n = u64::from(h[1] & 127);
             if rsv != 0 {
                 return Err(other("websocket: RSV bits set"));
             }
@@ -272,7 +307,7 @@ impl Conn {
             if n == 126 {
                 let mut b = [0u8; 2];
                 read_full(br, &mut b)?;
-                n = u16::from_be_bytes(b) as u64;
+                n = u64::from(u16::from_be_bytes(b));
             } else if n == 127 {
                 let mut b = [0u8; 8];
                 read_full(br, &mut b)?;
@@ -285,7 +320,8 @@ impl Conn {
             if masked {
                 read_full(br, &mut mask)?;
             }
-            let mut buf = vec![0u8; n as usize];
+            let mut buf =
+                vec![0u8; usize::try_from(n).map_err(|_| other("websocket: frame too large"))?];
             read_full(br, &mut buf)?;
             if masked {
                 for (i, b) in buf.iter_mut().enumerate() {
@@ -310,7 +346,7 @@ impl Conn {
 
     /// Drops the frames not sent yet and closes the connection.
     pub fn close(&self) {
-        self.q.close()
+        self.q.close();
     }
 
     /// Sends a text frame.
@@ -325,11 +361,19 @@ impl Conn {
 }
 
 pub(crate) fn sha1(b: &[u8]) -> Vec<u8> {
-    ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, b).as_ref().to_vec()
+    ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, b)
+        .as_ref()
+        .to_vec()
 }
 
+/// Lowercase hex of b.
 pub(crate) fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    use std::fmt::Write as _;
+    b.iter()
+        .fold(String::with_capacity(b.len() * 2), |mut s, x| {
+            let _ = write!(s, "{x:02x}"); // writing to a String cannot fail
+            s
+        })
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -338,9 +382,15 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 pub(crate) fn base64(b: &[u8]) -> String {
     let mut s = String::new();
     for c in b.chunks(3) {
-        let v = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let v = u32::from(c[0]) << 16
+            | u32::from(*c.get(1).unwrap_or(&0)) << 8
+            | u32::from(*c.get(2).unwrap_or(&0));
         for i in 0..4 {
-            s.push(if i <= c.len() { B64[(v >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+            s.push(if i <= c.len() {
+                B64[(v >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
         }
     }
     s
@@ -361,9 +411,9 @@ fn unbase64(s: &str) -> Option<Vec<u8>> {
         }
         let mut v = 0u32;
         for &x in &c[..4 - pad] {
-            v = v << 6 | B64.iter().position(|&y| y == x)? as u32;
+            v = v << 6 | u32::try_from(B64.iter().position(|&y| y == x)?).ok()?;
         }
-        v <<= 6 * pad as u32;
+        v <<= 6 * pad;
         out.extend_from_slice(&v.to_be_bytes()[1..4 - pad]);
     }
     Some(out)
@@ -391,14 +441,24 @@ mod tests {
         assert_eq!(base64(b"k"), "aw==");
         assert_eq!(unbase64("a2U=").unwrap(), b"ke");
         assert_eq!(unbase64("aw==").unwrap(), b"k");
-        assert!(unbase64("aw=").is_none() && unbase64("a=b=").is_none() && unbase64("a!==").is_none());
+        assert!(
+            unbase64("aw=").is_none() && unbase64("a=b=").is_none() && unbase64("a!==").is_none()
+        );
         // RFC6455 section 1.3 example
-        assert_eq!(base64(&sha1(format!("dGhlIHNhbXBsZSBub25jZQ=={WS_GUID}").as_bytes())), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(
+            base64(&sha1(
+                format!("dGhlIHNhbXBsZSBub25jZQ=={WS_GUID}").as_bytes()
+            )),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
     }
 
     #[test]
     fn accept_bounds_the_request() {
-        let long = format!("GET / HTTP/1.1\r\nX-Junk: {}\r\n\r\n", "a".repeat(MAX_REQUEST));
+        let long = format!(
+            "GET / HTTP/1.1\r\nX-Junk: {}\r\n\r\n",
+            "a".repeat(MAX_REQUEST)
+        );
         let err = accept_req(&long).err().expect("longLine accepted");
         assert!(err.to_string().contains("too large"), "longLine: {err}");
         let endless = format!("GET / HTTP/1.1\r\n{}", "junk\r\n".repeat(MAX_REQUEST));
@@ -438,7 +498,8 @@ mod tests {
     /// A complete handshake over a pipe: the server Conn, the client end and its reader.
     fn upgrade() -> (Arc<Conn>, ConnRef, BufReader<Io>) {
         let (srv, cli) = pipe();
-        cli.write_all(b"GET / HTTP/1.1\r\nSec-WebSocket-Key: a2V5\r\n\r\n").unwrap();
+        cli.write_all(b"GET / HTTP/1.1\r\nSec-WebSocket-Key: a2V5\r\n\r\n")
+            .unwrap();
         let c = accept(srv, HANDSHAKE_TIMEOUT, None).unwrap();
         let mut br = BufReader::new(Io(cli.clone()));
         loop {
@@ -466,7 +527,9 @@ mod tests {
                 if read_full(&mut br, &mut h).is_err() || h[0] & 15 != OP_PING || h[1] & 127 != 0 {
                     return;
                 }
-                if answering.load(Ordering::Relaxed) && cli.write_all(&[0x80 | OP_PONG, 0x80, 0, 0, 0, 0]).is_err() {
+                if answering.load(Ordering::Relaxed)
+                    && cli.write_all(&[0x80 | OP_PONG, 0x80, 0, 0, 0, 0]).is_err()
+                {
                     return;
                 }
             }
@@ -480,7 +543,9 @@ mod tests {
             panic!("a peer answering pings was dropped: {r:?}");
         }
         answering.store(false, Ordering::Relaxed);
-        let r = rx.recv_timeout(Duration::from_secs(2)).expect("a peer that stopped answering was kept");
+        let r = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a peer that stopped answering was kept");
         assert!(r.is_err(), "read returned without an error");
         reader.join().unwrap();
         drop(pings);
@@ -493,9 +558,15 @@ mod tests {
     #[test]
     fn accept_times_out() {
         let start = Instant::now();
-        assert!(accept_req("GET / HTTP/1.1\r\n").is_err(), "an unfinished request was accepted");
+        assert!(
+            accept_req("GET / HTTP/1.1\r\n").is_err(),
+            "an unfinished request was accepted"
+        );
         let took = start.elapsed();
-        assert!(took >= HANDSHAKE_TIMEOUT && took <= HANDSHAKE_TIMEOUT + Duration::from_secs(5), "gave up after {took:?}");
+        assert!(
+            took >= HANDSHAKE_TIMEOUT && took <= HANDSHAKE_TIMEOUT + Duration::from_secs(5),
+            "gave up after {took:?}"
+        );
     }
 
     /// The deadline follows the timeout passed in: a request that takes 300 ms
@@ -513,7 +584,10 @@ mod tests {
             t.join().unwrap();
             r
         };
-        assert!(slow(Duration::from_millis(100)).is_err(), "a slow request beat a 100 ms timeout");
+        assert!(
+            slow(Duration::from_millis(100)).is_err(),
+            "a slow request beat a 100 ms timeout"
+        );
         slow(Duration::from_secs(5)).expect("a slow request failed under a 5 s timeout");
     }
 }

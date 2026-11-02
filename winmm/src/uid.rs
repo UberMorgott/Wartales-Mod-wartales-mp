@@ -8,6 +8,8 @@
 
 use ring::digest::{digest, SHA256};
 
+use crate::wsx::hex;
+
 /// The platform characters mpman.UserID.getPlatform@25195 accepts: S = Steam,
 /// W = WServer, R = RelayP2P, X = Session, M = Multi, L = Lobby.
 pub const PF_CHARS: &str = "SWRXML";
@@ -26,11 +28,7 @@ const STEAM_HEX: usize = 16;
 
 /// What mpman.UserID xors into the high dword (UserID.hx:29, :114): the
 /// constant high dword of every player SteamID64.
-const STEAM_XOR: u64 = 0x01100001;
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|b| format!("{b:02x}")).collect()
-}
+const STEAM_XOR: u64 = 0x0110_0001;
 
 /// Maps whatever id a player reports (normally a Steam "S<steamid>") onto a
 /// stable Session id, the same across reconnects and both proxy-link ends.
@@ -90,11 +88,26 @@ mod tests {
     #[test]
     fn is_steam_shapes() {
         // The game strips trailing zeros (UserID.hx:117): a live id is short.
-        for id in ["S9f792402", "S4e61bc", "S0011223344556677", "S0123456789abcdef", "S0123456789ABCDEF", "S1"] {
+        for id in [
+            "S9f792402",
+            "S4e61bc",
+            "S0011223344556677",
+            "S0123456789abcdef",
+            "S0123456789ABCDEF",
+            "S1",
+        ] {
             assert!(is_steam(id), "{id}");
         }
         let minted = mint("S0011223344556677");
-        for id in ["", "S", "S00112233445566778", "X0011223344556677", "Snot-a-steam-id!!", "S9f79240g", &minted] {
+        for id in [
+            "",
+            "S",
+            "S00112233445566778",
+            "X0011223344556677",
+            "Snot-a-steam-id!!",
+            "S9f79240g",
+            &minted,
+        ] {
             assert!(!is_steam(id), "{id}");
         }
     }
@@ -104,21 +117,48 @@ mod tests {
         // Account 12345678 (0x00bc614e): little-endian bytes 4e 61 bc 00, the
         // high dword xors to zero, printed without the trailing zeros.
         let id = "S4e61bc";
-        assert_eq!(steam_id64(id), Some(0x0110000100BC614E));
-        assert_eq!(from_steam_id64(0x0110000100BC614E), id);
-        assert_eq!(steam_id64("S4e61bc0000000000"), Some(0x0110000100BC614E), "padded spelling");
-        assert_eq!(steam_id64("S9f792402"), Some(0x011000010224799f), "live log id");
-        assert_eq!(steam_id64("X4e61bc0000000000"), None, "a Session id has no SteamID64");
-        assert_eq!(steam_id64("S1"), Some(0x0110000100000010), "odd digit count is zero-filled");
-        assert_eq!(steam_id64("S4E61BC"), Some(0x0110000100BC614E), "upper case");
-        assert_eq!(from_steam_id64(0x0170000000000001), "S0100000001006", "non-player high dword");
+        assert_eq!(steam_id64(id), Some(0x0110_0001_00BC_614E));
+        assert_eq!(from_steam_id64(0x0110_0001_00BC_614E), id);
+        assert_eq!(
+            steam_id64("S4e61bc0000000000"),
+            Some(0x0110_0001_00BC_614E),
+            "padded spelling"
+        );
+        assert_eq!(
+            steam_id64("S9f792402"),
+            Some(0x0110_0001_0224_799f),
+            "live log id"
+        );
+        assert_eq!(
+            steam_id64("X4e61bc0000000000"),
+            None,
+            "a Session id has no SteamID64"
+        );
+        assert_eq!(
+            steam_id64("S1"),
+            Some(0x0110_0001_0000_0010),
+            "odd digit count is zero-filled"
+        );
+        assert_eq!(
+            steam_id64("S4E61BC"),
+            Some(0x0110_0001_00BC_614E),
+            "upper case"
+        );
+        assert_eq!(
+            from_steam_id64(0x0170_0000_0000_0001),
+            "S0100000001006",
+            "non-player high dword"
+        );
     }
 
     #[test]
     fn mint_is_session_and_stable() {
         let (a, b) = (mint("S0011223344556677"), mint("S0011223344556677"));
         assert!(a == b && is_session(&a) && !is_steam(&a), "{a} / {b}");
-        assert_eq!(a, "X8e95182f3e823aab2077", "the Go helper's id for the same player");
+        assert_eq!(
+            a, "X8e95182f3e823aab2077",
+            "the Go helper's id for the same player"
+        );
         assert_eq!(ensure(&a), a);
         assert_eq!(ensure("S0011223344556677"), a);
         assert!(!is_session("") && !is_session("X123") && is_session("X1234"));

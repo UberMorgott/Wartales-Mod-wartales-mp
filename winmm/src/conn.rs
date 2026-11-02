@@ -54,7 +54,7 @@ impl Conn for TcpStream {
 pub fn close_tcp(s: &TcpStream) {
     use std::os::windows::io::AsRawSocket;
     let _ = s.shutdown(Shutdown::Both); // already closed is fine
-    // SAFETY: the socket handle stays valid while s is borrowed; CancelIoEx only cancels.
+                                        // SAFETY: the socket handle stays valid while s is borrowed; CancelIoEx only cancels.
     unsafe { windows_sys::Win32::System::IO::CancelIoEx(s.as_raw_socket() as _, std::ptr::null()) };
 }
 
@@ -69,7 +69,7 @@ impl io::Read for Io {
 
 impl io::Write for Io {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write_all(buf).map(|_| buf.len())
+        self.0.write_all(buf).map(|()| buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
@@ -78,7 +78,10 @@ impl io::Write for Io {
 
 /// Is err a read timeout (Go's os.ErrDeadlineExceeded)?
 pub fn is_timeout(err: &io::Error) -> bool {
-    matches!(err.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
+    matches!(
+        err.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
 }
 
 /// An in-memory duplex pair, Go's net.Pipe for tests (buffered, unbounded).
@@ -86,8 +89,16 @@ pub fn pipe() -> (ConnRef, ConnRef) {
     let a = Arc::new(Half::default());
     let b = Arc::new(Half::default());
     (
-        Arc::new(PipeEnd { rx: a.clone(), tx: b.clone(), timeout: Mutex::new(None) }),
-        Arc::new(PipeEnd { rx: b, tx: a, timeout: Mutex::new(None) }),
+        Arc::new(PipeEnd {
+            rx: a.clone(),
+            tx: b.clone(),
+            timeout: Mutex::new(None),
+        }),
+        Arc::new(PipeEnd {
+            rx: b,
+            tx: a,
+            timeout: Mutex::new(None),
+        }),
     )
 }
 

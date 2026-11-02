@@ -45,12 +45,16 @@ pub(super) fn discover_igd(timeout: Duration) -> anyhow::Result<Igd> {
             bail!("upnp: no gateway found: i/o timeout");
         }
         c.set_read_timeout(Some(left))?;
-        let (n, from) = c.recv_from(&mut buf).map_err(|e| anyhow!("upnp: no gateway found: {e}"))?;
+        let (n, from) = c
+            .recv_from(&mut buf)
+            .map_err(|e| anyhow!("upnp: no gateway found: {e}"))?;
         let location = header_value(&String::from_utf8_lossy(&buf[..n]), "location");
         if location.is_empty() {
             continue;
         }
-        let Ok(mut igd) = describe(&location) else { continue };
+        let Ok(mut igd) = describe(&location) else {
+            continue;
+        };
         igd.local_ip = local_ip_towards(from.ip());
         return Ok(igd);
     }
@@ -72,7 +76,11 @@ fn describe(location: &str) -> anyhow::Result<Igd> {
     services(&parse_xml(&body), &mut found);
     for want in IGD_SERVICES {
         if let Some((typ, ctl)) = found.iter().find(|(t, c)| t == want && !c.is_empty()) {
-            return Ok(Igd { control_url: resolve_ref(location, ctl)?, service_type: typ.clone(), local_ip: None });
+            return Ok(Igd {
+                control_url: resolve_ref(location, ctl)?,
+                service_type: typ.clone(),
+                local_ip: None,
+            });
         }
     }
     bail!("upnp: {location} exposes no WAN connection service")
@@ -96,8 +104,16 @@ impl Igd {
              <u:{action} xmlns:u=\"{st}\">{body}</u:{action}>\
              </s:Body></s:Envelope>"
         );
-        let headers = format!("Content-Type: text/xml; charset=\"utf-8\"\r\nSOAPAction: \"{st}#{action}\"\r\n");
-        let (status, out) = http("POST", &self.control_url, &headers, &env, Duration::from_secs(8))?;
+        let headers = format!(
+            "Content-Type: text/xml; charset=\"utf-8\"\r\nSOAPAction: \"{st}#{action}\"\r\n"
+        );
+        let (status, out) = http(
+            "POST",
+            &self.control_url,
+            &headers,
+            &env,
+            Duration::from_secs(8),
+        )?;
         if status.split(' ').next() != Some("200") {
             bail!("upnp: {action} returned {status}");
         }
@@ -115,8 +131,15 @@ impl Igd {
     }
 
     /// Forwards a public TCP port to us.
-    pub(super) fn add_port_mapping(&self, port: u16, description: &str, lease: Duration) -> anyhow::Result<()> {
-        let Some(local) = self.local_ip else { bail!("upnp: local address unknown") };
+    pub(super) fn add_port_mapping(
+        &self,
+        port: u16,
+        description: &str,
+        lease: Duration,
+    ) -> anyhow::Result<()> {
+        let Some(local) = self.local_ip else {
+            bail!("upnp: local address unknown")
+        };
         let body = format!(
             "<NewRemoteHost></NewRemoteHost><NewExternalPort>{port}</NewExternalPort>\
              <NewProtocol>TCP</NewProtocol><NewInternalPort>{port}</NewInternalPort>\
@@ -170,7 +193,11 @@ fn resolve_ref(base: &str, r: &str) -> anyhow::Result<String> {
     } else if r.starts_with('/') {
         format!("http://{host}{r}")
     } else {
-        let dir = path.split('?').next().filter(|d| !d.is_empty()).unwrap_or("/");
+        let dir = path
+            .split('?')
+            .next()
+            .filter(|d| !d.is_empty())
+            .unwrap_or("/");
         format!("http://{host}{}{r}", &dir[..=dir.rfind('/').unwrap_or(0)])
     })
 }
@@ -217,14 +244,26 @@ fn read_n(r: &mut impl Read, n: u64, body: &mut Vec<u8>) -> io::Result<()> {
 
 /// Sends one request on a fresh connection (Connection: close) and returns the
 /// status ("200 OK") and up to 1 MiB of body. headers: extra "K: V\r\n" lines.
-fn http(method: &str, url: &str, headers: &str, body: &str, timeout: Duration) -> anyhow::Result<(String, String)> {
+fn http(
+    method: &str,
+    url: &str,
+    headers: &str,
+    body: &str,
+    timeout: Duration,
+) -> anyhow::Result<(String, String)> {
     let deadline = Instant::now() + timeout;
     let (host, path) = split_url(url)?;
-    let target = if host.ends_with(']') || !host.contains(':') { format!("{host}:80") } else { host.to_string() };
+    let target = if host.ends_with(']') || !host.contains(':') {
+        format!("{host}:80")
+    } else {
+        host.to_string()
+    };
     let mut last = anyhow!("upnp: cannot resolve {host}");
     let mut stream = None;
     for addr in target.to_socket_addrs()? {
-        let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
         match TcpStream::connect_timeout(&addr, left) {
             Ok(s) => {
                 stream = Some(s);
@@ -235,7 +274,11 @@ fn http(method: &str, url: &str, headers: &str, body: &str, timeout: Duration) -
     }
     let mut d = Deadline(stream.ok_or(last)?, deadline);
 
-    let length = if method == "GET" { String::new() } else { format!("Content-Length: {}\r\n", body.len()) };
+    let length = if method == "GET" {
+        String::new()
+    } else {
+        format!("Content-Length: {}\r\n", body.len())
+    };
     let req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n{length}{headers}\r\n{body}");
     d.0.set_write_timeout(Some(d.left()?))?;
     d.0.write_all(req.as_bytes())?;
@@ -254,7 +297,11 @@ fn http(method: &str, url: &str, headers: &str, body: &str, timeout: Duration) -
         }
         if let Some((k, v)) = line.split_once(':') {
             if k.trim().eq_ignore_ascii_case("content-length") {
-                content_length = Some(v.trim().parse::<u64>().map_err(|_| anyhow!("upnp: bad Content-Length {v:?}"))?);
+                content_length = Some(
+                    v.trim()
+                        .parse::<u64>()
+                        .map_err(|_| anyhow!("upnp: bad Content-Length {v:?}"))?,
+                );
             } else if k.trim().eq_ignore_ascii_case("transfer-encoding") {
                 chunked = v.to_ascii_lowercase().contains("chunked");
             }
@@ -266,7 +313,8 @@ fn http(method: &str, url: &str, headers: &str, body: &str, timeout: Duration) -
         while (out.len() as u64) < BODY_LIMIT {
             let line = read_line(&mut r)?;
             let size = line.split(';').next().unwrap_or_default().trim();
-            let size = u64::from_str_radix(size, 16).map_err(|_| anyhow!("upnp: bad chunk size {line:?}"))?;
+            let size = u64::from_str_radix(size, 16)
+                .map_err(|_| anyhow!("upnp: bad chunk size {line:?}"))?;
             if size == 0 {
                 break;
             }
@@ -298,8 +346,6 @@ struct Node {
 /// Parses as much of doc as is well-formed: elements closed before an error or
 /// EOF are kept, unclosed ones dropped (Go's token loop + DecodeElement).
 fn parse_xml(doc: &str) -> Node {
-    let mut r = Reader::from_str(doc);
-    let mut stack = vec![Node::default()];
     // Closes the innermost open element into its parent; the root stays.
     fn close(stack: &mut Vec<Node>) {
         if stack.len() > 1 {
@@ -307,20 +353,28 @@ fn parse_xml(doc: &str) -> Node {
             stack.last_mut().expect("root").kids.push(n);
         }
     }
+    let mut r = Reader::from_str(doc);
+    let mut stack = vec![Node::default()];
     loop {
         let ev = r.read_event();
         let top = stack.last_mut().expect("root stays on the stack");
         match ev {
-            Ok(Event::Start(e)) => {
-                stack.push(Node { name: e.local_name().as_ref().to_string(), ..Default::default() })
-            }
-            Ok(Event::Empty(e)) => top.kids.push(Node { name: e.local_name().as_ref().to_string(), ..Default::default() }),
+            Ok(Event::Start(e)) => stack.push(Node {
+                name: e.local_name().as_ref().to_string(),
+                ..Default::default()
+            }),
+            Ok(Event::Empty(e)) => top.kids.push(Node {
+                name: e.local_name().as_ref().to_string(),
+                ..Default::default()
+            }),
             Ok(Event::End(_)) => close(&mut stack),
             Ok(Event::Text(t)) => top.text.push_str(&t.xml10_content()),
             Ok(Event::CData(t)) => top.text.push_str(&t.xml10_content()),
             Ok(Event::GeneralRef(e)) => match e.resolve_char_ref() {
                 Ok(Some(c)) => top.text.push(c),
-                _ => top.text.push_str(resolve_xml_entity(&e.into_inner()).unwrap_or_default()),
+                _ => top
+                    .text
+                    .push_str(resolve_xml_entity(&e.into_inner()).unwrap_or_default()),
             },
             Ok(Event::Eof) | Err(_) => break,
             Ok(_) => {}
@@ -341,7 +395,13 @@ fn services(n: &Node, out: &mut Vec<(String, String)>) {
             services(k, out);
             continue;
         }
-        let field = |f: &str| k.kids.iter().rev().find(|c| c.name == f).map_or(String::new(), |c| c.text.clone());
+        let field = |f: &str| {
+            k.kids
+                .iter()
+                .rev()
+                .find(|c| c.name == f)
+                .map_or(String::new(), |c| c.text.clone())
+        };
         out.push((field("serviceType"), field("controlURL")));
     }
 }
@@ -376,7 +436,7 @@ mod tests {
             let mut req = Vec::new();
             let mut b = [0u8; 4096];
             while !String::from_utf8_lossy(&req).contains("</s:Envelope>")
-                && !(req.ends_with(b"\r\n\r\n") && req.starts_with(b"GET"))
+                && (!req.ends_with(b"\r\n\r\n") || !req.starts_with(b"GET"))
             {
                 let n = s.read(&mut b).unwrap();
                 assert!(n > 0, "client hung up mid-request");
@@ -412,7 +472,10 @@ mod tests {
         );
         let (base, h) = serve(resp, false);
         let igd = describe(&format!("{base}/dev/desc.xml")).unwrap();
-        assert_eq!(igd.service_type, "urn:schemas-upnp-org:service:WANIPConnection:1");
+        assert_eq!(
+            igd.service_type,
+            "urn:schemas-upnp-org:service:WANIPConnection:1"
+        );
         assert_eq!(igd.control_url, format!("{base}/dev/ctl/ip?a=1&b=2"));
         let req = h.join().unwrap();
         assert!(req.starts_with("GET /dev/desc.xml HTTP/1.1\r\n"), "{req}");
@@ -423,26 +486,57 @@ mod tests {
     fn test_soap_content_length_and_status() {
         let env = "<s:Envelope xmlns:s=\"x\"><s:Body><u:R xmlns:u=\"y\"><NewExternalIPAddress> 45.154.88.66 \
               </NewExternalIPAddress></u:R></s:Body></s:Envelope>";
-        let (base, h) = serve(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{env}", env.len()), false);
-        let igd = Igd { control_url: format!("{base}/ctl"), service_type: IGD_SERVICES[0].into(), local_ip: None };
+        let (base, h) = serve(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{env}",
+                env.len()
+            ),
+            false,
+        );
+        let igd = Igd {
+            control_url: format!("{base}/ctl"),
+            service_type: IGD_SERVICES[0].into(),
+            local_ip: None,
+        };
         assert_eq!(igd.external_ip().unwrap().to_string(), "45.154.88.66");
         let req = h.join().unwrap();
-        assert!(req.contains(&format!("SOAPAction: \"{}#GetExternalIPAddress\"\r\n", IGD_SERVICES[0])), "{req}");
-        assert!(req.contains("<u:GetExternalIPAddress xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\">"));
+        assert!(
+            req.contains(&format!(
+                "SOAPAction: \"{}#GetExternalIPAddress\"\r\n",
+                IGD_SERVICES[0]
+            )),
+            "{req}"
+        );
+        assert!(req.contains(
+            "<u:GetExternalIPAddress xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\">"
+        ));
 
         let (base, h) = serve(b"HTTP/1.1 500 Internal Server Error\r\n\r\n<fault/>", true);
-        let igd = Igd { control_url: format!("{base}/ctl"), service_type: IGD_SERVICES[0].into(), local_ip: None };
+        let igd = Igd {
+            control_url: format!("{base}/ctl"),
+            service_type: IGD_SERVICES[0].into(),
+            local_ip: None,
+        };
         let e = igd.delete_port_mapping(14250).unwrap_err();
-        assert_eq!(e.to_string(), "upnp: DeletePortMapping returned 500 Internal Server Error");
-        assert!(h.join().unwrap().contains("<NewExternalPort>14250</NewExternalPort>"));
-        let e = igd.add_port_mapping(14250, "wartales-mp", Duration::from_secs(7200)).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "upnp: DeletePortMapping returned 500 Internal Server Error"
+        );
+        assert!(h
+            .join()
+            .unwrap()
+            .contains("<NewExternalPort>14250</NewExternalPort>"));
+        let e = igd
+            .add_port_mapping(14250, "wartales-mp", Duration::from_secs(7200))
+            .unwrap_err();
         assert_eq!(e.to_string(), "upnp: local address unknown");
     }
 
     #[test]
     fn test_http_read_to_eof_and_limits() {
         let (base, h) = serve(b"HTTP/1.0 200 OK\r\nServer: x\r\n\r\nall of it", true);
-        let (status, body) = http("GET", &format!("{base}/"), "", "", Duration::from_secs(5)).unwrap();
+        let (status, body) =
+            http("GET", &format!("{base}/"), "", "", Duration::from_secs(5)).unwrap();
         assert_eq!((status.as_str(), body.as_str()), ("200 OK", "all of it"));
         h.join().unwrap();
 
@@ -454,7 +548,14 @@ mod tests {
         // A silent server hits the deadline instead of hanging.
         let (base, h) = serve(b"", false);
         let t = Instant::now();
-        assert!(http("GET", &format!("{base}/"), "", "", Duration::from_millis(300)).is_err());
+        assert!(http(
+            "GET",
+            &format!("{base}/"),
+            "",
+            "",
+            Duration::from_millis(300)
+        )
+        .is_err());
         assert!(t.elapsed() < Duration::from_secs(3));
         h.join().unwrap();
     }
@@ -462,14 +563,30 @@ mod tests {
     #[test]
     fn test_url_helpers() {
         let b = "http://192.168.1.1:5000/rootDesc.xml";
-        assert_eq!(resolve_ref(b, "/ctl/IPConn").unwrap(), "http://192.168.1.1:5000/ctl/IPConn");
-        assert_eq!(resolve_ref(b, "ctl").unwrap(), "http://192.168.1.1:5000/ctl");
-        assert_eq!(resolve_ref(b, "http://10.0.0.1/x").unwrap(), "http://10.0.0.1/x");
-        assert_eq!(resolve_ref(b, "//10.0.0.1:80/y").unwrap(), "http://10.0.0.1:80/y");
-        assert_eq!(resolve_ref("http://h/a/b?q=1/2", "c").unwrap(), "http://h/a/c");
+        assert_eq!(
+            resolve_ref(b, "/ctl/IPConn").unwrap(),
+            "http://192.168.1.1:5000/ctl/IPConn"
+        );
+        assert_eq!(
+            resolve_ref(b, "ctl").unwrap(),
+            "http://192.168.1.1:5000/ctl"
+        );
+        assert_eq!(
+            resolve_ref(b, "http://10.0.0.1/x").unwrap(),
+            "http://10.0.0.1/x"
+        );
+        assert_eq!(
+            resolve_ref(b, "//10.0.0.1:80/y").unwrap(),
+            "http://10.0.0.1:80/y"
+        );
+        assert_eq!(
+            resolve_ref("http://h/a/b?q=1/2", "c").unwrap(),
+            "http://h/a/c"
+        );
         assert_eq!(split_url("HTTP://h:1?x#f").unwrap(), ("h:1", "?x"));
         assert!(split_url("https://h/").is_err());
-        let ssdp = "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLocation:  http://h:1/d.xml \r\n\r\n";
+        let ssdp =
+            "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLocation:  http://h:1/d.xml \r\n\r\n";
         assert_eq!(header_value(ssdp, "location"), "http://h:1/d.xml");
         assert_eq!(header_value(ssdp, "st"), "");
     }

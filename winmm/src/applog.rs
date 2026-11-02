@@ -22,8 +22,7 @@ pub const MAX_VALUE: usize = 512;
 /// %LOCALAPPDATA%\wartales-mp (the temp dir when LOCALAPPDATA is unset).
 pub fn dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .map_or_else(std::env::temp_dir, PathBuf::from)
         .join("wartales-mp")
 }
 
@@ -33,7 +32,7 @@ pub fn dir() -> PathBuf {
 pub fn open() -> Log {
     let dir = dir();
     let path = dir.join(FILE_NAME);
-    let file = fs::create_dir_all(&dir).and_then(|_| {
+    let file = fs::create_dir_all(&dir).and_then(|()| {
         let old = dir.join(format!("{FILE_NAME}.1"));
         let _ = fs::remove_file(&old); // a rename onto an existing name fails on Windows
         let _ = fs::rename(&path, &old);
@@ -42,7 +41,11 @@ pub fn open() -> Log {
     let ok = file.is_ok();
     let file = Mutex::new(file.ok());
     let log = Log::new(move |s| {
-        if let Some(f) = file.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        if let Some(f) = file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
             let _ = f.write_all(format!("{} {}\n", stamp(), s).as_bytes()); // logging never fails the caller
         }
     });
@@ -55,7 +58,11 @@ pub fn open() -> Log {
 /// Appends one line to the log file without holding it open (panic reports
 /// from a thread whose Log is gone).
 pub fn append(s: &str) {
-    if let Ok(mut f) = OpenOptions::new().append(true).create(true).open(dir().join(FILE_NAME)) {
+    if let Ok(mut f) = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(dir().join(FILE_NAME))
+    {
         let _ = f.write_all(format!("{} {}\n", stamp(), s).as_bytes());
     }
 }
@@ -65,7 +72,7 @@ fn stamp() -> String {
     // SAFETY: GetLocalTime only writes the SYSTEMTIME it is given.
     let t = unsafe {
         let mut t = std::mem::zeroed();
-        windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t);
+        windows_sys::Win32::System::SystemInformation::GetLocalTime(&raw mut t);
         t
     };
     format!(
@@ -90,7 +97,10 @@ pub fn trunc(s: &str) -> String {
     while !s.is_char_boundary(end) {
         end -= 1; // never cut a character in half
     }
-    let out: String = s[..end].chars().map(|c| if c < ' ' || c == '\x7f' { ' ' } else { c }).collect();
+    let out: String = s[..end]
+        .chars()
+        .map(|c| if c < ' ' || c == '\x7f' { ' ' } else { c })
+        .collect();
     if s.len() > MAX_VALUE {
         format!("{out}...({}B)", s.len())
     } else {
@@ -101,7 +111,13 @@ pub fn trunc(s: &str) -> String {
 /// The handshake headers in a stable order; x-pass (a password hash) redacted.
 pub fn headers(h: &BTreeMap<String, String>) -> String {
     h.iter()
-        .map(|(k, v)| if k == "x-pass" { format!("{k}=<redacted>") } else { format!("{k}={v}") })
+        .map(|(k, v)| {
+            if k == "x-pass" {
+                format!("{k}=<redacted>")
+            } else {
+                format!("{k}={v}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }

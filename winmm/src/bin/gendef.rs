@@ -25,7 +25,10 @@ fn parse_flags() -> Res<HashMap<String, String>> {
     let mut m = HashMap::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
-        let name = a.strip_prefix("--").or_else(|| a.strip_prefix('-')).ok_or(format!("unexpected argument {a:?}"))?;
+        let name = a
+            .strip_prefix("--")
+            .or_else(|| a.strip_prefix('-'))
+            .ok_or(format!("unexpected argument {a:?}"))?;
         let (name, val) = match name.split_once('=') {
             Some(("list", v)) => match v {
                 "1" | "t" | "T" | "TRUE" | "true" | "True" => ("list".into(), "true".into()),
@@ -34,7 +37,11 @@ fn parse_flags() -> Res<HashMap<String, String>> {
             },
             Some((n, v)) => (n.to_string(), v.to_string()),
             None if name == "list" => (name.to_string(), "true".to_string()),
-            None => (name.to_string(), args.next().ok_or(format!("flag needs an argument: -{name}"))?),
+            None => (
+                name.to_string(),
+                args.next()
+                    .ok_or(format!("flag needs an argument: -{name}"))?,
+            ),
         };
         if !["in", "target", "out", "library", "skip", "stubs", "list"].contains(&name.as_str()) {
             return Err(format!("flag provided but not defined: -{name}"));
@@ -46,7 +53,7 @@ fn parse_flags() -> Res<HashMap<String, String>> {
 
 fn run() -> Res<()> {
     let f = parse_flags()?;
-    let get = |k: &str| f.get(k).map(String::as_str).unwrap_or("");
+    let get = |k: &str| f.get(k).map_or("", String::as_str);
     let (input, out) = (get("in"), get("out"));
     if input.is_empty() {
         return Err("-in is required".into());
@@ -58,12 +65,22 @@ fn run() -> Res<()> {
     if get("list") == "true" {
         return write(out, &listing(&exports));
     }
-    let name = if get("library").is_empty() { base_name(input) } else { get("library") };
+    let name = if get("library").is_empty() {
+        base_name(input)
+    } else {
+        get("library")
+    };
     let skip = split_names(get("skip"));
 
     if !get("stubs").is_empty() {
-        if let Some(e) = exports.iter().find(|e| !skip.contains(e.name.as_str()) && !is_c_ident(&e.name)) {
-            return Err(format!("export {:?} is not a valid C identifier; cannot generate a stub", e.name));
+        if let Some(e) = exports
+            .iter()
+            .find(|e| !skip.contains(e.name.as_str()) && !is_c_ident(&e.name))
+        {
+            return Err(format!(
+                "export {:?} is not a valid C identifier; cannot generate a stub",
+                e.name
+            ));
         }
         write(get("stubs"), &stub_file(&exports, &skip))?;
         return write(out, &alias_def(name, &exports, &skip));
@@ -75,7 +92,10 @@ fn run() -> Res<()> {
 }
 
 fn is_c_ident(s: &str) -> bool {
-    !s.is_empty() && s.bytes().enumerate().all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
+    !s.is_empty()
+        && s.bytes()
+            .enumerate()
+            .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
 }
 
 fn stub_file(exports: &[Export], skip: &HashSet<&str>) -> String {
@@ -84,11 +104,17 @@ fn stub_file(exports: &[Export], skip: &HashSet<&str>) -> String {
     b.push_str("/* per-export tail-call thunks for the winmm proxy; jump through pointers */\n");
     b.push_str("/* the proxy fills from System32\\winmm.dll at load. */\n\n");
     b.push_str("struct mp_export { const char *name; void **slot; };\n\n");
-    let kept: Vec<&Export> = exports.iter().filter(|e| !skip.contains(e.name.as_str())).collect();
+    let kept: Vec<&Export> = exports
+        .iter()
+        .filter(|e| !skip.contains(e.name.as_str()))
+        .collect();
     for e in &kept {
         let n = &e.name;
         let _ = writeln!(b, "void *mpp_{n};");
-        let _ = writeln!(b, "__attribute__((naked)) void mp_{n}(void){{ __asm__(\"jmp *mpp_{n}(%rip)\"); }}");
+        let _ = writeln!(
+            b,
+            "__attribute__((naked)) void mp_{n}(void){{ __asm__(\"jmp *mpp_{n}(%rip)\"); }}"
+        );
     }
     b.push_str("\nconst struct mp_export mp_exports[] = {\n");
     for e in &kept {
@@ -120,19 +146,27 @@ fn def(library: &str, target: &str, exports: &[Export], skip: &HashSet<&str>) ->
 }
 
 fn listing(exports: &[Export]) -> String {
-    exports.iter().map(|e| format!("{}\t{}\n", e.ordinal, e.name)).collect()
+    exports.iter().fold(String::new(), |mut b, e| {
+        let _ = writeln!(b, "{}\t{}", e.ordinal, e.name);
+        b
+    })
 }
 
 fn write(path: &str, text: &str) -> Res<()> {
     if path.is_empty() {
         use std::io::Write;
-        return std::io::stdout().write_all(text.as_bytes()).map_err(|e| e.to_string());
+        return std::io::stdout()
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string());
     }
     std::fs::write(path, text).map_err(|e| format!("open {path}: {e}"))
 }
 
 fn split_names(s: &str) -> HashSet<&str> {
-    s.split(',').map(str::trim).filter(|p| !p.is_empty()).collect()
+    s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 fn base_name(path: &str) -> &str {
@@ -151,11 +185,15 @@ struct Image<'a> {
 }
 
 fn u16_at(b: &[u8], off: usize) -> Res<u16> {
-    b.get(off..off + 2).map(|s| u16::from_le_bytes([s[0], s[1]])).ok_or("truncated PE header".into())
+    b.get(off..off + 2)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
+        .ok_or("truncated PE header".into())
 }
 
 fn u32_at(b: &[u8], off: usize) -> Res<u32> {
-    b.get(off..off + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])).ok_or("truncated PE header".into())
+    b.get(off..off + 4)
+        .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+        .ok_or("truncated PE header".into())
 }
 
 impl Image<'_> {
@@ -165,7 +203,10 @@ impl Image<'_> {
             if rva < va || rva >= va.wrapping_add(vsize) {
                 continue;
             }
-            return data.get((rva - va) as usize..).filter(|d| !d.is_empty()).ok_or(format!("rva {rva:#x} past raw data"));
+            return data
+                .get((rva - va) as usize..)
+                .filter(|d| !d.is_empty())
+                .ok_or(format!("rva {rva:#x} past raw data"));
         }
         Err(format!("rva {rva:#x} is in no section"))
     }
@@ -177,8 +218,12 @@ impl Image<'_> {
     }
     fn cstring(&self, rva: u32) -> Res<String> {
         let b = self.at(rva)?;
-        let end = b.iter().position(|&c| c == 0).ok_or(format!("unterminated string at rva {rva:#x}"))?;
-        String::from_utf8(b[..end].to_vec()).map_err(|_| format!("non-UTF-8 export name at rva {rva:#x}"))
+        let end = b
+            .iter()
+            .position(|&c| c == 0)
+            .ok_or(format!("unterminated string at rva {rva:#x}"))?;
+        String::from_utf8(b[..end].to_vec())
+            .map_err(|_| format!("non-UTF-8 export name at rva {rva:#x}"))
     }
 }
 
@@ -218,8 +263,14 @@ fn read_exports(path: &str) -> Res<Vec<Export>> {
         let (vsize, sva) = (u32_at(f, s + 8)?, u32_at(f, s + 12)?);
         let (raw_size, raw_ptr) = (u32_at(f, s + 16)? as usize, u32_at(f, s + 20)? as usize);
         // No raw data (PointerToRawData 0) = uninitialized section, as debug/pe.
-        let raw = if raw_ptr == 0 { 0..0 } else { raw_ptr..raw_ptr + raw_size };
-        let data = f.get(raw).ok_or(format!("{path}: section {i} past end of file"))?;
+        let raw = if raw_ptr == 0 {
+            0..0
+        } else {
+            raw_ptr..raw_ptr + raw_size
+        };
+        let data = f
+            .get(raw)
+            .ok_or(format!("{path}: section {i} past end of file"))?;
         sections.push((sva, vsize, data));
     }
     if sections.is_empty() {
@@ -234,7 +285,10 @@ fn read_exports(path: &str) -> Res<Vec<Export>> {
     for i in 0..name_count {
         let name = m.cstring(m.u32(names_rva + i * 4)?)?;
         let ord = m.u16(ords_rva + i * 2)?;
-        out.push(Export { name, ordinal: base + ord as u32 });
+        out.push(Export {
+            name,
+            ordinal: base + u32::from(ord),
+        });
     }
     out.sort_by_key(|e| e.ordinal);
     Ok(out)

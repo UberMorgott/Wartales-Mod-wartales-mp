@@ -47,15 +47,25 @@ const HELLO_UID: i64 = 1;
 pub struct Envelope {
     #[serde(default, deserialize_with = "null_default")]
     pub uid: i64,
-    #[serde(default, skip_serializing_if = "String::is_empty", deserialize_with = "null_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "null_default"
+    )]
     pub cmd: String,
     /// Raw JSON; `null` is kept as Some (Go's json.RawMessage), only absent is None.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "raw_keep_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "raw_keep_null"
+    )]
     pub args: Option<Box<RawValue>>,
 }
 
 /// null leaves the zero value, as Go's Unmarshal does.
-fn null_default<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
+fn null_default<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(
+    d: D,
+) -> Result<T, D::Error> {
     Option::<T>::deserialize(d).map(Option::unwrap_or_default)
 }
 
@@ -84,6 +94,10 @@ pub struct User {
     pub r#mod: Option<Info>,
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if passes &T"
+)]
 fn is_zero(k: &u32) -> bool {
     *k == 0
 }
@@ -153,7 +167,14 @@ impl Peer {
     pub fn push(&self, cmd: &str, args: &impl Serialize) {
         let Ok(raw) = to_raw_value(args) else { return };
         let n = self.push_uid.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = send(&self.out, &Envelope { uid: n, cmd: cmd.into(), args: Some(raw) });
+        let _ = send(
+            &self.out,
+            &Envelope {
+                uid: n,
+                cmd: cmd.into(),
+                args: Some(raw),
+            },
+        );
     }
 }
 
@@ -163,7 +184,7 @@ impl Peer {
 /// with its text. h answers each forwarded command; on_close runs once a
 /// vetted peer's link ends.
 pub fn serve(
-    c: ConnRef,
+    c: &ConnRef,
     sdr: bool,
     accept: impl FnOnce(&User) -> anyhow::Result<()>,
     h: impl FnMut(&str, Option<&RawValue>, &Arc<Peer>) -> anyhow::Result<Box<RawValue>>,
@@ -175,7 +196,7 @@ pub fn serve(
 }
 
 fn serve_link(
-    c: ConnRef,
+    c: &ConnRef,
     sdr: bool,
     out: &Queue,
     accept: impl FnOnce(&User) -> anyhow::Result<()>,
@@ -203,11 +224,19 @@ fn serve_link(
         Ok(e) if !expired && e.cmd == "link/hello" => e,
         _ => return,
     };
-    let Ok(mut u) = serde_json::from_str::<User>(first.args.as_ref().map_or("null", |a| a.get())) else {
+    let Ok(mut u) = serde_json::from_str::<User>(first.args.as_ref().map_or("null", |a| a.get()))
+    else {
         return;
     };
     if let Err(e) = accept(&u) {
-        let _ = send(out, &Envelope { uid: first.uid.wrapping_neg(), cmd: "err".into(), args: Some(raw_str(&format!("{e:#}"))) });
+        let _ = send(
+            out,
+            &Envelope {
+                uid: first.uid.wrapping_neg(),
+                cmd: "err".into(),
+                args: Some(raw_str(&format!("{e:#}"))),
+            },
+        );
         return;
     }
     // The guest announces itself, so its ids are not trusted as given: the
@@ -219,20 +248,34 @@ fn serve_link(
     if !uid::is_steam(&u.steam) {
         u.steam.clear();
     }
-    let peer = Arc::new(Peer { user: u, out: out.clone(), sdr, push_uid: AtomicI64::new(0) });
+    let peer = Arc::new(Peer {
+        user: u,
+        out: out.clone(),
+        sdr,
+        push_uid: AtomicI64::new(0),
+    });
 
     while let Ok(e) = read_envelope(&mut br, MAX_LINE) {
         if e.uid <= 0 {
             continue; // a reply to one of our pushes; nothing to do
         }
         // A panicking handler fails its command, not the link (Go would crash the process).
-        let result = catch_unwind(AssertUnwindSafe(|| h(&e.cmd, e.args.as_deref(), &peer))).unwrap_or_else(|_| {
-            crate::applog::append(&format!("link: handler for {} panicked", e.cmd));
-            Err(anyhow!("link: {} failed", e.cmd))
-        });
+        let result = catch_unwind(AssertUnwindSafe(|| h(&e.cmd, e.args.as_deref(), &peer)))
+            .unwrap_or_else(|_| {
+                crate::applog::append(&format!("link: handler for {} panicked", e.cmd));
+                Err(anyhow!("link: {} failed", e.cmd))
+            });
         let reply = match result {
-            Ok(raw) => Envelope { uid: -e.uid, cmd: String::new(), args: Some(raw) },
-            Err(err) => Envelope { uid: -e.uid, cmd: "err".into(), args: Some(raw_str(&format!("{err:#}"))) },
+            Ok(raw) => Envelope {
+                uid: -e.uid,
+                cmd: String::new(),
+                args: Some(raw),
+            },
+            Err(err) => Envelope {
+                uid: -e.uid,
+                cmd: "err".into(),
+                args: Some(raw_str(&format!("{err:#}"))),
+            },
         };
         let _ = send(out, &reply);
     }
@@ -282,25 +325,40 @@ pub fn dial_conn(
     mut on_push: impl FnMut(&str, Option<Box<RawValue>>) + Send + 'static,
     on_close: impl FnOnce() + Send + 'static,
 ) -> io::Result<Arc<Client>> {
-    let st = ClientState { uid: HELLO_UID, ..Default::default() };
-    let cl = Arc::new(Client { out: Queue::new(c.clone(), SEND_BUDGET), st: Mutex::new(st) });
+    let st = ClientState {
+        uid: HELLO_UID,
+        ..Default::default()
+    };
+    let cl = Arc::new(Client {
+        out: Queue::new(c.clone(), SEND_BUDGET),
+        st: Mutex::new(st),
+    });
 
     let hello = to_raw_value(u).map_err(io::Error::other)?;
-    if let Err(e) = send(&cl.out, &Envelope { uid: HELLO_UID, cmd: "link/hello".into(), args: Some(hello) }) {
+    if let Err(e) = send(
+        &cl.out,
+        &Envelope {
+            uid: HELLO_UID,
+            cmd: "link/hello".into(),
+            args: Some(hello),
+        },
+    ) {
         c.close(); // the hello already failed; report that error, not this one
         return Err(e);
     }
 
     let reader = cl.clone();
-    let spawned = std::thread::Builder::new().name("link-client".into()).spawn(move || {
-        let cl = reader;
-        let read = catch_unwind(AssertUnwindSafe(|| cl.read_loop(c, &mut on_push)));
-        if read.is_err() {
-            crate::applog::append("link: client reader thread panicked");
-        }
-        cl.shutdown(); // before on_close, so a call from it already sees the link closed
-        on_close();
-    });
+    let spawned = std::thread::Builder::new()
+        .name("link-client".into())
+        .spawn(move || {
+            let cl = reader;
+            let read = catch_unwind(AssertUnwindSafe(|| cl.read_loop(c, &mut on_push)));
+            if read.is_err() {
+                crate::applog::append("link: client reader thread panicked");
+            }
+            cl.shutdown(); // before on_close, so a call from it already sees the link closed
+            on_close();
+        });
     if let Err(e) = spawned {
         cl.close();
         return Err(e);
@@ -325,7 +383,7 @@ impl Client {
             };
             if e.uid < 0 {
                 let id = e.uid.wrapping_neg();
-            if id == HELLO_UID && e.cmd == "err" {
+                if id == HELLO_UID && e.cmd == "err" {
                     // The host refused our hello: remember why, then end.
                     self.st.lock().unwrap().refused = err_text(e.args.as_deref());
                     return;
@@ -340,7 +398,14 @@ impl Client {
                 on_push(&e.cmd, e.args);
             }
             // answer the push so the host's side stays symmetric with the game
-            let _ = send(&self.out, &Envelope { uid: -e.uid, cmd: String::new(), args: Some(raw_str_true()) });
+            let _ = send(
+                &self.out,
+                &Envelope {
+                    uid: -e.uid,
+                    cmd: String::new(),
+                    args: Some(raw_str_true()),
+                },
+            );
         }
     }
 
@@ -350,7 +415,11 @@ impl Client {
     }
 
     /// Forwards a command to the host's master and waits for its reply.
-    pub fn call(&self, cmd: &str, args: Option<Box<RawValue>>) -> anyhow::Result<Option<Box<RawValue>>> {
+    pub fn call(
+        &self,
+        cmd: &str,
+        args: Option<Box<RawValue>>,
+    ) -> anyhow::Result<Option<Box<RawValue>>> {
         let (tx, rx) = mpsc::sync_channel(1);
         let (n, timeout) = {
             let mut st = self.st.lock().unwrap();
@@ -360,9 +429,23 @@ impl Client {
             st.uid += 1;
             let n = st.uid;
             st.pending.insert(n, tx);
-            (n,if st.call_timeout.is_zero() { CALL_TIMEOUT } else { st.call_timeout })
+            (
+                n,
+                if st.call_timeout.is_zero() {
+                    CALL_TIMEOUT
+                } else {
+                    st.call_timeout
+                },
+            )
         };
-        if let Err(e) = send(&self.out, &Envelope { uid: n, cmd: cmd.into(), args }) {
+        if let Err(e) = send(
+            &self.out,
+            &Envelope {
+                uid: n,
+                cmd: cmd.into(),
+                args,
+            },
+        ) {
             self.st.lock().unwrap().pending.remove(&n);
             return Err(e.into());
         }
@@ -425,6 +508,10 @@ mod tests {
     use crate::conn::pipe;
     use std::time::Instant;
 
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the handler type returns a Result"
+    )]
     fn no_handler(_: &str, _: Option<&RawValue>, _: &Arc<Peer>) -> anyhow::Result<Box<RawValue>> {
         Ok(RawValue::from_string("null".into()).unwrap())
     }
@@ -437,7 +524,7 @@ mod tests {
         let start = Instant::now();
         let (done_tx, done) = mpsc::channel();
         let t = std::thread::spawn(move || {
-            serve(srv, false, |_| Ok(()), no_handler, |_| {});
+            serve(&srv, false, |_| Ok(()), no_handler, |_| {});
             let _ = done_tx.send(());
         });
         done.recv_timeout(HELLO_TIMEOUT + Duration::from_secs(5))
@@ -450,13 +537,19 @@ mod tests {
     #[test]
     fn serve_refuses_an_oversized_hello() {
         let took = run_serve(&"a".repeat(2 * MAX_HELLO));
-        assert!(took < HELLO_TIMEOUT, "took {took:?}: the oversized hello was not refused as it arrived");
+        assert!(
+            took < HELLO_TIMEOUT,
+            "took {took:?}: the oversized hello was not refused as it arrived"
+        );
     }
 
     #[test]
     fn serve_drops_a_silent_guest() {
         let took = run_serve(r#"{"uid":1,"cmd":"link/hel"#);
-        assert!(took >= HELLO_TIMEOUT, "gave up after {took:?}, before HELLO_TIMEOUT");
+        assert!(
+            took >= HELLO_TIMEOUT,
+            "gave up after {took:?}, before HELLO_TIMEOUT"
+        );
     }
 
     #[test]
@@ -466,7 +559,10 @@ mod tests {
         cli.write_all(format!("{big}{big}").as_bytes()).unwrap();
         let mut br = BufReader::new(Io(srv));
         read_envelope(&mut br, big.len()).expect("a line at the limit");
-        assert!(read_envelope(&mut br, big.len() - 1).is_err(), "a line over the limit was read");
+        assert!(
+            read_envelope(&mut br, big.len() - 1).is_err(),
+            "a line over the limit was read"
+        );
     }
 
     // Not in Go: a silent host times a call out; close wakes a waiting call; null err text.
@@ -484,9 +580,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         cl.close();
         assert_eq!(waiter.join().unwrap(), "link: connection closed");
-        assert_eq!(err_text(Some(&RawValue::from_string("null".into()).unwrap())), "");
+        assert_eq!(
+            err_text(Some(&RawValue::from_string("null".into()).unwrap())),
+            ""
+        );
         let e: Envelope = serde_json::from_str(r#"{"uid":null,"cmd":null,"args":null}"#).unwrap();
-        assert_eq!((e.uid, e.cmd.as_str(), e.args.unwrap().get()), (0, "", "null"));
+        assert_eq!(
+            (e.uid, e.cmd.as_str(), e.args.unwrap().get()),
+            (0, "", "null")
+        );
     }
 
     // Not in Go: hello, call/reply, err reply, push, refusal, and the threads ending.
@@ -497,11 +599,19 @@ mod tests {
         let (closed_tx, closed) = mpsc::channel();
         let srv = std::thread::spawn(move || {
             serve(
-                host,
+                &host,
                 true,
-                |u| if u.key == 7 { Ok(()) } else { Err(anyhow!("Invalid join code")) },
+                |u| {
+                    if u.key == 7 {
+                        Ok(())
+                    } else {
+                        Err(anyhow!("Invalid join code"))
+                    }
+                },
                 |cmd, args, p| {
-                    assert!(p.over_sdr() && uid::is_session(p.user_id()) && p.steam_id().is_empty());
+                    assert!(
+                        p.over_sdr() && uid::is_session(p.user_id()) && p.steam_id().is_empty()
+                    );
                     p.push("lobby/chat", &"hi");
                     match cmd {
                         "echo" => Ok(args.unwrap().to_owned()),
@@ -509,33 +619,74 @@ mod tests {
                     }
                 },
                 |p| assert_eq!(p.name(), "G"),
-            )
+            );
         });
-        let u = User { id: "S123".into(), name: "G".into(), steam: "bad".into(), key: 7, ..Default::default() };
+        let u = User {
+            id: "S123".into(),
+            name: "G".into(),
+            steam: "bad".into(),
+            key: 7,
+            ..Default::default()
+        };
         let got = pushes.clone();
-        let cl = dial_conn(guest.clone(), &u, move |c, a| got.lock().unwrap().push(format!("{c} {}", a.unwrap())), move || {
-            let _ = closed_tx.send(());
-        })
+        let cl = dial_conn(
+            guest.clone(),
+            &u,
+            move |c, a| got.lock().unwrap().push(format!("{c} {}", a.unwrap())),
+            move || {
+                let _ = closed_tx.send(());
+            },
+        )
         .unwrap();
-        let r = cl.call("echo", Some(RawValue::from_string(r#"{"a":1}"#.into()).unwrap())).unwrap();
+        let r = cl
+            .call(
+                "echo",
+                Some(RawValue::from_string(r#"{"a":1}"#.into()).unwrap()),
+            )
+            .unwrap();
         assert_eq!(r.unwrap().get(), r#"{"a":1}"#);
-        assert_eq!(cl.call("nope", None).unwrap_err().to_string(), "no such cmd");
-        assert_eq!(*pushes.lock().unwrap(), vec![r#"lobby/chat "hi""#, r#"lobby/chat "hi""#]);
+        assert_eq!(
+            cl.call("nope", None).unwrap_err().to_string(),
+            "no such cmd"
+        );
+        assert_eq!(
+            *pushes.lock().unwrap(),
+            vec![r#"lobby/chat "hi""#, r#"lobby/chat "hi""#]
+        );
         cl.close();
         closed.recv_timeout(Duration::from_secs(5)).unwrap();
         srv.join().unwrap();
-        assert_eq!(cl.call("x", None).unwrap_err().to_string(), "link: connection closed");
+        assert_eq!(
+            cl.call("x", None).unwrap_err().to_string(),
+            "link: connection closed"
+        );
 
         // a wrong key: the refusal reaches the guest's next call
         let (host, guest) = pipe();
-        let srv = std::thread::spawn(move || serve(host, false, |_| Err(anyhow!("Invalid join code")), no_handler, |_| {}));
+        let srv = std::thread::spawn(move || {
+            serve(
+                &host,
+                false,
+                |_| Err(anyhow!("Invalid join code")),
+                no_handler,
+                |_| {},
+            );
+        });
         let (closed_tx, closed) = mpsc::channel();
-        let cl = dial_conn(guest, &u, |_, _| {}, move || {
-            let _ = closed_tx.send(());
-        })
+        let cl = dial_conn(
+            guest,
+            &u,
+            |_, _| {},
+            move || {
+                let _ = closed_tx.send(());
+            },
+        )
         .unwrap();
         closed.recv_timeout(Duration::from_secs(5)).unwrap();
         srv.join().unwrap();
-        assert_eq!(cl.call("x", None).unwrap_err().to_string(), "link: host refused the connection: Invalid join code");
+        assert_eq!(
+            cl.call("x", None).unwrap_err().to_string(),
+            "link: host refused the connection: Invalid join code"
+        );
     }
 }

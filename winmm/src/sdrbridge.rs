@@ -90,7 +90,10 @@ pub struct Status {
 pub fn read_status(path: &std::path::Path) -> Status {
     match std::fs::read(path) {
         Ok(b) => parse_status(&String::from_utf8_lossy(&b)),
-        Err(e) => Status { reason: format!("shim has not reported yet ({e})"), ..Status::default() },
+        Err(e) => Status {
+            reason: format!("shim has not reported yet ({e})"),
+            ..Status::default()
+        },
     }
 }
 
@@ -98,12 +101,19 @@ pub fn read_status(path: &std::path::Path) -> Status {
 pub fn parse_status(text: &str) -> Status {
     let text = text.trim();
     if text.is_empty() {
-        return Status { reason: "empty status".into(), ..Status::default() };
+        return Status {
+            reason: "empty status".into(),
+            ..Status::default()
+        };
     }
     let (verdict, rest) = text.split_once(' ').unwrap_or((text, ""));
     match verdict {
         "ok" => {
-            let mut st = Status { known: true, ok: true, ..Status::default() };
+            let mut st = Status {
+                known: true,
+                ok: true,
+                ..Status::default()
+            };
             for f in rest.split_whitespace() {
                 let (k, v) = f.split_once('=').unwrap_or((f, ""));
                 match k {
@@ -117,9 +127,20 @@ pub fn parse_status(text: &str) -> Status {
             }
             st
         }
-        "unavailable" => Status { known: true, reason: rest.into(), ..Status::default() },
-        "pending" => Status { reason: rest.into(), ..Status::default() },
-        _ => Status { known: true, reason: format!("unrecognised status {}", text.replace('\u{FFFD}', "?")), ..Status::default() },
+        "unavailable" => Status {
+            known: true,
+            reason: rest.into(),
+            ..Status::default()
+        },
+        "pending" => Status {
+            reason: rest.into(),
+            ..Status::default()
+        },
+        _ => Status {
+            known: true,
+            reason: format!("unrecognised status {}", text.replace('\u{FFFD}', "?")),
+            ..Status::default()
+        },
     }
 }
 
@@ -218,7 +239,10 @@ impl Bridge {
         while !stop.load(Ordering::SeqCst) {
             let woke = {
                 let w = self.lobby_wake.lock().unwrap();
-                let (mut w, _) = self.lobby_cv.wait_timeout_while(w, Duration::from_millis(50), |w| !*w).unwrap();
+                let (mut w, _) = self
+                    .lobby_cv
+                    .wait_timeout_while(w, Duration::from_millis(50), |w| !*w)
+                    .unwrap();
                 std::mem::replace(&mut *w, false)
             };
             if woke {
@@ -254,7 +278,10 @@ impl Bridge {
         } else if st.known && !st.ok {
             (false, format!("SDR unavailable: {}", st.reason))
         } else if st.ok {
-            (false, format!("SDR bridge at {} not connected yet", st.bridge))
+            (
+                false,
+                format!("SDR bridge at {} not connected yet", st.bridge),
+            )
         } else {
             (false, format!("SDR still initialising: {}", st.reason))
         }
@@ -282,7 +309,7 @@ impl Bridge {
                     sleep(stop, Duration::from_millis(500));
                     continue;
                 }
-                if let Err(e) = self.session(stop, st) {
+                if let Err(e) = self.session(stop, &st) {
                     logf!(self.log, "sdr-bridge: {e}");
                 }
                 logged.clear();
@@ -292,10 +319,13 @@ impl Bridge {
     }
 
     /// Runs one connection to the shim.
-    fn session(&self, stop: &AtomicBool, st: Status) -> Result<(), String> {
-        let reach = |e: &dyn std::fmt::Display| format!("cannot reach the shim's bridge at {}: {e}", st.bridge);
+    fn session(&self, stop: &AtomicBool, st: &Status) -> Result<(), String> {
+        let reach = |e: &dyn std::fmt::Display| {
+            format!("cannot reach the shim's bridge at {}: {e}", st.bridge)
+        };
         let addr: SocketAddr = st.bridge.parse().map_err(|e| reach(&e))?;
-        let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).map_err(|e| reach(&e))?;
+        let tcp =
+            TcpStream::connect_timeout(&addr, Duration::from_secs(3)).map_err(|e| reach(&e))?;
         let c: ConnRef = Arc::new(tcp);
         if let Err(e) = write_frame(&*c, FR_AUTH, 0, st.token.as_bytes()) {
             c.close();
@@ -310,7 +340,11 @@ impl Bridge {
             }
         }
         self.wake_lobby();
-        logf!(self.log, "sdr-bridge: connected to the shim at {}, relaying on SDR channel {CHANNEL}", st.bridge);
+        logf!(
+            self.log,
+            "sdr-bridge: connected to the shim at {}, relaying on SDR channel {CHANNEL}",
+            st.bridge
+        );
 
         let err = self.read_loop(&c);
 
@@ -326,7 +360,10 @@ impl Bridge {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
         }
-        Err(format!("connection to the shim ended: {err} ({} stream(s) dropped)", peers.len()))
+        Err(format!(
+            "connection to the shim ended: {err} ({} stream(s) dropped)",
+            peers.len()
+        ))
     }
 
     fn read_loop(&self, c: &ConnRef) -> io::Error {
@@ -350,13 +387,19 @@ impl Bridge {
                 FR_RECV => self.deliver(peer, payload),
                 FR_ERR => {
                     let text = String::from_utf8_lossy(&payload);
-                    logf!(self.log, "sdr-bridge: send to {peer} refused by Steam: {text}");
+                    logf!(
+                        self.log,
+                        "sdr-bridge: send to {peer} refused by Steam: {text}"
+                    );
                     let p = self.mu.lock().unwrap().peers.get(&peer).cloned();
                     if let Some(p) = p {
                         p.remote_closed(End::Err(ErrorKind::Other, format!("SDR: {text}")));
                     }
                 }
-                _ => logf!(self.log, "sdr-bridge: unexpected frame type {typ} from the shim, ignored"),
+                _ => logf!(
+                    self.log,
+                    "sdr-bridge: unexpected frame type {typ} from the shim, ignored"
+                ),
             }
         }
     }
@@ -368,27 +411,27 @@ impl Bridge {
         }
         let op = payload[0];
         let mut s = self.mu.lock().unwrap();
-        let p = match s.peers.get(&peer).cloned() {
-            Some(p) => {
+        let p = if let Some(p) = s.peers.get(&peer).cloned() {
+            drop(s);
+            p
+        } else {
+            let on_peer = if let (Some(f), OP_DATA) = (&s.on_peer, op) {
+                f.clone()
+            } else {
                 drop(s);
-                p
-            }
-            None => {
-                let on_peer = match (&s.on_peer, op) {
-                    (Some(f), OP_DATA) => f.clone(),
-                    _ => {
-                        drop(s);
-                        logf!(self.log, "sdr-bridge: {} bytes from unknown peer {peer} dropped", payload.len() - 1);
-                        return;
-                    }
-                };
-                let p = self.new_peer(&mut s, peer);
-                drop(s);
-                logf!(self.log, "sdr-bridge: incoming stream from {peer}");
-                let (c, log): (ConnRef, Log) = (p.clone(), self.log.clone());
-                std::thread::spawn(move || guard(&log, "OnPeer", || on_peer(c, peer)));
-                p
-            }
+                logf!(
+                    self.log,
+                    "sdr-bridge: {} bytes from unknown peer {peer} dropped",
+                    payload.len() - 1
+                );
+                return;
+            };
+            let p = self.new_peer(&mut s, peer);
+            drop(s);
+            logf!(self.log, "sdr-bridge: incoming stream from {peer}");
+            let (c, log): (ConnRef, Log) = (p.clone(), self.log.clone());
+            std::thread::spawn(move || guard(&log, "OnPeer", || on_peer(c, peer)));
+            p
         };
         if op == OP_FIN {
             self.forget(peer, &p);
@@ -412,7 +455,10 @@ impl Bridge {
         // FIN and the subsequent data use the same reliable, ordered channel.
         let old = self.mu.lock().unwrap().peers.remove(&peer);
         if let Some(old) = old {
-            old.remote_closed(End::Err(ErrorKind::Other, "replaced by a new stream".into()));
+            old.remote_closed(End::Err(
+                ErrorKind::Other,
+                "replaced by a new stream".into(),
+            ));
         }
         self.send(peer, &[OP_FIN])?;
         let mut s = self.mu.lock().unwrap();
@@ -423,8 +469,13 @@ impl Bridge {
     fn new_peer(&self, s: &mut State, peer: u64) -> Arc<Peer> {
         let p = Arc::new(Peer {
             b: self.me.upgrade().expect("bridge alive while in use"),
-            peer,
-            st: Mutex::new(PeerState { q: VecDeque::new(), rest: Vec::new(), off: 0, end: None }),
+            id: peer,
+            st: Mutex::new(PeerState {
+                q: VecDeque::new(),
+                rest: Vec::new(),
+                off: 0,
+                end: None,
+            }),
             cv: Condvar::new(),
         });
         s.peers.insert(peer, p.clone());
@@ -433,7 +484,10 @@ impl Bridge {
 
     fn forget(&self, peer: u64, p: &Peer) {
         let mut s = self.mu.lock().unwrap();
-        if s.peers.get(&peer).is_some_and(|q| std::ptr::eq(&**q, p)) {
+        if s.peers
+            .get(&peer)
+            .is_some_and(|q| std::ptr::eq(&raw const **q, p))
+        {
             s.peers.remove(&peer);
         }
     }
@@ -449,7 +503,11 @@ fn write_frame(w: &dyn Conn, typ: u8, peer: u64, payload: &[u8]) -> io::Result<(
     let mut buf = Vec::with_capacity(FRAME_HEAD + payload.len());
     buf.push(typ);
     buf.extend_from_slice(&peer.to_le_bytes());
-    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // bounded by MAX_FRAME at every call site
+    buf.extend_from_slice(
+        &u32::try_from(payload.len())
+            .map_err(io::Error::other)?
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(payload);
     w.write_all(&buf)
 }
@@ -464,8 +522,15 @@ fn sleep(stop: &AtomicBool, d: Duration) {
 /// Runs a thread body; a panic is logged instead of killing the game.
 fn guard(log: &Log, what: &str, f: impl FnOnce()) {
     if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
-        logf!(log, "sdr-bridge: {what} panicked: {}", msg.unwrap_or_default());
+        let msg = p
+            .downcast_ref::<&str>()
+            .map(std::string::ToString::to_string)
+            .or_else(|| p.downcast_ref::<String>().cloned());
+        logf!(
+            log,
+            "sdr-bridge: {what} panicked: {}",
+            msg.unwrap_or_default()
+        );
     }
 }
 
@@ -477,7 +542,7 @@ struct Peer {
     // shortcut: Bridge->peers->Peer->Bridge cycle; harmless for the one
     // process-lifetime bridge, use Weak if bridges are ever created per session.
     b: Arc<Bridge>,
-    peer: u64,
+    id: u64,
     st: Mutex<PeerState>,
     cv: Condvar,
 }
@@ -510,8 +575,12 @@ impl Peer {
         drop(st);
         // The reader is not keeping up; a proxy-link never legitimately
         // queues 256 frames, so this is a runaway peer.
-        logf!(self.b.log, "sdr-bridge: stream from {} overflowed, closing it", self.peer);
-        self.b.forget(self.peer, self);
+        logf!(
+            self.b.log,
+            "sdr-bridge: stream from {} overflowed, closing it",
+            self.id
+        );
+        self.b.forget(self.id, self);
         self.remote_closed(End::Err(ErrorKind::Other, "stream overflow".into()));
     }
 
@@ -556,13 +625,16 @@ impl Conn for Peer {
                 End::Eof => "EOF".to_string(),
                 End::Err(_, m) => m.clone(),
             };
-            return Err(io::Error::new(ErrorKind::BrokenPipe, format!("sdr stream to {} closed: {why}", self.peer)));
+            return Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                format!("sdr stream to {} closed: {why}", self.id),
+            ));
         }
         for chunk in data.chunks(MAX_CHUNK) {
             let mut msg = Vec::with_capacity(1 + chunk.len());
             msg.push(OP_DATA);
             msg.extend_from_slice(chunk);
-            self.b.send(self.peer, &msg)?;
+            self.b.send(self.id, &msg)?;
         }
         Ok(())
     }
@@ -578,9 +650,12 @@ impl Conn for Peer {
     /// Ends the stream from our side and tells the peer.
     fn close(&self) {
         let _w = self.b.wmu.lock().unwrap();
-        self.b.forget(self.peer, self);
-        if self.remote_closed(End::Err(ErrorKind::NotConnected, "use of closed network connection".into())) {
-            let _ = self.b.send(self.peer, &[OP_FIN]);
+        self.b.forget(self.id, self);
+        if self.remote_closed(End::Err(
+            ErrorKind::NotConnected,
+            "use of closed network connection".into(),
+        )) {
+            let _ = self.b.send(self.id, &[OP_FIN]);
         }
     }
 }
