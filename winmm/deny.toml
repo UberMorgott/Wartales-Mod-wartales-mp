@@ -9,7 +9,7 @@ ignore = []
 
 [licenses]
 # Exactly the licenses our dependency tree uses; CC-BY-NC-4.0 = our own crates (winmm, patcher).
-allow = ["Apache-2.0", "BSD-3-Clause", "CC-BY-NC-4.0", "ISC", "MIT", "Unicode-3.0", "Unlicense"]
+allow = ["Apache-2.0", "CC-BY-NC-4.0", "MIT", "Unicode-3.0", "Unlicense"]
 confidence-threshold = 0.8
 
 [bans]
