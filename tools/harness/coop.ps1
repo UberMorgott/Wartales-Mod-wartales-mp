@@ -1,9 +1,9 @@
 # Local co-op harness driver (docs/coop-harness-plan.md, slice 1).
 #
 # Runs the harness game copies D:\WartalesTest\{A,B} (tools\harness\setup.ps1)
-# side by side with the TEST winmm.dll (shim\build.ps1 -Test): A is harness
+# side by side with the TEST winmm.dll (tools\build.ps1 -Test): A is harness
 # instance 1, B instance 2. Each gets its own LOCALAPPDATA under the run folder,
-# so shim.log, wartales-mp.log, the helper exe and the command channel are
+# so shim.log, wartales-mp.log and the command channel are
 # per instance and land in the run folder by themselves.
 #
 #   coop.ps1 start   [-Inst A,B] [-Keep]  new run folder (-Keep: the current one,
@@ -30,13 +30,12 @@
 #   coop.ps1 place   [-Inst A,B] [-W 852 -H 480]  windows side by side
 #   coop.ps1 close   -Inst B              WM_CLOSE (Alt+F4, soft)
 #   coop.ps1 kill    -Inst B              TerminateProcess (crash)
-#   coop.ps1 freeze  -Inst B              NtSuspendProcess: the game stops answering (a stalled
-#                                          guest; its helper and connection stay up); thaw resumes it
+#   coop.ps1 freeze  -Inst B              NtSuspendProcess: the game and its in-process network side
+#                                          stop answering (a hung PC; the OS keeps its sockets open); thaw resumes it
 #   coop.ps1 stop                          close all harness games (kill after 20 s)
 #   coop.ps1 status | logs [-Inst A] [-Tail 40]
 #
-# Only processes this driver started (pids in <run>\run.json) are touched,
-# plus the helper exe extracted into that run's own LOCALAPPDATA.
+# Only processes this driver started (pids in <run>\run.json) are touched.
 
 [CmdletBinding()]
 param(
@@ -446,10 +445,6 @@ switch ($Action) {
         $deadline = (Get-Date).AddSeconds(20)
         while ((Get-Date) -lt $deadline -and ($all | Where-Object { Game-Proc $run $_ })) { Start-Sleep -Milliseconds 500 }
         foreach ($i in $all) { $p = Game-Proc $run $i; if ($p) { $p.Kill(); Write-Host "${i}: killed after WM_CLOSE timeout" } }
-        # Helpers watch their game and exit with it; stop any left in this run's folder.
-        Start-Sleep -Seconds 3
-        Get-Process wartales-mp -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($run, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { $_.Kill(); Write-Host "helper pid $($_.Id) stopped" }
         Write-Host "stopped; logs in $run"
     }
     'status' {
