@@ -72,6 +72,10 @@
 //       song            the open SongRepertoire: onSongChoose (Play).
 //       endturn         Battle.endTurn (the End Turn button).
 //       camp            GameUI.toggleCamp (the camp button: make / leave camp).
+//       rest            camp: Controller.playerSetRestState(true, true, null),
+//                       the forced rest vote (host: netStartRest -> CampFire.rest).
+//                       dump `tired` (Simulation.tiredness, synced) and
+//                       `hudTired` (RegionHud.tired.value, the fatigue gauge).
 //       talk            camp: Controller.playCampConfession(the pending
 //                       confession's unit), the talk on the speaker; noelem if none.
 //       put <idx> <n>   own inventory slot idx -> the chest panel's inventory;
@@ -365,6 +369,15 @@ struct Ctx {
     toggle_paths: RefFun,
     show_unit: RefFun,
     inv_panel: (RefField, RefType),
+    /// `rest`: Controller.playerSetRestState(set, forced, cb) and its cb type.
+    set_rest: (RefFun, RefType),
+    /// dump `tired` / `hudTired`: GameState.get_simu, Simulation.tiredness,
+    /// GameUI.regionHud, RegionHud.tired (ProgressBar), ProgressBar.value.
+    get_simu: (RefFun, RefType),
+    simu_tired: RefField,
+    region_hud: (RefField, RefType),
+    hud_tired: (RefField, RefType),
+    pb_value: RefField,
     /// `talk`: GameState.get_confession, Confession.getPending, its `unit`,
     /// Controller.playCampConfession (the camp talk on the speaker).
     get_confession: (RefFun, RefType),
@@ -968,6 +981,20 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         toggle_paths: mfn(game_ui.1, "togglePaths", &[game_ui.1], void_t)?,
         show_unit: mfn(game_ui.1, "showUnit", &[game_ui.1, unit_t], void_t)?,
         inv_panel: field(code, game_inv.1, "inventory")?,
+        set_rest: {
+            let ctrl_t = field(code, game_t, "ctrl")?.1;
+            let m = method(code, ctrl_t, "playerSetRestState")?;
+            let cb_t = *fun_args(code, m).get(3).context("playerSetRestState: no callback")?;
+            (mfn(ctrl_t, "playerSetRestState", &[ctrl_t, bool_t, bool_t, cb_t], void_t)?, cb_t)
+        },
+        get_simu: {
+            let simu_t = obj_type(code, "st.player.Simulation")?;
+            (mfn(state_t, "get_simu", &[state_t], simu_t)?, simu_t)
+        },
+        simu_tired: typed(code, obj_type(code, "st.player.Simulation")?, "tiredness", f64_t)?,
+        region_hud: field(code, game_ui.1, "regionHud")?,
+        hud_tired: field(code, obj_type(code, "ui.comp.gameUIComp.RegionHud")?, "tired")?,
+        pb_value: typed(code, obj_type(code, "ui.comp.ProgressBar")?, "value", f64_t)?,
         get_confession: {
             let conf_t = obj_type(code, "st.player.Confession")?;
             (mfn(state_t, "get_confession", &[state_t], conf_t)?, conf_t)
@@ -1481,6 +1508,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_inv = gs("inv");
     let s_paths = gs("paths");
     let s_sheet = gs("sheet");
+    let s_rest = gs("rest");
     let s_talk = gs("talk");
     let s_put = gs("put ");
     let s_take = gs("take ");
@@ -1622,6 +1650,12 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let sp = r.r(c.state_player.1);
     let (msrc, mdst, sop) = (r.r(c.loot.1), r.r(c.loot.1), r.r(c.slot_op_t));
     let (cnf, pnd) = (r.r(c.get_confession.1), r.r(c.get_pending.1));
+    let (simu, rhud, pbar, rcb) = (
+        r.r(c.get_simu.1),
+        r.r(c.region_hud.1),
+        r.r(c.hud_tired.1),
+        r.r(c.set_rest.1),
+    );
 
     let mut a = Asm::new();
     // --- state machine, outside the trap
@@ -2515,6 +2549,25 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("ack");
     a.label("not_sheet");
 
+    // verb: rest  (Controller.playerSetRestState(true, true): the forced rest
+    // vote; the host then runs netStartRest -> CampFire.rest)
+    verb(&mut a, s_rest, "not_rest", None);
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(ctrl, g, c.g_ctrl.0);
+    a.if_null(ctrl, "ack");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Null { dst: rcb });
+    a.call(void, c.set_rest.0, &[ctrl, b, b, rcb]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_rest");
+
     // verb: talk  (camp: Controller.playCampConfession(pending.unit), the right
     // click on the speaker of the pending confession; noelem when none)
     verb(&mut a, s_talk, "not_talk", None);
@@ -2885,6 +2938,31 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.str_q(s);
     w.lit(code, "}");
     w.a.label("place_end");
+    // party fatigue: the synced Simulation.tiredness and the HUD gauge's value
+    w.lit(code, ",\"tired\":");
+    w.a.fld(gst, g, c.g.state);
+    w.a.if_null(gst, "no_tired");
+    w.a.call(simu, c.get_simu.0, &[gst]);
+    w.a.if_null(simu, "no_tired");
+    w.a.fld(fl, simu, c.simu_tired);
+    w.val(fl);
+    w.a.go("tired_end");
+    w.a.label("no_tired");
+    w.lit(code, "null");
+    w.a.label("tired_end");
+    w.lit(code, ",\"hudTired\":");
+    w.a.fld(gui, g, c.game_ui.0);
+    w.a.if_null(gui, "no_htired");
+    w.a.fld(rhud, gui, c.region_hud.0);
+    w.a.if_null(rhud, "no_htired");
+    w.a.fld(pbar, rhud, c.hud_tired.0);
+    w.a.if_null(pbar, "no_htired");
+    w.a.fld(fl, pbar, c.pb_value);
+    w.val(fl);
+    w.a.go("htired_end");
+    w.a.label("no_htired");
+    w.lit(code, "null");
+    w.a.label("htired_end");
     // the local player's own inventory: item stack count
     w.lit(code, ",\"items\":");
     w.a.if_null(me, "no_items");
