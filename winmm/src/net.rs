@@ -86,6 +86,37 @@ fn game_dir() -> std::io::Result<PathBuf> {
         .ok_or_else(|| std::io::Error::other(format!("{} has no folder", exe.display())))
 }
 
+/// Deletes what versions with the helper exe left behind: the exe in `local`
+/// (%LOCALAPPDATA%\wartales-mp) and its SDR status file, the self-made CA
+/// and master certificate in `program_data`\wartales-mp, and that folder once
+/// empty. Errors are logged, never fatal.
+fn remove_old_install(local: &std::path::Path, program_data: Option<&std::path::Path>, log: &Log) {
+    let certs = program_data.map(|p| p.join("wartales-mp"));
+    let files = ["wartales-mp.exe", "wartales-mp.exe.new", "sdr.status"]
+        .map(|f| local.join(f))
+        .into_iter()
+        .chain(
+            certs
+                .iter()
+                .flat_map(|d| ["ca.crt", "ca.key", "master.crt", "master.key"].map(|f| d.join(f))),
+        );
+    for f in files {
+        match std::fs::remove_file(&f) {
+            Ok(()) => logf!(log, "old install: removed {}", f.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => logf!(
+                log,
+                "WARNING: old install: cannot remove {}: {e}",
+                f.display()
+            ),
+        }
+    }
+    // remove_dir only removes an empty folder: anything else in it stays.
+    if let Some(d) = certs.filter(|d| std::fs::remove_dir(d).is_ok()) {
+        logf!(log, "old install: removed {}", d.display());
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one startup sequence, read top to bottom as run.go was"
@@ -96,6 +127,13 @@ fn run() {
     logf!(
         log,
         "wartales-mp starting: port {port}, master {master_addr}"
+    );
+    remove_old_install(
+        &applog::dir(),
+        std::env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .as_deref(),
+        &log,
     );
 
     // Fingerprint the mod files now, while the game loads them; a join
@@ -395,4 +433,43 @@ mod harness {
         None
     }
     pub fn punch(_: Option<&punch::Socket>, _: &mut master::Options, _: &Log) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_old_install_deletes_only_old_files() {
+        let root = std::env::temp_dir().join(format!("wmp-oldinstall-{}", std::process::id()));
+        let (local, pd) = (root.join("local"), root.join("pd"));
+        let certs = pd.join("wartales-mp");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::create_dir_all(&certs).unwrap();
+        for f in ["wartales-mp.exe", "sdr.status", "shim.log"] {
+            std::fs::write(local.join(f), "x").unwrap();
+        }
+        for f in ["ca.crt", "ca.key", "master.crt", "master.key"] {
+            std::fs::write(certs.join(f), "x").unwrap();
+        }
+        let (log, lines) = Log::capture();
+        remove_old_install(&local, Some(&pd), &log);
+        assert!(!local.join("wartales-mp.exe").exists() && !local.join("sdr.status").exists());
+        assert!(local.join("shim.log").exists(), "current files stay");
+        assert!(!certs.exists(), "empty cert folder removed");
+        assert_eq!(
+            lines.lock().unwrap().len(),
+            7,
+            "{:?}",
+            lines.lock().unwrap()
+        );
+        // Second start: nothing left, nothing logged; a non-empty folder stays.
+        std::fs::create_dir_all(&certs).unwrap();
+        std::fs::write(certs.join("other"), "x").unwrap();
+        let (log, lines) = Log::capture();
+        remove_old_install(&local, Some(&pd), &log);
+        remove_old_install(&local, None, &log);
+        assert!(lines.lock().unwrap().is_empty() && certs.join("other").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
