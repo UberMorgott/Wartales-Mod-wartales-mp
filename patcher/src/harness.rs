@@ -104,7 +104,8 @@
 //                       BasePlayer._drop, Unit.netEquipSlot(slot, its item, hand item,
 //                       cb: a refused equip puts it back), as UnitInfo's slot drop.
 //                       dump army: weapon2, left, slots; battle currentUnit:
-//                       shield (HealthBars guard counter value), shieldShown (its number's tf.visible),
+//                       shield (HealthBars guard counter value; a closed hud is opened
+//                       and the bars synced first), shieldShown (its number's tf.visible),
 //                       guard, taken, reduce.
 //       snap <name>     Game.screenshot(dir + name + ".png"): the frame the
 //                       game renders itself (3D + 2D), no window or screen access.
@@ -493,6 +494,12 @@ struct Shield {
     get_guard: (RefFun, RefType),
     /// LiteUnitHud.show(open, minimal)
     show: RefFun,
+    /// h2d.Object.getScene -> h2d.Scene.ctx, HealthBars.sync(ctx): the dump runs the
+    /// frame's own sync first, so it reads what the HUD shows now (a closed hud's bars
+    /// are not synced: a fresh current unit read null, a reopened one a stale value).
+    get_scene: (RefFun, RefType),
+    scene_ctx: (RefField, RefType),
+    sync: RefFun,
     stats: (RefField, RefType),
     taken: RefField,
     reduce: RefField,
@@ -1466,6 +1473,13 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
                 bail!("battle.Unit.get_guard: unexpected signature");
             }
             let stats = field(code, bunit_t, "stats")?;
+            let obj2_t = obj_type(code, "h2d.Object")?;
+            let scene_t = obj_type(code, "h2d.Scene")?;
+            let gs = method(code, obj2_t, "getScene")?.findex;
+            if sig(code, gs)? != (vec![obj2_t], scene_t) {
+                bail!("h2d.Object.getScene: unexpected signature");
+            }
+            let scene_ctx = field(code, scene_t, "ctx")?;
             Shield {
                 hud,
                 bars,
@@ -1475,6 +1489,9 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
                 visible: typed(code, tf.1, "visible", bool_t)?,
                 get_guard: (gg, gr),
                 show: mfn(hud.1, "show", &[hud.1, bool_t, bool_t], void_t)?,
+                get_scene: (gs, scene_t),
+                scene_ctx,
+                sync: mfn(bars.1, "sync", &[bars.1, scene_ctx.1], void_t)?,
                 stats,
                 taken: typed(code, stats.1, "damageTakenPercent", i32_t)?,
                 reduce: typed(code, stats.1, "damageReducePercent", i32_t)?,
@@ -2057,6 +2074,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let ecb = r.r(c.wset.net_equip.1);
     let (tstore, tref) = (r.r(c.trigger.storage_t), r.r(c.trigger.ref_bool_t));
     let stf = r.r(c.shield.tf.1);
+    let (sscene, sctx) = (r.r(c.shield.get_scene.1), r.r(c.shield.scene_ctx.1));
     let (shud, sbars, sctr, sval, sgv, sst) = (
         r.r(c.shield.hud.1),
         r.r(c.shield.bars.1),
@@ -3950,8 +3968,11 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.fld(shud, bu, c.shield.hud.0);
     w.a.if_null(shud, "sh_none");
     w.a.fld(sbars, shud, c.shield.bars.0);
-    w.a.if_set(sbars, "sh_bars");
-    // a closed hud builds no bars: open it (a hover's show), the next dump reads them
+    w.a.if_null(sbars, "sh_open");
+    w.a.call(sscene, c.shield.get_scene.0, &[sbars]);
+    w.a.if_set(sscene, "sh_sync");
+    // a closed hud has no (or unsynced) bars: open it as a hover does
+    w.a.label("sh_open");
     w.a.op(Opcode::Bool {
         dst: b,
         value: ValBool(true),
@@ -3961,7 +3982,15 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         value: ValBool(false),
     });
     w.a.call(void, c.shield.show, &[shud, b, isn]);
-    w.a.go("sh_none");
+    w.a.fld(sbars, shud, c.shield.bars.0);
+    w.a.if_null(sbars, "sh_none");
+    w.a.call(sscene, c.shield.get_scene.0, &[sbars]);
+    w.a.if_null(sscene, "sh_bars");
+    // this frame's HealthBars.sync (shield_total's value), then read it
+    w.a.label("sh_sync");
+    w.a.fld(sctx, sscene, c.shield.scene_ctx.0);
+    w.a.if_null(sctx, "sh_bars");
+    w.a.call(void, c.shield.sync, &[sbars, sctx]);
     w.a.label("sh_bars");
     w.a.fld(sctr, sbars, c.shield.guard.0);
     w.a.if_null(sctr, "sh_none");
