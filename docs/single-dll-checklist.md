@@ -157,3 +157,18 @@ Commits 4ca81cc (harness: equip as a drag, `act` via Controller.playerTriggerAct
 | 8 windows | own sheet kept place -> camp; inspect T2Recruit1 then host quit: UnitInfo closed, meLock empty | PASS |
 
 Left: tutorial phase of a host's first-ever minigame (window not built yet) is not held by flActivity; a guest's non-coop minigame is invisible to the host's flActivity (vanilla lockedWith still gates talk / chest / leave). Harness `play` on a client asserts at the end (`doResult threw`, callback id), harness-only.
+
+## Fix pass 3 (2026-11-03 evening): party switches, watchers, tutorial
+
+Commits 2692354 + 5c2416e (force_leave M: syncEnterMode / syncLeaveMode's lockSyncMode read -> flSyncHeld; held while a minigame window exists or another connected player is locked (initiator excluded, replay passes once), started by flPump `SETTLE` 2 s after; window deferral hides only windowRoot), 68d9822 (coop_spectate: every watcher keeps input (no lockCamera / padCursor.locked), an idle watcher of a lockpick / ruins puzzle still sees it live, a busy watcher keeps its own camera, _cancel leaves a busy watcher's camera / locks; the host's minigame window is built before its first tutorial), a1ad895 (harness confirm answers CraftConfirm).
+
+| Case | Evidence (runs `20261103-173326`, `-181847`) | Status |
+| --- | --- | --- |
+| party switch during host song | host `enter T2Forge`: `mode switch waits for a minigame`, song result, `goes` 5.5 s later, entered T2Forge, no error | PASS |
+| party switch during guest forge (non-coop) | host `enter T2Tavern`: waits, `forge recv 2` (end), goes, entered; guest CraftConfirm after the switch: crafted ShieldCommonCraftT1 in inventory, `confirm` closes it | PASS |
+| tutorial gap | host lockpick: LockPick window exists while its tutorial is open; guest Leave meanwhile: `leave pending: player busy` until `lpstop`, then go | PASS |
+| watcher of host lockpick | guest sees the lock view (snap), opens its own sheet while watching | PASS |
+| popups both directions, leave during lockpick / song | as fix pass 2 (deferral, wait), all again PASS | PASS |
+| regression 3-8 | `-173326` / `-175458`: load world / battle / guest dead, drop, save list, weapon_set, windows PASS; shield dump fields empty / odd at some turns on this and on the fd21f96 build alike (harness dump timing, not the patch) | PASS (shield: harness flake) |
+
+dist\winmm.dll 5447168 B, SHA256 D3B211C3F768B83D80B8958DEC073F7153F33527938A5278E9DCEBE19D87C9D5.
