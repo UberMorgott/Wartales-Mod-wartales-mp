@@ -211,7 +211,9 @@
 //      NPC sheet / camp tool lock is a window, kept across the switch by
 //      mode_windows, and never holds; never the initiator itself), so
 //      the switch is queued;
-//      flPump (Controller.waitGameAlive, one at a time) runs processSyncMode once
+//      flPump (Controller.waitGameAlive, one per Controller: a global names the
+//      Controller whose queue holds it, so one replaced by a load gets its own)
+//      runs processSyncMode once
 //      nothing would be cut for SETTLE s (a minigame's result RPCs follow its window). Logged `mp: mode switch waits for a minigame` / `goes`.
 //   S  Npc.talk / Chest.action refuse only for the clicking player's own lock
 //      (flSelfLocked in place of anyPlayerLocked): another player's minigame
@@ -4126,13 +4128,35 @@ fn add_pump(
     let (f0, f_settle) = (float_const(code, 0.0), float_const(code, SETTLE));
     let ex = r.r(p.g_me.1);
     let (now, since, lim) = (r.r(t.f64_), r.r(t.f64_), r.r(t.f64_));
+    let pc = r.r(p.g_ctrl.1);
     let mut a = Asm::new();
+    // a pump left in a replaced Controller's queue does nothing
+    a.op(Opcode::GetGlobal {
+        dst: pc,
+        global: pumping,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: pc,
+            b: Reg(0),
+            offset: 0,
+        },
+        "ret",
+    );
     a.op(Opcode::Field {
         dst: g,
         obj: Reg(0),
         field: p.c_game,
     });
-    a.jmp(Opcode::JNull { reg: g, offset: 0 }, "done");
+    // no game: drop the pump without running the queue (its switch reads game)
+    a.jmp(Opcode::JNotNull { reg: g, offset: 0 }, "live");
+    a.op(Opcode::Null { dst: pc });
+    a.op(Opcode::SetGlobal {
+        global: pumping,
+        src: pc,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "ret");
+    a.label("live");
     a.op(Opcode::GetGlobal {
         dst: ex,
         global: held_by,
@@ -4219,13 +4243,10 @@ fn add_pump(
         global: free_since,
         src: since,
     });
-    a.op(Opcode::Bool {
-        dst: b,
-        value: ValBool(false),
-    });
+    a.op(Opcode::Null { dst: pc });
     a.op(Opcode::SetGlobal {
         global: pumping,
-        src: b,
+        src: pc,
     });
     a.op(Opcode::GetGlobal { dst: s, global: go });
     a.op(Opcode::Call1 {
@@ -4305,6 +4326,7 @@ fn add_sync_held(
     pumping: RefGlobal,
     held_by: RefGlobal,
     go_once: RefGlobal,
+    free_since: RefGlobal,
 ) -> Result<RefFun> {
     let waits = str_global(code, p.t.str_, SWITCH_WAITS);
     let t = &p.t;
@@ -4319,6 +4341,8 @@ fn add_sync_held(
         r.r(t.str_),
         r.r(t.void),
     );
+    let (pc, f0) = (r.r(p.g_ctrl.1), r.r(t.f64_));
+    let zero = float_const(code, 0.0);
     let mut a = Asm::new();
     a.op(Opcode::Field {
         dst: b,
@@ -4361,33 +4385,38 @@ fn add_sync_held(
         arg1: ex,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "no");
+    // this Controller already runs a pump: keep holding
     a.op(Opcode::GetGlobal {
-        dst: b,
+        dst: pc,
         global: pumping,
     });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
+    a.jmp(
+        Opcode::JEq {
+            a: pc,
+            b: Reg(0),
+            offset: 0,
+        },
+        "yes",
+    );
     a.op(Opcode::SetGlobal {
         global: held_by,
         src: ex,
     });
-    a.op(Opcode::GetGlobal {
-        dst: b,
-        global: pumping,
-    });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
     a.op(Opcode::Field {
         dst: lst,
         obj: Reg(0),
         field: p.c_wait_alive.0,
     });
     a.jmp(Opcode::JNull { reg: lst, offset: 0 }, "no");
-    a.op(Opcode::Bool {
-        dst: b,
-        value: ValBool(true),
-    });
     a.op(Opcode::SetGlobal {
         global: pumping,
-        src: b,
+        src: Reg(0),
+    });
+    // a new pump's settle time starts from its own first free frame
+    a.op(Opcode::Float { dst: f0, ptr: zero });
+    a.op(Opcode::SetGlobal {
+        global: free_since,
+        src: f0,
     });
     a.op(Opcode::InstanceClosure {
         dst: cb,
@@ -7037,7 +7066,8 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
     let set_win = add_set_win(code, p, minigame, mine, show)?;
     let focus = add_focus(code, p, minigame)?;
     let self_locked = add_self_locked(code, p)?;
-    let pumping = add_global(code, p.t.bool_);
+    // the Controller whose waitGameAlive holds flPump (a replaced one gets its own)
+    let pumping = add_global(code, p.g_ctrl.1);
     let held_by = add_global(code, p.g_me.1);
     let act_map = add_global(code, p.omap_t);
     let act_game = add_global(code, p.game_t);
@@ -7046,7 +7076,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
     let go_once = add_global(code, p.t.bool_);
     let free_since = add_global(code, p.t.f64_);
     let pump = add_pump(code, p, hold, pumping, held_by, go_once, free_since)?;
-    let sync_held = add_sync_held(code, p, hold, pump, pumping, held_by, go_once)?;
+    let sync_held = add_sync_held(code, p, hold, pump, pumping, held_by, go_once, free_since)?;
     for &(fi, at) in &p.sync_sites {
         let f = &mut code.functions[fi];
         if let Opcode::GetThis { dst, .. } = f.ops[at] {
