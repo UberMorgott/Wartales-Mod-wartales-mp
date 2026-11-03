@@ -17,21 +17,27 @@
 //
 // A guest present when the confession started got the FakeNpc while its id was
 // still "ConfessionSetup" and ran confession__impl itself. A guest that gets it
-// in a full sync (join, rejoin after a drop) sees the confession id: `.get` is
-// null, `Null access .inf` throws out of Game.start (Game.hx:807, before
-// state.init), and the client is left with a half-built world.
+// in a full sync (join, rejoin after a drop) sees the confession id. When it
+// is no allNpcs key, `.get` is null, `Null access .inf` throws out of
+// Game.start (Game.hx:807, before state.init), and the client is left with a
+// half-built world. Some confession ids ARE allNpcs keys ("ConfessionHate":
+// the harness saw the lookup hit): the copy is that prefab's inf, without the
+// built dialog, and Dialog.showText throws `Dialog not found
+// #ConfessionHate.Start` (the guest's confession scene stays broken).
 //
-// The fix, in FakeNpc.initData, client path only, when the id is no allNpcs key:
+// The fix, in FakeNpc.initData, client path only, after the vanilla lookup:
 //
 //   var conf = dialogData?.lastConf;   // synced, set by confession__impl
-//   if (conf == null) return;          // keep Element.initData's inf
-//   e = allNpcs.get("ConfessionSetup"); if (e == null) return;
-//   inf = Json.parse(Json.stringify(e.inf));          // vanilla line
-//   makeDialogFromConfessionData(conf);               // as confession__impl did
+//   if (conf == null || conf.confID != id) conf = null;    // not renamed yet
+//   else v = allNpcs.get("ConfessionSetup");               // + one log line
+//   if (v == null) return;             // keep Element.initData's inf
+//   inf = Json.parse(Json.stringify(v.inf));          // vanilla line
+//   if (conf != null) makeDialogFromConfessionData(conf); // as confession__impl did
 //
-// i.e. the joining guest rebuilds the inf exactly the way a guest present at
-// the start has it. A found id runs the vanilla line alone. One log line on the
-// miss path. Validated before editing; a mismatch skips the pass (logged).
+// i.e. a joining guest rebuilds a renamed confession NPC's inf exactly the
+// way a guest present at the start has it, whatever allNpcs holds under the
+// confession id. Any other NPC runs the vanilla line alone. Validated before
+// editing; a mismatch skips the pass (logged).
 //
 // Both the vanilla line and the rebuild replace the inf Element.initData just
 // normalized with a raw copy of an allNpcs prefab inf, which can have no
@@ -48,7 +54,7 @@ use super::*;
 use crate::diag::static_fn;
 use crate::job_xp::str_global;
 
-const LOG_A: &str = "mp: fakenpc: id not in allNpcs, rebuilt from confession data: ";
+const LOG_A: &str = "mp: fakenpc: confession NPC rebuilt from confession data: ";
 const SETUP: &str = "ConfessionSetup";
 
 struct Plan {
@@ -73,6 +79,7 @@ struct Plan {
     f_dialog: RefField,
     f_last: RefField,
     f_id: RefField,
+    f_conf_id: RefField,
     make: RefFun,
     println: RefFun,
     str_add: RefFun,
@@ -88,6 +95,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     let (f_dialog, proxy_t) = field(code, elt_t, "dialogData")?;
     let f_last = typed(code, proxy_t, "lastConf", conf_t)?;
     let f_id = typed(code, elt_t, "id", str_t)?;
+    let f_conf_id = typed(code, conf_t, "confID", str_t)?;
     let (f_inf, _) = field(code, elt_t, "inf")?;
     let make = method(code, npc_t, "makeDialogFromConfessionData")?;
     if fun_args(code, make) != [npc_t, conf_t] {
@@ -167,15 +175,15 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         f_dialog,
         f_last,
         f_id,
+        f_conf_id,
         make,
         println,
         str_add,
     })
 }
 
-/// Ops of the miss path inserted before the NullCheck (`to_ret`: offset base
-/// of the final Ret from the block's start).
-const MISS_LEN: usize = 14;
+/// Ops of the confession check inserted before the NullCheck.
+const MISS_LEN: usize = 17;
 /// Ops inserted after `SetThis inf` (props default, confession dialog).
 const TAIL_LEN: usize = 8;
 
@@ -184,6 +192,8 @@ fn apply(code: &mut Bytecode, p: &Plan) {
     let log_a = str_global(code, p.str_t, LOG_A);
     let f = &mut code.functions[p.fi];
     let conf = new_reg(f, p.conf_t);
+    let last = new_reg(f, p.conf_t);
+    let cid = new_reg(f, p.str_t);
     let dd = new_reg(f, p.proxy_t);
     let key = new_reg(f, p.str_t);
     let msg = new_reg(f, p.str_t);
@@ -207,21 +217,25 @@ fn apply(code: &mut Bytecode, p: &Plan) {
     insert_ops(f, p.ret, tail);
     // The Ret is now at p.ret + TAIL_LEN + MISS_LEN; op k of the block is at p.nc + k.
     let to_ret = |k: usize| (p.ret + TAIL_LEN + MISS_LEN - (p.nc + k) - 1) as i32;
+    // Ops 2, 4, 7 jump to the `v` check at op 15.
     let ops = vec![
         Opcode::Null { dst: conf },
-        Opcode::JNotNull { reg: p.v, offset: (MISS_LEN - 2) as i32 },
         Opcode::GetThis { dst: dd, field: p.f_dialog },
-        Opcode::JNull { reg: dd, offset: to_ret(3) },
-        Opcode::Field { dst: conf, obj: dd, field: p.f_last },
-        Opcode::JNull { reg: conf, offset: to_ret(5) },
-        Opcode::GetGlobal { dst: msg, global: log_a },
+        Opcode::JNull { reg: dd, offset: 12 },
+        Opcode::Field { dst: last, obj: dd, field: p.f_last },
+        Opcode::JNull { reg: last, offset: 10 },
+        Opcode::Field { dst: cid, obj: last, field: p.f_conf_id },
         Opcode::GetThis { dst: key, field: p.f_id },
+        Opcode::JNotEq { a: cid, b: key, offset: 7 },
+        Opcode::Mov { dst: conf, src: last },
+        Opcode::GetGlobal { dst: msg, global: log_a },
         Opcode::Call2 { dst: msg, fun: p.str_add, arg0: msg, arg1: key },
         Opcode::Call1 { dst: v0, fun: p.println, arg0: msg },
         Opcode::GetGlobal { dst: key, global: setup },
         Opcode::Call2 { dst: p.got, fun: p.get, arg0: p.map, arg1: key },
         Opcode::ToVirtual { dst: p.v, src: p.got },
-        Opcode::JNull { reg: p.v, offset: to_ret(13) },
+        Opcode::JNotNull { reg: p.v, offset: 1 },
+        Opcode::JAlways { offset: to_ret(16) },
     ];
     assert_eq!(ops.len(), MISS_LEN);
     insert_ops(f, p.nc, ops);
@@ -274,10 +288,11 @@ mod tests {
             }
         }
         let ret = map(p.ret);
-        for k in [3, 5, 13] {
-            assert_eq!(jump_targets(b, p.nc + k), [ret], "miss op {k}");
+        for k in [2, 4, 7] {
+            assert_eq!(jump_targets(b, p.nc + k), [p.nc + 15], "check op {k}");
         }
-        assert_eq!(jump_targets(b, p.nc + 1), [p.nc + MISS_LEN]);
+        assert_eq!(jump_targets(b, p.nc + 15), [p.nc + MISS_LEN]);
+        assert_eq!(jump_targets(b, p.nc + 16), [ret]);
         assert_eq!(jump_targets(b, ret - 2), [ret]);
         // The props default: a null inf or a present props skip to the dialog step.
         let tail = ret - TAIL_LEN;
@@ -339,7 +354,8 @@ mod tests {
 
         struct Case {
             id: &'static str,
-            last: bool,
+            /// dialogData.lastConf's confID; None: no lastConf.
+            last: Option<&'static str>,
             setup: bool,
             /// The allNpcs prefab infs carry `props`.
             props: bool,
@@ -347,13 +363,18 @@ mod tests {
             made: bool,
         }
         let cases = [
-            Case { id: "Npc1", last: false, setup: true, props: true, want_inf: "copy:Npc1", made: false },
+            Case { id: "Npc1", last: None, setup: true, props: true, want_inf: "copy:Npc1", made: false },
             // issue #9: a prefab inf without props must not leave a props-less copy
-            Case { id: "Npc1", last: false, setup: true, props: false, want_inf: "copy:Npc1", made: false },
-            Case { id: "ConfX", last: true, setup: true, props: true, want_inf: "copy:ConfessionSetup", made: true },
-            Case { id: "ConfX", last: true, setup: true, props: false, want_inf: "copy:ConfessionSetup", made: true },
-            Case { id: "ConfX", last: false, setup: true, props: true, want_inf: "placeholder", made: false },
-            Case { id: "ConfX", last: true, setup: false, props: true, want_inf: "placeholder", made: false },
+            Case { id: "Npc1", last: None, setup: true, props: false, want_inf: "copy:Npc1", made: false },
+            Case { id: "ConfX", last: Some("ConfX"), setup: true, props: true, want_inf: "copy:ConfessionSetup", made: true },
+            Case { id: "ConfX", last: Some("ConfX"), setup: true, props: false, want_inf: "copy:ConfessionSetup", made: true },
+            // ConfessionHate: the confession id is also an allNpcs key
+            Case { id: "Npc1", last: Some("Npc1"), setup: true, props: true, want_inf: "copy:ConfessionSetup", made: true },
+            // not renamed yet (a lastConf of another id): the vanilla copy, no dialog
+            Case { id: "Npc1", last: Some("ConfX"), setup: true, props: true, want_inf: "copy:Npc1", made: false },
+            Case { id: SETUP, last: Some("ConfX"), setup: true, props: true, want_inf: "copy:ConfessionSetup", made: false },
+            Case { id: "ConfX", last: None, setup: true, props: true, want_inf: "placeholder", made: false },
+            Case { id: "ConfX", last: Some("ConfX"), setup: false, props: true, want_inf: "placeholder", made: false },
         ];
         for c in cases {
             let mut sim = Sim::new(
@@ -418,7 +439,10 @@ mod tests {
             }
             let all = sim.c.obj(&[]);
             let game = sim.c.obj(&[(f_auth, V::B(false)), (f_all, all)]);
-            let conf = if c.last { sim.c.obj(&[]) } else { V::Null };
+            let conf = match c.last {
+                Some(cid) => sim.c.obj(&[(p.f_conf_id, V::S(cid.into()))]),
+                None => V::Null,
+            };
             let dd = sim.c.obj(&[(p.f_last, conf.clone())]);
             // Element.initData's inf: always has props.
             let pp = sim.c.obj(&[]);
@@ -441,7 +465,7 @@ mod tests {
                 assert!(made.is_empty());
             }
             let logs = sim.c.take("println");
-            assert_eq!(logs.len(), usize::from(c.last), "{}", c.id);
+            assert_eq!(logs.len(), usize::from(c.last == Some(c.id)), "{}", c.id);
         }
     }
 }
