@@ -96,7 +96,8 @@
 //                       whose identifier starts with <slot>, its current item,
 //                       the first own inventory item whose kind contains <kind>.
 //                       dump army: weapon2, left, slots; battle currentUnit:
-//                       shield (HealthBars guard counter value), guard, taken, reduce.
+//                       shield (HealthBars guard counter value), shieldShown (its number's tf.visible),
+//                       guard, taken, reduce.
 //       snap <name>     Game.screenshot(dir + name + ".png"): the frame the
 //                       game renders itself (3D + 2D), no window or screen access.
 //     dir+"ack.txt" = "<seq> ok|dispatched|unknown|nogame|nosave|nowindow|noplayer", and
@@ -454,6 +455,9 @@ struct Shield {
     bars: (RefField, RefType),
     guard: (RefField, RefType),
     value: (RefField, RefType),
+    /// Counter.tf (the number) and its h2d.Object.visible
+    tf: (RefField, RefType),
+    visible: RefField,
     get_guard: (RefFun, RefType),
     /// LiteUnitHud.show(open, minimal)
     show: RefFun,
@@ -1364,6 +1368,7 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             let bars = field(code, hud.1, "healthBars")?;
             let guard = field(code, bars.1, "guard")?;
             let value = field(code, guard.1, "value")?;
+            let tf = field(code, guard.1, "tf")?;
             let gg = method(code, bunit_t, "get_guard")?.findex;
             let (ga, gr) = sig(code, gg)?;
             if ga != [bunit_t] {
@@ -1375,6 +1380,8 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
                 bars,
                 guard,
                 value,
+                tf,
+                visible: typed(code, tf.1, "visible", bool_t)?,
                 get_guard: (gg, gr),
                 show: mfn(hud.1, "show", &[hud.1, bool_t, bool_t], void_t)?,
                 stats,
@@ -1916,6 +1923,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         r.r(c.wset.weapon2.1),
         r.r(c.wset.left.1),
     );
+    let stf = r.r(c.shield.tf.1);
     let (shud, sbars, sctr, sval, sgv, sst) = (
         r.r(c.shield.hud.1),
         r.r(c.shield.bars.1),
@@ -3691,6 +3699,12 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.if_null(sctr, "sh_none");
     w.a.fld(sval, sctr, c.shield.value.0);
     w.val(sval);
+    // the number itself shown (tf.visible, shield_total's rebuild test in sync)
+    w.lit(code, ",\"shieldShown\":");
+    w.a.fld(stf, sctr, c.shield.tf.0);
+    w.a.if_null(stf, "sh_none");
+    w.a.fld(b, stf, c.shield.visible);
+    w.val(b);
     w.a.go("sh_end");
     w.a.label("sh_none");
     w.lit(code, "null");

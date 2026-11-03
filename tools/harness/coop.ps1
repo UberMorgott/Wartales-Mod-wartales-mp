@@ -32,6 +32,7 @@
 #   coop.ps1 kill    -Inst B              TerminateProcess (crash)
 #   coop.ps1 freeze  -Inst B              NtSuspendProcess: the game and its in-process network side
 #                                          stop answering (a hung PC; the OS keeps its sockets open); thaw resumes it
+#   coop.ps1 drop    -Inst B -TimeoutSec 15  network loss: its TCP links to other processes reset, new ones too, for that long (admin)
 #   coop.ps1 stop                          close all harness games (kill after 20 s)
 #   coop.ps1 status | logs [-Inst A] [-Tail 40]
 #
@@ -40,7 +41,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory)]
-    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'drag', 'wheel', 'shot', 'place', 'close', 'kill', 'freeze', 'thaw', 'stop', 'status', 'logs')]
+    [ValidateSet('start', 'cmd', 'wait', 'key', 'click', 'drag', 'wheel', 'shot', 'place', 'close', 'kill', 'freeze', 'thaw', 'drop', 'stop', 'status', 'logs')]
     [string]$Action,
     [string[]]$Inst = @('A', 'B'),
     [string]$Line = 'dump',
@@ -91,6 +92,8 @@ Add-Type -Namespace Harness -Name Win -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h);
 [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);
+[DllImport("iphlpapi.dll")] public static extern uint SetTcpEntry(ref TCPROW r);
+public struct TCPROW { public uint State, LocalAddr, LocalPort, RemoteAddr, RemotePort; }
 public struct RECT { public int Left, Top, Right, Bottom; }
 public struct POINT { public int X, Y; }
 '@
@@ -439,13 +442,52 @@ switch ($Action) {
             Write-Host "${i}: $Action (pid $($p.Id))"
         }
     }
+    'drop' {
+        # Network loss of -TimeoutSec s: every TCP connection of this game to another
+        # process is reset (SetTcpEntry DELETE_TCB, needs admin) and so is every new
+        # one until the time is up; its own loopback master link stays.
+        $run = Run-Dir
+        foreach ($i in $Inst) {
+            $p = Game-Proc $run $i
+            if (-not $p) { Write-Host "$i not running"; continue }
+            $n = 0; $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ((Get-Date) -lt $deadline) {
+                $mine = @(Get-NetTCPConnection -OwningProcess $p.Id -ErrorAction SilentlyContinue)
+                # its own loopback pairs (game <-> its master) stay: remote end owned by this pid
+                $own = $mine | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" }
+                foreach ($t in $mine | Where-Object { $_.State -eq 'Established' -and $_.LocalAddress -notmatch ':' -and "$($_.RemoteAddress):$($_.RemotePort)" -notin $own }) {
+                    $row = New-Object Harness.Win+TCPROW
+                    $row.State = 12 # MIB_TCP_STATE_DELETE_TCB
+                    $row.LocalAddr = [BitConverter]::ToUInt32([Net.IPAddress]::Parse($t.LocalAddress).GetAddressBytes(), 0)
+                    $row.LocalPort = [uint32]((($t.LocalPort -band 0xFF) -shl 8) -bor ($t.LocalPort -shr 8))
+                    $row.RemoteAddr = [BitConverter]::ToUInt32([Net.IPAddress]::Parse($t.RemoteAddress).GetAddressBytes(), 0)
+                    $row.RemotePort = [uint32]((($t.RemotePort -band 0xFF) -shl 8) -bor ($t.RemotePort -shr 8))
+                    $e = [Harness.Win]::SetTcpEntry([ref]$row)
+                    # a row that closed meanwhile is fine; anything else is a real failure
+                    if ($e -ne 0 -and (Get-NetTCPConnection -OwningProcess $p.Id -LocalPort $t.LocalPort -RemotePort $t.RemotePort -State Established -ErrorAction SilentlyContinue)) { throw "${i}: SetTcpEntry $($t.LocalPort)->$($t.RemotePort) failed: $e" }
+                    $n++
+                }
+                Start-Sleep -Milliseconds 200
+            }
+            Write-Host "${i}: dropped for $TimeoutSec s, $n connections reset"
+        }
+    }
     'stop' {
         $run = Run-Dir
         $all = @('A', 'B', 'C', 'D')
+        # the process objects themselves: a game that is exiting may no longer
+        # match Game-Proc yet still hold its instance mutex and ports
+        $procs = @{}; foreach ($i in $all) { $p = Game-Proc $run $i; if ($p) { $procs[$i] = $p } }
         & $PSCommandPath close -Inst $all -Root $Root
         $deadline = (Get-Date).AddSeconds(20)
-        while ((Get-Date) -lt $deadline -and ($all | Where-Object { Game-Proc $run $_ })) { Start-Sleep -Milliseconds 500 }
-        foreach ($i in $all) { $p = Game-Proc $run $i; if ($p) { $p.Kill(); Write-Host "${i}: killed after WM_CLOSE timeout" } }
+        foreach ($i in $procs.Keys) {
+            $ms = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalMilliseconds)
+            if (-not $procs[$i].WaitForExit($ms)) {
+                $procs[$i].Kill()
+                if (-not $procs[$i].WaitForExit(10000)) { throw "${i}: still running after kill (pid $($procs[$i].Id))" }
+                Write-Host "${i}: killed after WM_CLOSE timeout"
+            }
+        }
         Write-Host "stopped; logs in $run"
     }
     'status' {
