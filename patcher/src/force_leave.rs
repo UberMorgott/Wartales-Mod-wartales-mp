@@ -207,7 +207,7 @@
 //      as a non-coop minigame locks its player; never the initiator itself), so
 //      the switch is queued;
 //      flPump (Controller.waitGameAlive, one at a time) runs processSyncMode once
-//      nothing would be cut. Logged `mp: mode switch waits for a minigame` / `goes`.
+//      nothing would be cut for SETTLE s (a minigame's result RPCs follow its window). Logged `mp: mode switch waits for a minigame` / `goes`.
 //   S  Npc.talk / Chest.action refuse only for the clicking player's own lock
 //      (flSelfLocked in place of anyPlayerLocked): another player's minigame
 //      (a non-coop one locks its player) no longer blocks anyone's talk or chest.
@@ -261,6 +261,8 @@ const SHOWS: &str = "mp: window shown after the minigame";
 /// M: a party mode switch held while a minigame runs, and started after it.
 const SWITCH_WAITS: &str = "mp: mode switch waits for a minigame";
 const SWITCH_GO: &str = "mp: mode switch goes";
+/// Seconds a held switch waits after the last minigame ended (its result RPCs).
+const SETTLE: f64 = 2.0;
 
 /// Reason codes of `flWhy` / `flDialog` / `tlWhy` / `cpWhy` (0 = nothing refuses) and their log text.
 const REASONS: [&str; 15] = [
@@ -511,12 +513,6 @@ struct Plan {
     sync_sites: Vec<(usize, usize)>,
     /// M: BasePlayer.connected (a gone player's lock never holds a switch).
     bp_connected: RefField,
-    /// M: Place.states and its array, ui.win.Activity's and PlaceView's class
-    /// globals (a started activity's State still there: its result may follow).
-    p_states: F,
-    ps_array: F,
-    act_cls: (RefGlobal, RefType),
-    view_cls: (RefGlobal, RefType),
     process_sync: RefFun,
     c_game: RefField,
     /// h2d.Object.visible (a spectator's hidden minigame window is no minigame).
@@ -932,11 +928,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("unexpected Controller.processSyncMode signature");
     }
     let c_game = typed(ctrl_t, "game", game_t)?;
-    // the place's states (Activity persist Mode lives there until its end)
-    let p_states = field(code, v_place.1, "states")?;
-    let ps_array = field(code, p_states.1, "array")?;
-    let act_cls = class_global(code, "ui.win.Activity")?;
-    let view_cls = class_global(code, "world.PlaceView")?;
     let bp_connected = typed(bp_t, "connected", t.bool_)?;
     // S: the vanilla "nobody may start while any player is locked" gates of a
     // click that only concerns its own player: Npc.talk, Chest.action (one
@@ -1152,10 +1143,6 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         self_gates,
         sync_sites,
         bp_connected,
-        p_states,
-        ps_array,
-        act_cls,
-        view_cls,
         process_sync,
         c_game,
         o_visible,
@@ -3657,17 +3644,6 @@ fn add_hold(code: &mut Bytecode, p: &Plan, activity: RefFun, dyn_t: RefType) -> 
         r.r(p.g_me.1),
         r.r(p.bp_locked.1),
     );
-    let (mode, vc, view, place, pst, psa, ac, act, un) = (
-        r.r(p.g_mode.1),
-        r.r(p.view_cls.1),
-        r.r(p.view_t),
-        r.r(p.v_place.1),
-        r.r(p.p_states.1),
-        r.r(p.ps_array.1),
-        r.r(p.act_cls.1),
-        r.r(p.act_t),
-        r.r(p.unit_t),
-    );
     let mut a = Asm::new();
     a.op(Opcode::Field {
         dst: b,
@@ -3687,103 +3663,6 @@ fn add_hold(code: &mut Bytecode, p: &Plan, activity: RefFun, dyn_t: RefType) -> 
         arg0: Reg(0),
     });
     a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
-    // a place's ui.win.Activity with its unit chosen: running, or its window
-    // gone while its result (doResult, rewards) is still on the way
-    a.op(Opcode::Field {
-        dst: mode,
-        obj: Reg(0),
-        field: p.g_mode.0,
-    });
-    a.op(Opcode::GetGlobal {
-        dst: vc,
-        global: p.view_cls.0,
-    });
-    a.op(Opcode::Call2 {
-        dst: b,
-        fun: p.base_check,
-        arg0: vc,
-        arg1: mode,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "players");
-    a.op(Opcode::UnsafeCast { dst: view, src: mode });
-    a.op(Opcode::Field {
-        dst: place,
-        obj: view,
-        field: p.v_place.0,
-    });
-    a.jmp(Opcode::JNull { reg: place, offset: 0 }, "players");
-    a.op(Opcode::Field {
-        dst: pst,
-        obj: place,
-        field: p.p_states.0,
-    });
-    a.jmp(Opcode::JNull { reg: pst, offset: 0 }, "players");
-    a.op(Opcode::Field {
-        dst: psa,
-        obj: pst,
-        field: p.ps_array.0,
-    });
-    a.op(Opcode::SafeCast { dst: lst, src: psa });
-    a.jmp(Opcode::JNull { reg: lst, offset: 0 }, "players");
-    a.op(Opcode::Int { dst: zero, ptr: i0 });
-    a.op(Opcode::Field {
-        dst: n,
-        obj: lst,
-        field: p.a_len,
-    });
-    a.loop_head("st");
-    a.jmp(
-        Opcode::JSLte {
-            a: n,
-            b: zero,
-            offset: 0,
-        },
-        "players",
-    );
-    a.op(Opcode::Decr { dst: n });
-    a.op(Opcode::Field {
-        dst: raw,
-        obj: lst,
-        field: p.a_raw.0,
-    });
-    a.op(Opcode::GetArray {
-        dst: d,
-        array: raw,
-        index: n,
-    });
-    a.op(Opcode::GetGlobal {
-        dst: ac,
-        global: p.act_cls.0,
-    });
-    a.op(Opcode::Call2 {
-        dst: b,
-        fun: p.base_check,
-        arg0: ac,
-        arg1: d,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "st");
-    a.op(Opcode::SafeCast { dst: act, src: d });
-    a.op(Opcode::Field {
-        dst: un,
-        obj: act,
-        field: p.act_unit,
-    });
-    a.jmp(Opcode::JNull { reg: un, offset: 0 }, "st");
-    // a gone player's activity never ends here: it holds nothing
-    a.op(Opcode::Field {
-        dst: pl,
-        obj: un,
-        field: p.u_owner,
-    });
-    a.jmp(Opcode::JNull { reg: pl, offset: 0 }, "yes");
-    a.op(Opcode::Field {
-        dst: b,
-        obj: pl,
-        field: p.bp_connected,
-    });
-    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
-    a.jmp(Opcode::JAlways { offset: 0 }, "st");
-    a.label("players");
     // another connected player locked with something (a client's non-coop
     // minigame locks its player; the initiator's own lock never holds)
     a.op(Opcode::Field {
@@ -3878,6 +3757,7 @@ fn add_pump(
     pumping: RefGlobal,
     held_by: RefGlobal,
     go_once: RefGlobal,
+    free_since: RefGlobal,
 ) -> Result<RefFun> {
     let go = str_global(code, p.t.str_, SWITCH_GO);
     let me_f = next_findex(code)?;
@@ -3894,7 +3774,9 @@ fn add_pump(
         r.r(t.void),
     );
     let i0 = int_const(code, 0);
+    let (f0, f_settle) = (float_const(code, 0.0), float_const(code, SETTLE));
     let ex = r.r(p.g_me.1);
+    let (now, since, lim) = (r.r(t.f64_), r.r(t.f64_), r.r(t.f64_));
     let mut a = Asm::new();
     a.op(Opcode::Field {
         dst: g,
@@ -3912,7 +3794,58 @@ fn add_pump(
         arg0: g,
         arg1: ex,
     });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "done");
+    a.op(Opcode::Call0 {
+        dst: now,
+        fun: p.sys_time,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "free");
+    // still busy: the settle time starts again once it is free
+    a.op(Opcode::Float { dst: since, ptr: f0 });
+    a.op(Opcode::SetGlobal {
+        global: free_since,
+        src: since,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "again");
+    // free for SETTLE s (the minigame's result RPCs, e.g. rewards, arrive
+    // after its window closed): go
+    a.label("free");
+    a.op(Opcode::GetGlobal {
+        dst: since,
+        global: free_since,
+    });
+    a.op(Opcode::Float { dst: lim, ptr: f0 });
+    a.jmp(
+        Opcode::JNotEq {
+            a: since,
+            b: lim,
+            offset: 0,
+        },
+        "wait",
+    );
+    a.op(Opcode::SetGlobal {
+        global: free_since,
+        src: now,
+    });
+    a.op(Opcode::Mov { dst: since, src: now });
+    a.label("wait");
+    a.op(Opcode::Float {
+        dst: lim,
+        ptr: f_settle,
+    });
+    a.op(Opcode::Add {
+        dst: lim,
+        a: since,
+        b: lim,
+    });
+    a.jmp(
+        Opcode::JSGte {
+            a: now,
+            b: lim,
+            offset: 0,
+        },
+        "done",
+    );
+    a.label("again");
     a.op(Opcode::Field {
         dst: lst,
         obj: Reg(0),
@@ -3932,6 +3865,11 @@ fn add_pump(
     });
     a.op(Opcode::Ret { ret: v });
     a.label("done");
+    a.op(Opcode::Float { dst: since, ptr: f0 });
+    a.op(Opcode::SetGlobal {
+        global: free_since,
+        src: since,
+    });
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(false),
@@ -6715,7 +6653,8 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
     let held_by = add_global(code, p.g_me.1);
     let hold = add_hold(code, p, activity, dyn_t)?;
     let go_once = add_global(code, p.t.bool_);
-    let pump = add_pump(code, p, hold, pumping, held_by, go_once)?;
+    let free_since = add_global(code, p.t.f64_);
+    let pump = add_pump(code, p, hold, pumping, held_by, go_once, free_since)?;
     let sync_held = add_sync_held(code, p, hold, pump, pumping, held_by, go_once)?;
     for &(fi, at) in &p.sync_sites {
         let f = &mut code.functions[fi];
