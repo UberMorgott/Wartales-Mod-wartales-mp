@@ -529,6 +529,8 @@ struct Plan {
     cb_fi: usize,
     elem_t: RefType,
     gather_cls: (RefGlobal, RefType),
+    /// st.item.Tool class global: a craft locks its player with the Tool.
+    tool_cls: (RefGlobal, RefType),
     omap_t: RefType,
     omap_get: RefFun,
     omap_set: RefFun,
@@ -994,6 +996,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
     let gather_cls = class_global(code, "ent.p.ActivityGather")?;
     let omap_t = obj_type(code, "haxe.ds.ObjectMap")?;
+    let tool_cls = class_global(code, "st.item.Tool")?;
     let omap_get = proto(code, omap_t, "get")?;
     let omap_set = proto(code, omap_t, "set")?;
     let omap_new = method(code, omap_t, "__constructor__")?.findex;
@@ -1223,6 +1226,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         cb_fi,
         elem_t,
         gather_cls,
+        tool_cls,
         omap_t,
         omap_get,
         omap_set,
@@ -3950,6 +3954,7 @@ fn add_hold(
         r.r(p.bp_locked.1),
         r.r(p.gather_cls.1),
     );
+    let tcl = r.r(p.tool_cls.1);
     let (b, st, sp, spa, lst, n, zero, raw, d, pl, lw) = (
         r.r(t.bool_),
         r.r(p.g_state.1),
@@ -4066,14 +4071,14 @@ fn add_hold(
         dst: m,
         global: map,
     });
-    a.jmp(Opcode::JNull { reg: m, offset: 0 }, "pl");
+    a.jmp(Opcode::JNull { reg: m, offset: 0 }, "parked");
     a.op(Opcode::Call2 {
         dst: e,
         fun: p.omap_get,
         arg0: m,
         arg1: pl,
     });
-    a.jmp(Opcode::JNull { reg: e, offset: 0 }, "pl");
+    a.jmp(Opcode::JNull { reg: e, offset: 0 }, "parked");
     a.op(Opcode::SafeCast { dst: rec, src: e });
     a.jmp(
         Opcode::JEq {
@@ -4083,6 +4088,22 @@ fn add_hold(
         },
         "yes",
     );
+    // a craft (Tool.startCraft builds its Activity without startActivity__impl,
+    // so nothing is recorded): its player is locked with the st.item.Tool.
+    // shortcut: a Craft still at its unit / recipe choice holds too; a start /
+    // end signal from Activity._start / endActivity would tell them apart.
+    a.label("parked");
+    a.op(Opcode::GetGlobal {
+        dst: tcl,
+        global: p.tool_cls.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: tcl,
+        arg1: lw,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
     a.jmp(Opcode::JAlways { offset: 0 }, "pl");
     a.label("no");
     a.op(Opcode::Bool {
