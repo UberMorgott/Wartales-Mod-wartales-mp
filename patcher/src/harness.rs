@@ -91,6 +91,12 @@
 //                       "noauth" when this game has no authority on the source.
 //       job <traitId>   the first unit of me with a job (else its first unit):
 //                       removeTrait(old job), addTrait(id), as JobSelector does.
+//       learn <i> <id>  Unit.learnSkill(id) of getUnits()[i] (dump army order).
+//       equip <i> <slot> <kind>  Unit.equipSlot of getUnits()[i]: the equip slot
+//                       whose identifier starts with <slot>, its current item,
+//                       the first own inventory item whose kind contains <kind>.
+//                       dump army: weapon2, left, slots; battle currentUnit:
+//                       shield (HealthBars guard counter value), guard, taken, reduce.
 //       snap <name>     Game.screenshot(dir + name + ".png"): the frame the
 //                       game renders itself (3D + 2D), no window or screen access.
 //     dir+"ack.txt" = "<seq> ok|dispatched|unknown|nogame|nosave|nowindow|noplayer", and
@@ -417,6 +423,43 @@ struct Ctx {
     song: (RefType, RefFun),
     /// dump `place`: Game.getCurrentPlace, Place.id / parent / getRegion, Region.kind.
     place: PlaceF,
+    /// `learn` / `equip`, dump army `weapon2` / `left` / `slots` (weapon_set).
+    wset: WSet,
+    /// dump currentUnit `shield` / `guard` / `taken` / `reduce` (shield_total).
+    shield: Shield,
+}
+
+/// st.Unit.learnSkill(id), getEquipSlots and its slot virtual (identifier,
+/// get), Unit.equipSlot(identifier, prev, item, keep) (the networked equip
+/// the inventory drop calls), st.Item.kind, Unit.secondaryWeapon / left.
+struct WSet {
+    learn: RefFun,
+    slots: RefFun,
+    slot_t: RefType,
+    ident: RefField,
+    get: (RefField, RefType),
+    item_t: RefType,
+    kind: RefField,
+    equip: RefFun,
+    null_bool_t: RefType,
+    weapon2: (RefField, RefType),
+    left: (RefField, RefType),
+}
+
+/// battle.Unit.unitHud -> LiteUnitHud.healthBars -> HealthBars.guard ->
+/// Counter.value (the number shield_total computes), battle.Unit.get_guard,
+/// battle.Unit.stats and its damageTakenPercent / damageReducePercent.
+struct Shield {
+    hud: (RefField, RefType),
+    bars: (RefField, RefType),
+    guard: (RefField, RefType),
+    value: (RefField, RefType),
+    get_guard: (RefFun, RefType),
+    /// LiteUnitHud.show(open, minimal)
+    show: RefFun,
+    stats: (RefField, RefType),
+    taken: RefField,
+    reduce: RefField,
 }
 
 /// The dump's `place`: {id, parent (its id), region (the kind getRegion gives)}.
@@ -900,8 +943,18 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             dm
         },
         battle_sbar: field(code, battle_t, "skillBar")?,
-        sb_layout: typed(code, obj_type(code, "battle.ui.win.SkillBar")?, "skillsLayout", arr_t)?,
-        sb_cur: typed(code, obj_type(code, "battle.ui.win.SkillBar")?, "currentSkillBarIndex", i32_t)?,
+        sb_layout: typed(
+            code,
+            obj_type(code, "battle.ui.win.SkillBar")?,
+            "skillsLayout",
+            arr_t,
+        )?,
+        sb_cur: typed(
+            code,
+            obj_type(code, "battle.ui.win.SkillBar")?,
+            "currentSkillBarIndex",
+            i32_t,
+        )?,
         icon_t: obj_type(code, "ui.comp.SkillIcon")?,
         icon_skill: typed(code, obj_type(code, "ui.comp.SkillIcon")?, "skill", skill_t)?,
         ui_bar: field(code, game_ui.1, "worldButtonsBar")?,
@@ -1024,16 +1077,35 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         set_rest: {
             let ctrl_t = field(code, game_t, "ctrl")?.1;
             let m = method(code, ctrl_t, "playerSetRestState")?;
-            let cb_t = *fun_args(code, m).get(3).context("playerSetRestState: no callback")?;
-            (mfn(ctrl_t, "playerSetRestState", &[ctrl_t, bool_t, bool_t, cb_t], void_t)?, cb_t)
+            let cb_t = *fun_args(code, m)
+                .get(3)
+                .context("playerSetRestState: no callback")?;
+            (
+                mfn(
+                    ctrl_t,
+                    "playerSetRestState",
+                    &[ctrl_t, bool_t, bool_t, cb_t],
+                    void_t,
+                )?,
+                cb_t,
+            )
         },
         get_simu: {
             let simu_t = obj_type(code, "st.player.Simulation")?;
             (mfn(state_t, "get_simu", &[state_t], simu_t)?, simu_t)
         },
-        simu_tired: typed(code, obj_type(code, "st.player.Simulation")?, "tiredness", f64_t)?,
+        simu_tired: typed(
+            code,
+            obj_type(code, "st.player.Simulation")?,
+            "tiredness",
+            f64_t,
+        )?,
         region_hud: field(code, game_ui.1, "regionHud")?,
-        hud_tired: field(code, obj_type(code, "ui.comp.gameUIComp.RegionHud")?, "tired")?,
+        hud_tired: field(
+            code,
+            obj_type(code, "ui.comp.gameUIComp.RegionHud")?,
+            "tired",
+        )?,
         pb_value: typed(code, obj_type(code, "ui.comp.ProgressBar")?, "value", f64_t)?,
         get_confession: {
             let conf_t = obj_type(code, "st.player.Confession")?;
@@ -1044,20 +1116,41 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             let ld_t = obj_type(code, "st.player.ConfessionLogData")?;
             (mfn(conf_t, "getPending", &[conf_t], ld_t)?, ld_t)
         },
-        pending_unit: typed(code, obj_type(code, "st.player.ConfessionLogData")?, "unit", unit_t)?,
-        play_camp_conf: mfn(field(code, game_t, "ctrl")?.1, "playCampConfession", &[field(code, game_t, "ctrl")?.1, unit_t], void_t)?,
+        pending_unit: typed(
+            code,
+            obj_type(code, "st.player.ConfessionLogData")?,
+            "unit",
+            unit_t,
+        )?,
+        play_camp_conf: mfn(
+            field(code, game_t, "ctrl")?.1,
+            "playCampConfession",
+            &[field(code, game_t, "ctrl")?.1, unit_t],
+            void_t,
+        )?,
         inv_netop: {
             let m = method(code, inv_t, "_networkOperation")?;
-            let op_t = *fun_args(code, m).get(2).context("_networkOperation: no op")?;
-            mfn(inv_t, "_networkOperation", &[inv_t, i32_t, op_t, bool_t], bool_t)?
+            let op_t = *fun_args(code, m)
+                .get(2)
+                .context("_networkOperation: no op")?;
+            mfn(
+                inv_t,
+                "_networkOperation",
+                &[inv_t, i32_t, op_t, bool_t],
+                bool_t,
+            )?
         },
         slot_op_t: {
             let m = method(code, inv_t, "_networkOperation")?;
-            *fun_args(code, m).get(2).context("_networkOperation: no op")?
+            *fun_args(code, m)
+                .get(2)
+                .context("_networkOperation: no op")?
         },
         move_to: {
             let m = method(code, inv_t, "_networkOperation")?;
-            let op_t = *fun_args(code, m).get(2).context("_networkOperation: no op")?;
+            let op_t = *fun_args(code, m)
+                .get(2)
+                .context("_networkOperation: no op")?;
             let Type::Enum { constructs, .. } = &code.types[op_t.0] else {
                 bail!("SlotOperation is not an enum");
             };
@@ -1163,7 +1256,13 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             let t = obj_type(code, "ent.Place")?;
             let f = method(code, t, "setLeaveState")?;
             let cb = *fun_args(code, f).get(3).context("setLeaveState arity")?;
-            want_sig(code, f.findex, &[t, bool_t, bool_t, cb], void_t, "setLeaveState")?;
+            want_sig(
+                code,
+                f.findex,
+                &[t, bool_t, bool_t, cb],
+                void_t,
+                "setLeaveState",
+            )?;
             (f.findex, cb)
         },
         place: {
@@ -1217,6 +1316,70 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
                 region: mfn(t, "getRegion", &[t], region_t)?,
                 region_t,
                 kind: typed(code, region_t, "kind", str_t)?,
+            }
+        },
+        wset: {
+            let item_t = obj_type(code, "st.Item")?;
+            let slots = method(code, unit_t, "getEquipSlots")?;
+            let (_, ret) = sig(code, slots.findex)?;
+            if ret != arr_t {
+                bail!("getEquipSlots: not an ArrayObj");
+            }
+            // the slot virtual: autoUnequip's third argument
+            let au = static_fn(code, "ui.comp.$ItemSlot", "autoUnequip")?;
+            let slot_t = *fun_args(code, au).get(2).context("autoUnequip: no slot")?;
+            let ident = field_of_virtual(code, slot_t, "identifier")?;
+            if ident.1 != str_t {
+                bail!("slot identifier is not a String");
+            }
+            let get = field_of_virtual(code, slot_t, "get")?;
+            let get_ret = match &code.types[get.1 .0] {
+                Type::Fun(t) if t.args.is_empty() => t.ret,
+                _ => bail!("slot get is not a () -> Item"),
+            };
+            if get_ret != item_t {
+                bail!("slot get does not return an Item");
+            }
+            let eq = method(code, unit_t, "equipSlot")?;
+            let ea = fun_args(code, eq);
+            if ea.len() != 5 || ea[..4] != [unit_t, str_t, item_t, item_t] {
+                bail!("Unit.equipSlot: unexpected signature");
+            }
+            WSet {
+                learn: mfn(unit_t, "learnSkill", &[unit_t, str_t], void_t)?,
+                slots: slots.findex,
+                slot_t,
+                ident: ident.0,
+                get: (get.0, get.1),
+                item_t,
+                kind: typed(code, item_t, "kind", str_t)?,
+                equip: eq.findex,
+                null_bool_t: ea[4],
+                weapon2: field(code, unit_t, "secondaryWeapon")?,
+                left: field(code, unit_t, "left")?,
+            }
+        },
+        shield: {
+            let hud = field(code, bunit_t, "unitHud")?;
+            let bars = field(code, hud.1, "healthBars")?;
+            let guard = field(code, bars.1, "guard")?;
+            let value = field(code, guard.1, "value")?;
+            let gg = method(code, bunit_t, "get_guard")?.findex;
+            let (ga, gr) = sig(code, gg)?;
+            if ga != [bunit_t] {
+                bail!("battle.Unit.get_guard: unexpected signature");
+            }
+            let stats = field(code, bunit_t, "stats")?;
+            Shield {
+                hud,
+                bars,
+                guard,
+                value,
+                get_guard: (gg, gr),
+                show: mfn(hud.1, "show", &[hud.1, bool_t, bool_t], void_t)?,
+                stats,
+                taken: typed(code, stats.1, "damageTakenPercent", i32_t)?,
+                reduce: typed(code, stats.1, "damageReducePercent", i32_t)?,
             }
         },
     })
@@ -1535,6 +1698,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         k(code, 8),
         k(code, 9),
     );
+    let s_k = super::asm::string_ref(code, "k");
     let mut gs = |v: &'static str| str_global(code, c.str_t, v);
     let s_inst = gs("WARTALES_MP_TEST_INSTANCE");
     let s_la = gs("LOCALAPPDATA");
@@ -1567,6 +1731,8 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_confirm = gs("confirm");
     let s_forgehit = gs("forgehit ");
     let s_job = gs("job ");
+    let s_learn = gs("learn ");
+    let s_equip = gs("equip ");
     let s_tutorial = gs("tutorial");
     let s_lpstop = gs("lpstop");
     let s_song = gs("song");
@@ -1740,6 +1906,23 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         r.r(c.region_hud.1),
         r.r(c.hud_tired.1),
         r.r(c.set_rest.1),
+    );
+    let wprev = r.r(c.wset.item_t);
+    let (wslot, wget, witem, wnb, wl2, wl3) = (
+        r.r(c.wset.slot_t),
+        r.r(c.wset.get.1),
+        r.r(c.wset.item_t),
+        r.r(c.wset.null_bool_t),
+        r.r(c.wset.weapon2.1),
+        r.r(c.wset.left.1),
+    );
+    let (shud, sbars, sctr, sval, sgv, sst) = (
+        r.r(c.shield.hud.1),
+        r.r(c.shield.bars.1),
+        r.r(c.shield.guard.1),
+        r.r(c.shield.value.1),
+        r.r(c.shield.get_guard.1),
+        r.r(c.shield.stats.1),
     );
 
     let mut a = Asm::new();
@@ -2789,9 +2972,18 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.if_null(msrc, "ack");
     // put: own inventory -> chest (swap the two)
     a.if_false(old, "mv_args");
-    a.op(Opcode::Mov { dst: inv, src: msrc });
-    a.op(Opcode::Mov { dst: msrc, src: mdst });
-    a.op(Opcode::Mov { dst: mdst, src: inv });
+    a.op(Opcode::Mov {
+        dst: inv,
+        src: msrc,
+    });
+    a.op(Opcode::Mov {
+        dst: msrc,
+        src: mdst,
+    });
+    a.op(Opcode::Mov {
+        dst: mdst,
+        src: inv,
+    });
     a.label("mv_args");
     a.gg(res, s_unknown);
     a.gg(s2, s_sp);
@@ -2998,6 +3190,197 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("ack");
     a.label("not_job");
 
+    // verbs: learn <i> <skillId>  (Unit.learnSkill of GameState.getUnits()[i],
+    // the dump's army order: the skill tree's learn, e.g. WeaponSwapSword)
+    //        equip <i> <slot> <kind>  (Unit.equipSlot(slot, prev, item, null),
+    // the networked equip of an inventory drop: the slot is the first of
+    // getEquipSlots whose identifier starts with <slot> (Weapon,
+    // SecondaryWeapon, LeftHand), prev its get(), item the first of the own
+    // inventory whose kind contains <kind>; ack noelem if either is missing)
+    verb(&mut a, s_learn, "not_learn", Some(k6));
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.go("wu");
+    a.label("not_learn");
+    verb(&mut a, s_equip, "not_equip", Some(k6));
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.label("wu");
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(gst, g, c.g.state);
+    a.if_null(gst, "ack");
+    a.fld(me, g, c.g.me.0);
+    a.if_null(me, "ack");
+    // s = "<i> <rest>": aid = "<i>", s = "<rest>"
+    a.gg(res, s_unknown);
+    a.gg(s2, s_sp);
+    a.call(i, c.index_of, &[s, s2, ni]);
+    a.int(kk, k1);
+    a.jmp(
+        Opcode::JSLt {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.int(kk, k0);
+    a.op(Opcode::ToDyn { dst: ni, src: i });
+    a.call(aid, c.substr, &[s, kk, ni]);
+    a.op(Opcode::Null { dst: ni });
+    a.op(Opcode::Incr { dst: i });
+    a.call(s, c.substr, &[s, i, ni]);
+    a.call(ni, c.parse_int, &[aid]);
+    a.if_null(ni, "ack");
+    a.op(Opcode::SafeCast { dst: ix, src: ni });
+    a.op(Opcode::Null { dst: ni });
+    a.gg(res, s_noelem);
+    a.op(Opcode::Null { dst: rf });
+    a.call(list, c.get_units, &[gst, rf]);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.fld(arr, list, c.arr_arr.0);
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::SafeCast { dst: unit, src: d });
+    a.if_null(unit, "ack");
+    a.if_false(b, "wu_equip");
+    a.call(void, c.wset.learn, &[unit, s]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    // equip: s = "<slot> <kind>": eid = "<slot>", s = "<kind>"
+    a.label("wu_equip");
+    a.gg(res, s_unknown);
+    a.gg(s2, s_sp);
+    a.call(i, c.index_of, &[s, s2, ni]);
+    a.int(kk, k1);
+    a.jmp(
+        Opcode::JSLt {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.int(kk, k0);
+    a.op(Opcode::ToDyn { dst: ni, src: i });
+    a.call(eid, c.substr, &[s, kk, ni]);
+    a.op(Opcode::Null { dst: ni });
+    a.op(Opcode::Incr { dst: i });
+    a.call(s, c.substr, &[s, i, ni]);
+    a.gg(res, s_noelem);
+    // the slot
+    a.call(list, c.wset.slots, &[unit]);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.loop_head("wu_s");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.op(Opcode::ToVirtual { dst: wslot, src: d });
+    a.if_null(wslot, "wu_s");
+    a.fld(s2, wslot, c.wset.ident);
+    a.if_null(s2, "wu_s");
+    a.call(i, c.index_of, &[s2, eid, ni]);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JNotEq {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "wu_s",
+    );
+    a.fld(wget, wslot, c.wset.get.0);
+    a.if_null(wget, "ack");
+    a.op(Opcode::CallClosure {
+        dst: wprev,
+        fun: wget,
+        args: vec![],
+    });
+    // the item
+    a.fld(inv, me, c.player_inv);
+    a.if_null(inv, "ack");
+    a.call(list, c.all_items, &[inv]);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.loop_head("wu_i");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    // a stack {k: Item, count, chk}
+    a.if_null(d, "wu_i");
+    a.op(Opcode::DynGet {
+        dst: d,
+        obj: d,
+        field: s_k,
+    });
+    a.op(Opcode::SafeCast { dst: witem, src: d });
+    a.if_null(witem, "wu_i");
+    a.fld(s2, witem, c.wset.kind);
+    a.if_null(s2, "wu_i");
+    a.call(i, c.index_of, &[s2, s, ni]);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JSLt {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "wu_i",
+    );
+    // the slot's own identifier (eid is only its prefix)
+    a.fld(s2, wslot, c.wset.ident);
+    a.op(Opcode::Null { dst: wnb });
+    a.call(void, c.wset.equip, &[unit, s2, wprev, witem, wnb]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_equip");
+
     // verb: snap <name>  (Game.screenshot: the rendered 3D + 2D frame, taken by
     // the game itself, to <harness dir><name>.png; no window or screen access)
     verb(&mut a, s_snap, "not_snap", Some(k5));
@@ -3185,30 +3568,72 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.fld(n, list, c.arr_len);
     w.a.int(ix, k0);
     w.a.loop_head("sbp_loop");
-    w.a.jmp(Opcode::JSGte { a: ix, b: n, offset: 0 }, "sbp_end");
+    w.a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "sbp_end",
+    );
     w.a.int(kk, k0);
-    w.a.jmp(Opcode::JEq { a: ix, b: kk, offset: 0 }, "sbp_first");
+    w.a.jmp(
+        Opcode::JEq {
+            a: ix,
+            b: kk,
+            offset: 0,
+        },
+        "sbp_first",
+    );
     w.lit(code, ",");
     w.a.label("sbp_first");
     w.a.fld(arr, list, c.arr_arr.0);
-    w.a.op(Opcode::GetArray { dst: d, array: arr, index: ix });
+    w.a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
     w.a.op(Opcode::Incr { dst: ix });
-    w.a.op(Opcode::SafeCast { dst: sbpage, src: d });
+    w.a.op(Opcode::SafeCast {
+        dst: sbpage,
+        src: d,
+    });
     w.lit(code, "[");
     w.a.if_null(sbpage, "sbs_end");
     w.a.fld(sbm, sbpage, c.arr_len);
     w.a.int(sbj, k0);
     w.a.loop_head("sbs_loop");
-    w.a.jmp(Opcode::JSGte { a: sbj, b: sbm, offset: 0 }, "sbs_end");
+    w.a.jmp(
+        Opcode::JSGte {
+            a: sbj,
+            b: sbm,
+            offset: 0,
+        },
+        "sbs_end",
+    );
     w.a.int(kk, k0);
-    w.a.jmp(Opcode::JEq { a: sbj, b: kk, offset: 0 }, "sbs_first");
+    w.a.jmp(
+        Opcode::JEq {
+            a: sbj,
+            b: kk,
+            offset: 0,
+        },
+        "sbs_first",
+    );
     w.lit(code, ",");
     w.a.label("sbs_first");
     w.a.fld(sbarr, sbpage, c.arr_arr.0);
-    w.a.op(Opcode::GetArray { dst: d, array: sbarr, index: sbj });
+    w.a.op(Opcode::GetArray {
+        dst: d,
+        array: sbarr,
+        index: sbj,
+    });
     w.a.op(Opcode::Incr { dst: sbj });
     w.a.op(Opcode::Null { dst: s });
-    w.a.op(Opcode::SafeCast { dst: sbicon, src: d });
+    w.a.op(Opcode::SafeCast {
+        dst: sbicon,
+        src: d,
+    });
     w.a.if_null(sbicon, "sbs_q");
     w.a.fld(skill, sbicon, c.icon_skill);
     w.a.if_null(skill, "sbs_q");
@@ -3244,6 +3669,40 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.fld(parr, proxy, c.proxy_array.0);
     w.a.label("cur_p");
     w.obj_q(parr);
+    // shield_total: the HUD shield counter's value and what it is computed from
+    w.lit(code, ",\"shield\":");
+    w.a.fld(shud, bu, c.shield.hud.0);
+    w.a.if_null(shud, "sh_none");
+    w.a.fld(sbars, shud, c.shield.bars.0);
+    w.a.if_set(sbars, "sh_bars");
+    // a closed hud builds no bars: open it (a hover's show), the next dump reads them
+    w.a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    w.a.op(Opcode::Bool {
+        dst: isn,
+        value: ValBool(false),
+    });
+    w.a.call(void, c.shield.show, &[shud, b, isn]);
+    w.a.go("sh_none");
+    w.a.label("sh_bars");
+    w.a.fld(sctr, sbars, c.shield.guard.0);
+    w.a.if_null(sctr, "sh_none");
+    w.a.fld(sval, sctr, c.shield.value.0);
+    w.val(sval);
+    w.a.go("sh_end");
+    w.a.label("sh_none");
+    w.lit(code, "null");
+    w.a.label("sh_end");
+    w.lit(code, ",\"guard\":");
+    w.a.call(sgv, c.shield.get_guard.0, &[bu]);
+    w.val(sgv);
+    w.a.fld(sst, bu, c.shield.stats.0);
+    w.a.if_null(sst, "sh_st");
+    w.kv(code, "taken", sst, c.shield.taken, i);
+    w.kv(code, "reduce", sst, c.shield.reduce, i);
+    w.a.label("sh_st");
     w.lit(code, ",\"skills\":[");
     w.a.call(list, c.active_skills, &[bu]);
     w.a.if_null(list, "skills_end");
@@ -3339,6 +3798,16 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.lit(code, ",\"weapon\":");
     w.a.fld(uw, unit, c.unit_weapon.0);
     w.obj_q(uw);
+    // weapon_set: the second set, the offhand, the equip slots (identifier + allowed types)
+    w.lit(code, ",\"weapon2\":");
+    w.a.fld(wl2, unit, c.wset.weapon2.0);
+    w.obj_q(wl2);
+    w.lit(code, ",\"left\":");
+    w.a.fld(wl3, unit, c.wset.left.0);
+    w.obj_q(wl3);
+    w.lit(code, ",\"slots\":");
+    w.a.call(list2, c.wset.slots, &[unit]);
+    w.obj_q(list2);
     w.lit(code, "}");
     w.a.op(Opcode::Incr { dst: ix });
     w.a.go("army_loop");

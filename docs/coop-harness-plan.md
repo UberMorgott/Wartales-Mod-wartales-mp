@@ -199,6 +199,8 @@ New verbs (`patcher/src/harness.rs`; each answers `ok` / `nowindow` / `noelem` /
 | `choose` | the open `ChooseUnit`: `select` its first unit with no disable reason, `validate` |
 | `job <traitId>` | the first unit of `me` with a job (else its first unit): `removeTrait(old job)`, `addTrait(id)` as `JobSelector.chooseJob`; ids from data.cdb: `Thief`, `Bard`, `Blacksmith`, `Scholar`, `Woodcutter`, `Miner` (a wrong id throws after the old job is gone) |
 | `tutorial` | the open `ui.win.Tutorial`: `close` (Continue; runs the tutorial callback). Seen tutorials do not open again (user data) |
+| `learn <i> <skillId>` | `Unit.learnSkill(id)` of `GameState.getUnits()[i]` (dump `army` order), e.g. `WeaponSwapSword` (the second weapon set) |
+| `equip <i> <slot> <kind>` | `Unit.equipSlot` of unit i: the equip slot whose identifier starts with `<slot>` (`Weapon`, `SecondaryWeapon`, `Shield`), its current item as prev, the first own inventory item whose kind contains `<kind>`; ack `noelem` if either is missing. dump `army[]`: `weapon2`, `left`, `slots`; `battle.currentUnit`: `shield` (its LiteUnitHud HealthBars guard counter value; a closed hud is opened and the next dump reads it), `guard`, `taken`, `reduce` |
 | `lpstop` | the open `ui.win.LockPick`: `stopActivity` (Leave) |
 | `craft` / `confirm` / `forgehit <k>` | `Craft.forgeRecipe(selectedRecipe)`; `Confirm.onResult(true)`; `ForgeAction.validateStep(metalShards[k])` (a hit on shard k; T2Forge's anvil has 4) |
 
