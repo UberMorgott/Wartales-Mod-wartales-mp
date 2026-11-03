@@ -1709,6 +1709,16 @@ fn add_out(code: &mut Bytecode, p: &Plan, spect: RefFun, cam: RefFun) -> Result<
         fun: cam,
         arg0: act,
     });
+    // the watched view's camera lock (doSetCamera clears it only in a PlaceView)
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::SetField {
+        obj: md,
+        field: p.m_lock,
+        src: b,
+    });
     a.label("drop");
     a.op(Opcode::Null { dst: cs });
     a.op(Opcode::SetField {
