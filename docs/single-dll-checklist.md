@@ -187,4 +187,33 @@ Commits 7a144e7 (harness: dump opens a closed hud and runs HealthBars.sync befor
 | shield dump | rats 10 turns: first-dump nulls 0 of 20 (was null on every new turn); values track guard/taken/reduce A = B; negatives (Одик taken 65 -> -65) are shield_total's design (`vulnerability keeps its sign` test), no flicker | PASS |
 | host as watcher (guest plays coop lockpick) | no harness path (coop start uses player = host) | NOT-OBSERVABLE |
 
-PENDING (harness stopped by owner request): full regression on the committed build 76e4504 (items 3-8, minigame popup both directions, switch hold during host song / guest forge, lockpick leave), and a re-run of the cases above on it. dist\winmm.dll 5508096 B, SHA256 F18BA43079C3865B7C21B740A6CBCA97F79904868CF194D76AFFAB6643CEA310; dist-test SHA256 6AD5B73E....
+PENDING (harness stopped by owner request): full regression on the committed build 76e4504 (items 3-8, minigame popup both directions, switch hold during host song / guest forge, lockpick leave), and a re-run of the cases above on it. dist\winmm.dll 5508096 B, SHA256 F18BA43079C3865B7C21B740A6CBCA97F79904868CF194D76AFFAB6643CEA310; dist-test SHA256 6AD5B73E.... Done in fix pass 5 below.
+
+## Fix pass 5 (2026-11-04): regression on bb080aa, guest UI, latch, drag, pump
+
+Runs `D:\WartalesTest\runs\20261104-*`. Test dll = HEAD + harness probes (8bf8f7d: dump `mvis`/`gvis` on-screen per window, `np` tiles, `sdrag`/`drag`, `au`; verbs `tile`, `sdrag`), then + 674ad44 / 9cdf6ec (`-0214*` on). Scripts in the session scratchpad (reg/mini/latch/drag/pump/guestui .ps1); background only (cmd channel, `snap`, PostMessage for mouse / Escape in the drag case).
+
+| Item | Evidence | Status |
+| --- | --- | --- |
+| 3 load world / battle / guest dead | `-001222`: B `reload: connecting to the server id`, host 2nd `> Join`; from battle.Battle same; B killed: `ready=0`, `no longer waited for` +15.0 s, gameplayStart, rejoin: Одик/Анян connected | PASS |
+| 4 drop 15 s | 3 resets, 2 rejoin lines, `> Join`, B world.World connected | PASS |
+| 5 save list | 34 saves, `host zzznone` 108-127 ms (= no-op round trip); save099 listed, no lobby; save020 lobby | PASS |
+| 6 shield_total | Одик + Torch: 0 / shown False; +Protection 25 / True on A and B | PASS |
+| 7 weapon_set | A = B every step (2H+1H, +Torch, +Shield, 1H+2H, +Torch) | PASS |
+| 8 windows | `-002704`: own sheet place -> camp -> place; inspect T2Recruit1 + host quit: UnitInfo closed, meLock empty. (`-001222`: a debrief nobody closed blocks the harness `camp` toggle: vanilla modal, harness-only) | PASS |
+| inventory re-show in battle (35ec1d5) | `-003242`: open inventory, battle, `sheet` (rebuildInventory): invc ch 372 / 3 children kept, also after the debrief | PASS |
+| popup host sing / guest sing | host sings + guest talks: host `window waits` -> `shown after`; guest sings + host talks: host Dialog at once, guest's after the song | PASS |
+| switch hold host song / guest song (5a) | `mode switch waits` -> `goes` after the song, host's SingAction copy gone, both T2Forge | PASS |
+| switch hold guest forge | FAIL on HEAD (`-013916`, `-021402`: no hold, guest ForgeAction cut, craft lost): 36c16cc records only startActivity__impl starts, Tool.startCraft bypasses it; a craft locks its player with the st.item.Tool (dump: lock `Anvil:<item uid>`, activityUnits key `ent.p.Element(Anvil)`). Fixed 9cdf6ec (Tool lock holds); `-022353` / final: waits, `forge recv 2`, goes, CraftConfirm, item crafted. NPC sheet lock still does not hold (`-023409`) | PASS (after 9cdf6ec) |
+| leave during guest forge / host lockpick | `Leave waits: player busy` until the end, then go | PASS |
+| watcher step-out lockpick Esc / Leave / to the end, ruins Esc | `spectate LockPick out`, aw vis false camSave false; A unchanged; ruins `spectate NinePuzzle out` | PASS |
+| 2 guest unit choice (act Anvil -> ChooseUnit) | ChooseUnit only in B's gwins | PASS |
+| 2 guest NPC dialog / ruins barricade dialog | the Dialog is on screen on the host too (mvis true, host camera at the NPC): vanilla shared dialog (host builds it, Element.makeDialog + setFocus); not changed: owner decision | FAIL vs "guest only" (vanilla) |
+| 2 theft dialog, leak to a 3rd client | no harness path (towns are CityWorld menus; 2 instances) | NOT TESTED |
+| 3 remote-UI latch (forge, then NinePuzzle) | `-005427` HEAD and `-010300` pre-0f641b2 (cea3f6f): tiles move the same on A and B (`tile` x4), no Null access, A's dialog on B (mvis true). Live log (client, bf59f04 build): 40x `moveTileFromSlot threw: Null access` (NinePuzzle.hx:178, tiles null = init never ran): flDefer held the puzzle's alive under a false flMinigame (another player's started Craft / activity-less AnalyzeAction counted), fixed by 0f641b2 (Codex agrees on the mechanism; not reproduced here) | PASS (live cause by code, not reproduced) |
+| 4 skill drag cancel (bb080aa) | `-012541`: B `sdrag` + host `console ap` (B's bar rebuilt): slot alloc false, pushed false, no drag after a 150 px move; drag started (dragElement skillSlots) + Escape: pushed false, no drag; + right click: same | PASS |
+| 5a client minigame end | as switch hold guest song | PASS |
+| 5b `pumping` after a Controller swap | static: only flPump's end cleared it; a load while held left it set, later held switches got no pump (Codex agrees). Fixed 674ad44 (global = owning Controller); `-023409`: held switch, host reload while held, then held again: waits -> goes | FIXED |
+| 5c `go_once` | flPump ran processSyncMode with no game (Codex): syncEnterMode's NullCheck throws before flSyncHeld consumes go_once. 674ad44 drops a game-less pump | FIXED |
+
+Tests: patcher 230/230, + harness 231/231 (1 ignored), winmm 163/163, lint ok. dist\winmm.dll 5530624 B, SHA256 A85B77313A4FFF9B9D9C724440BE44760917E8A071594A5D1CF23F30D2E3AF27.
