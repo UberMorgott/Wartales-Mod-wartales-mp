@@ -154,6 +154,7 @@ struct Plan {
     game_started: RefField,
     game_reloading: RefField,
     game_ready: RefField,
+    gp_start: RefFun,
     game_host: F,
     host_clients: RefField,
     game_state: F,
@@ -561,6 +562,7 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         game_started,
         game_reloading,
         game_ready,
+        gp_start,
         game_host,
         host_clients,
         game_state,
@@ -1380,10 +1382,11 @@ fn add_tick(
         r.r(p.i32_t),
         r.r(p.dyn_t),
     );
-    let (ready_c, sur, me, cnt0, now, since, dt, lim) = (
+    let (ready_c, sur, me, cnt0, ready0, now, since, dt, lim) = (
         r.r(p.arr_t),
         r.r(p.nc_t),
         r.r(p.game_me.1),
+        r.r(p.i32_t),
         r.r(p.i32_t),
         r.r(p.f64_t),
         r.r(p.f64_t),
@@ -1779,8 +1782,8 @@ fn add_tick(
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "unsince");
     a.op(Opcode::Mov { dst: sur, src: c });
     a.jmp(Opcode::JAlways { offset: 0 }, "elig");
+    // no client at all (`sur` null): the only guests are gone, timed the same
     a.label("elig_end");
-    a.jmp(Opcode::JNull { reg: sur, offset: 0 }, "unsince");
     a.op(Opcode::Call0 {
         dst: now,
         fun: p.sys_time,
@@ -1844,6 +1847,7 @@ fn add_tick(
         "replay",
     );
     fld(&mut a, me, game, p.game_me.0);
+    fld(&mut a, ready0, game, p.game_ready);
     a.op(Opcode::Int { dst: j, ptr: i0 });
     a.loop_head("ab");
     fld(&mut a, len, players, p.arr_len);
@@ -1853,7 +1857,7 @@ fn add_tick(
             b: len,
             offset: 0,
         },
-        "replay",
+        "ab_end",
     );
     next(&mut a, players, j, pl, true);
     a.jmp(Opcode::JNull { reg: pl, offset: 0 }, "ab");
@@ -1944,6 +1948,7 @@ fn add_tick(
         fun: p.println,
         arg0: txt,
     });
+    a.jmp(Opcode::JNull { reg: sur, offset: 0 }, "alone");
     fld(&mut a, cnt0, game, p.game_ready);
     forced_ready(&mut a, sur, "caught3");
     fld(&mut a, b, game, p.game_started);
@@ -1984,6 +1989,35 @@ fn add_tick(
         src: now,
     });
     a.jmp(Opcode::JAlways { offset: 0 }, "replay");
+    // No client to run the handler for (it logs client.get_user() first): count
+    // the absent player here, and once all are counted start as the handler
+    // does (its broadcast has no client to reach).
+    a.label("alone");
+    fld(&mut a, cnt, game, p.game_ready);
+    a.op(Opcode::Incr { dst: cnt });
+    a.op(Opcode::SetField {
+        obj: game,
+        field: p.game_ready,
+        src: cnt,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "ab");
+    a.label("ab_end");
+    a.jmp(Opcode::JNotNull { reg: sur, offset: 0 }, "replay");
+    fld(&mut a, cnt, game, p.game_ready);
+    a.jmp(
+        Opcode::JSGte {
+            a: ready0,
+            b: cnt,
+            offset: 0,
+        },
+        "replay",
+    );
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.gp_start,
+        arg0: game,
+    });
+    a.jmp(Opcode::JAlways { offset: 0 }, "end");
     a.label("unsince");
     a.op(Opcode::Float { dst: dt, ptr: f0 });
     a.op(Opcode::SetGlobal {
@@ -2774,6 +2808,31 @@ mod tests {
         s.frame();
         assert!(s.started());
         assert_eq!(s.ready_count(), V::I(4));
+    }
+
+    /// A 2-player save whose only guest never comes back (its game crashed,
+    /// then the host reloaded): no client exists to run the handler for, so
+    /// the absent guest is counted directly and gameplay starts (harness run
+    /// 20261103-032417 waited at ready=1 for good).
+    #[test]
+    fn only_guest_who_never_connects() {
+        let Some((orig, code)) = images() else { return };
+        let p = plan(&orig).expect("plan");
+        for (img, fixed) in [(&orig, false), (&code, true)] {
+            let nf = fixed.then_some(orig.functions.len());
+            let mut s = Sim::new(img, &p, &["host", "a"], nf);
+            s.now = 10.0;
+            s.frame(); // the wait starts here
+            s.now = 10.0 + WAIT_ABSENT - 1.0;
+            s.frame();
+            assert!(!s.started(), "still within the grace period");
+            s.now = 10.0 + WAIT_ABSENT + 0.5;
+            s.frame();
+            assert_eq!(s.started(), fixed, "fixed={fixed}");
+            if fixed {
+                assert_eq!(s.ready_count(), V::I(2));
+            }
+        }
     }
 
     /// Host + A + B load a save; B's client drops before ReadyToStart (a Join
