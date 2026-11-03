@@ -203,8 +203,12 @@
 //      tavern, battle start) begins in Controller.syncEnterMode / syncLeaveMode
 //      on the host, whose `if (this.lockSyncMode)` queues the call in
 //      enterLeaveModeQueue. That read becomes flSyncHeld(this): also true while
-//      flHold (flActivity, or another connected player locked with something,
-//      as a non-coop minigame locks its player; never the initiator itself), so
+//      flHold (flActivity, or another connected player in its own non-coop
+//      minigame: locked with the element its running activity started on,
+//      recorded by flActRec at Controller.startActivity__impl and dropped by
+//      flActEnd at _callbackResult__impl, or with an ActivityGather; a chest /
+//      NPC sheet / camp tool lock is a window, kept across the switch by
+//      mode_windows, and never holds; never the initiator itself), so
 //      the switch is queued;
 //      flPump (Controller.waitGameAlive, one at a time) runs processSyncMode once
 //      nothing would be cut for SETTLE s (a minigame's result RPCs follow its window). Logged `mp: mode switch waits for a minigame` / `goes`.
@@ -513,6 +517,23 @@ struct Plan {
     sync_sites: Vec<(usize, usize)>,
     /// M: BasePlayer.connected (a gone player's lock never holds a switch).
     bp_connected: RefField,
+    /// M: Controller.startActivity__impl (fn index; flActRec at op 0), ent.p.Element,
+    /// ent.p.ActivityGather class global, haxe.ds.ObjectMap (type, get, set, new).
+    sa_fi: usize,
+    /// Controller._callbackResult__impl (fn index; flActEnd at op 0), haxe.ds.IntMap.
+    cb_fi: usize,
+    elem_t: RefType,
+    gather_cls: (RefGlobal, RefType),
+    omap_t: RefType,
+    omap_get: RefFun,
+    omap_set: RefFun,
+    omap_remove: RefFun,
+    omap_new: RefFun,
+    imap_t: RefType,
+    imap_get: RefFun,
+    imap_set: RefFun,
+    imap_remove: RefFun,
+    imap_new: RefFun,
     process_sync: RefFun,
     c_game: RefField,
     /// h2d.Object.visible (a spectator's hidden minigame window is no minigame).
@@ -929,6 +950,56 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
     let c_game = typed(ctrl_t, "game", game_t)?;
     let bp_connected = typed(bp_t, "connected", t.bool_)?;
+    // M: which lock is a minigame: Controller.startActivity__impl(ctrl, player,
+    // element, ..) runs on the host for every activity (it returns at once for
+    // another player's); a non-coop one then locks that player with `element`.
+    let sa = method(code, ctrl_t, "startActivity__impl")?;
+    let elem_t = obj_type(code, "ent.p.Element")?;
+    let sa_args = fun_args(code, sa);
+    if sa_args.len() != 7
+        || sa_args[..3] != [ctrl_t, bp_t, elem_t]
+        || sa_args[6] != t.i32_
+        || !is_sub(code, elem_t, bp_locked.1)
+        || !no_jump_to(sa, 0)
+    {
+        bail!("unexpected Controller.startActivity__impl shape");
+    }
+    let sa_fi = fun_index(code, sa.findex)?;
+    // its callback id comes back to the host in _callbackResult__impl (the
+    // activity's onClose / onResult): the record ends there
+    let cb = method(code, ctrl_t, "_callbackResult__impl")?;
+    if fun_args(code, cb) != [ctrl_t, t.i32_, dyn_t] || !no_jump_to(cb, 0) {
+        bail!("unexpected Controller._callbackResult__impl shape");
+    }
+    let cb_fi = fun_index(code, cb.findex)?;
+    let imap_t = obj_type(code, "haxe.ds.IntMap")?;
+    let imap_get = proto(code, imap_t, "get")?;
+    let imap_set = proto(code, imap_t, "set")?;
+    let imap_remove = proto(code, imap_t, "remove")?;
+    let imap_new = method(code, imap_t, "__constructor__")?.findex;
+    if sig(code, imap_get)? != (vec![imap_t, t.i32_], dyn_t)
+        || sig(code, imap_set)? != (vec![imap_t, t.i32_, dyn_t], t.void)
+        || sig(code, imap_remove)? != (vec![imap_t, t.i32_], t.bool_)
+        || sig(code, imap_new)? != (vec![imap_t], t.void)
+    {
+        bail!("unexpected haxe.ds.IntMap signatures");
+    }
+    if !is_sub(code, obj_type(code, "ent.p.ActivityGather")?, bp_locked.1) {
+        bail!("ent.p.ActivityGather is not a BasePlayer.lockedWith type");
+    }
+    let gather_cls = class_global(code, "ent.p.ActivityGather")?;
+    let omap_t = obj_type(code, "haxe.ds.ObjectMap")?;
+    let omap_get = proto(code, omap_t, "get")?;
+    let omap_set = proto(code, omap_t, "set")?;
+    let omap_new = method(code, omap_t, "__constructor__")?.findex;
+    let omap_remove = proto(code, omap_t, "remove")?;
+    if sig(code, omap_get)? != (vec![omap_t, dyn_t], dyn_t)
+        || sig(code, omap_set)? != (vec![omap_t, dyn_t, dyn_t], t.void)
+        || sig(code, omap_remove)? != (vec![omap_t, dyn_t], t.bool_)
+        || sig(code, omap_new)? != (vec![omap_t], t.void)
+    {
+        bail!("unexpected haxe.ds.ObjectMap signatures");
+    }
     // S: the vanilla "nobody may start while any player is locked" gates of a
     // click that only concerns its own player: Npc.talk, Chest.action (one
     // Game.anyPlayerLocked call each).
@@ -1143,6 +1214,20 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         self_gates,
         sync_sites,
         bp_connected,
+        sa_fi,
+        cb_fi,
+        elem_t,
+        gather_cls,
+        omap_t,
+        omap_get,
+        omap_set,
+        omap_remove,
+        omap_new,
+        imap_t,
+        imap_get,
+        imap_set,
+        imap_remove,
+        imap_new,
         process_sync,
         c_game,
         o_visible,
@@ -3622,15 +3707,214 @@ fn add_mine(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
     a.op(Opcode::Ret { ret: b });
     push_fn(code, vec![p.game_t, p.win_t], t.bool_, r.0, a.finish(), p.dbg_file)
 }
+/// `flActRec(ctrl, player, element, callbId)` at Controller.startActivity__impl
+/// entry: on the host, another player's activity start records `player ->
+/// element` (ObjectMap global `map`) and `callbId -> player` (IntMap `ids`), a
+/// new pair of maps per Game (`map_game`). A non-coop one then locks that player
+/// with `element`, so flHold tells its minigame from a window lock (a chest, an
+/// NPC sheet, a camp tool) by that pair; flActEnd drops it when the activity's
+/// callback comes back. Coop starts on the host always name the host's own
+/// player (unrecorded: its window is flActivity).
+fn add_act_rec(
+    code: &mut Bytecode,
+    p: &Plan,
+    map: RefGlobal,
+    ids: RefGlobal,
+    map_game: RefGlobal,
+) -> Result<RefFun> {
+    let t = &p.t;
+    let args = vec![p.g_ctrl.1, p.g_me.1, p.elem_t, t.i32_];
+    let mut r = Regs(args.clone());
+    let (g, b, me, m, im, gm, void) = (
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(p.g_me.1),
+        r.r(p.omap_t),
+        r.r(p.imap_t),
+        r.r(p.game_t),
+        r.r(t.void),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Field {
+        dst: g,
+        obj: Reg(0),
+        field: p.c_game,
+    });
+    a.jmp(Opcode::JNull { reg: g, offset: 0 }, "ret");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: g,
+        field: p.g_auth,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ret");
+    a.jmp(
+        Opcode::JNull {
+            reg: Reg(1),
+            offset: 0,
+        },
+        "ret",
+    );
+    a.jmp(
+        Opcode::JNull {
+            reg: Reg(2),
+            offset: 0,
+        },
+        "ret",
+    );
+    a.op(Opcode::Field {
+        dst: me,
+        obj: g,
+        field: p.g_me.0,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: Reg(1),
+            b: me,
+            offset: 0,
+        },
+        "ret",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: m,
+        global: map,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: im,
+        global: ids,
+    });
+    a.jmp(Opcode::JNull { reg: m, offset: 0 }, "new");
+    a.jmp(Opcode::JNull { reg: im, offset: 0 }, "new");
+    a.op(Opcode::GetGlobal {
+        dst: gm,
+        global: map_game,
+    });
+    a.jmp(
+        Opcode::JEq {
+            a: gm,
+            b: g,
+            offset: 0,
+        },
+        "set",
+    );
+    // the previous game's players and elements are dropped with its maps
+    a.label("new");
+    a.op(Opcode::New { dst: m });
+    a.op(Opcode::Call1 {
+        dst: void,
+        fun: p.omap_new,
+        arg0: m,
+    });
+    a.op(Opcode::New { dst: im });
+    a.op(Opcode::Call1 {
+        dst: void,
+        fun: p.imap_new,
+        arg0: im,
+    });
+    a.op(Opcode::SetGlobal {
+        global: map,
+        src: m,
+    });
+    a.op(Opcode::SetGlobal {
+        global: ids,
+        src: im,
+    });
+    a.op(Opcode::SetGlobal {
+        global: map_game,
+        src: g,
+    });
+    a.label("set");
+    a.op(Opcode::Call3 {
+        dst: void,
+        fun: p.omap_set,
+        arg0: m,
+        arg1: Reg(1),
+        arg2: Reg(2),
+    });
+    a.op(Opcode::Call3 {
+        dst: void,
+        fun: p.imap_set,
+        arg0: im,
+        arg1: Reg(3),
+        arg2: Reg(1),
+    });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: void });
+    push_fn(code, args, t.void, r.0, a.finish(), p.dbg_file)
+}
+
+/// `flActEnd(ctrl, callbId, result)` at Controller._callbackResult__impl entry
+/// (before the callback runs, which may start the next switch): the recorded
+/// activity of that callback ends, its player's record goes.
+fn add_act_end(
+    code: &mut Bytecode,
+    p: &Plan,
+    dyn_t: RefType,
+    map: RefGlobal,
+    ids: RefGlobal,
+) -> Result<RefFun> {
+    let t = &p.t;
+    let args = vec![p.g_ctrl.1, t.i32_, dyn_t];
+    let mut r = Regs(args.clone());
+    let (m, im, pd, b) = (r.r(p.omap_t), r.r(p.imap_t), r.r(dyn_t), r.r(t.bool_));
+    let void = r.r(t.void);
+    let mut a = Asm::new();
+    a.op(Opcode::GetGlobal {
+        dst: im,
+        global: ids,
+    });
+    a.jmp(Opcode::JNull { reg: im, offset: 0 }, "ret");
+    a.op(Opcode::Call2 {
+        dst: pd,
+        fun: p.imap_get,
+        arg0: im,
+        arg1: Reg(1),
+    });
+    a.jmp(Opcode::JNull { reg: pd, offset: 0 }, "ret");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.imap_remove,
+        arg0: im,
+        arg1: Reg(1),
+    });
+    a.op(Opcode::GetGlobal {
+        dst: m,
+        global: map,
+    });
+    a.jmp(Opcode::JNull { reg: m, offset: 0 }, "ret");
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.omap_remove,
+        arg0: m,
+        arg1: pd,
+    });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: void });
+    push_fn(code, args, t.void, r.0, a.finish(), p.dbg_file)
+}
 /// `flHold(game, except) -> Bool`, host in co-op: a minigame runs that a party mode
 /// switch would end: flActivity (a minigame window on the host: its own, or a
-/// coop one whoever plays it) or another connected player locked with something
-/// (a client's non-coop minigame locks its player, e.g. a guest's forge); the
+/// coop one whoever plays it) or another connected player in a minigame of its
+/// own: locked with the element flActRec recorded for its last activity start
+/// (a guest's forge, song, ...), or with an ent.p.ActivityGather (a gather
+/// locks its player itself). Any other lock is a window (chest, NPC sheet, camp
+/// tool), which survives the switch (mode_windows), so it never holds. The
 /// initiator's own lock (`except`) never holds its own switch.
-fn add_hold(code: &mut Bytecode, p: &Plan, activity: RefFun, dyn_t: RefType) -> Result<RefFun> {
+fn add_hold(
+    code: &mut Bytecode,
+    p: &Plan,
+    activity: RefFun,
+    dyn_t: RefType,
+    map: RefGlobal,
+) -> Result<RefFun> {
     let i0 = int_const(code, 0);
     let t = &p.t;
     let mut r = Regs(vec![p.game_t, p.g_me.1]);
+    let (m, e, rec, gcls) = (
+        r.r(p.omap_t),
+        r.r(dyn_t),
+        r.r(p.bp_locked.1),
+        r.r(p.gather_cls.1),
+    );
     let (b, st, sp, spa, lst, n, zero, raw, d, pl, lw) = (
         r.r(t.bool_),
         r.r(p.g_state.1),
@@ -3731,7 +4015,39 @@ fn add_hold(code: &mut Bytecode, p: &Plan, activity: RefFun, dyn_t: RefType) -> 
         obj: pl,
         field: p.bp_locked.0,
     });
-    a.jmp(Opcode::JNotNull { reg: lw, offset: 0 }, "yes");
+    a.jmp(Opcode::JNull { reg: lw, offset: 0 }, "pl");
+    a.op(Opcode::GetGlobal {
+        dst: gcls,
+        global: p.gather_cls.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: gcls,
+        arg1: lw,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
+    a.op(Opcode::GetGlobal {
+        dst: m,
+        global: map,
+    });
+    a.jmp(Opcode::JNull { reg: m, offset: 0 }, "pl");
+    a.op(Opcode::Call2 {
+        dst: e,
+        fun: p.omap_get,
+        arg0: m,
+        arg1: pl,
+    });
+    a.jmp(Opcode::JNull { reg: e, offset: 0 }, "pl");
+    a.op(Opcode::SafeCast { dst: rec, src: e });
+    a.jmp(
+        Opcode::JEq {
+            a: rec,
+            b: lw,
+            offset: 0,
+        },
+        "yes",
+    );
     a.jmp(Opcode::JAlways { offset: 0 }, "pl");
     a.label("no");
     a.op(Opcode::Bool {
@@ -6505,6 +6821,8 @@ fn add_cp_close(
 
 /// New functions, in the order `apply` appends them.
 struct Added {
+    act_rec: RefFun,
+    act_end: RefFun,
     activity: RefFun,
     mine: RefFun,
     show: RefFun,
@@ -6651,7 +6969,10 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
     let self_locked = add_self_locked(code, p)?;
     let pumping = add_global(code, p.t.bool_);
     let held_by = add_global(code, p.g_me.1);
-    let hold = add_hold(code, p, activity, dyn_t)?;
+    let act_map = add_global(code, p.omap_t);
+    let act_game = add_global(code, p.game_t);
+    let act_ids = add_global(code, p.imap_t);
+    let hold = add_hold(code, p, activity, dyn_t, act_map)?;
     let go_once = add_global(code, p.t.bool_);
     let free_since = add_global(code, p.t.f64_);
     let pump = add_pump(code, p, hold, pumping, held_by, go_once, free_since)?;
@@ -6770,7 +7091,54 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         }
         _ => None,
     };
+    // M: flActRec(this, player, element) at startActivity__impl entry
+    let act_rec = add_act_rec(code, p, act_map, act_ids, act_game)?;
+    let act_end = add_act_end(code, p, dyn_t, act_map, act_ids)?;
+    for (fi, op) in [
+        (
+            p.sa_fi,
+            Opcode::CallN {
+                dst: Reg(0),
+                fun: act_rec,
+                args: vec![Reg(0), Reg(1), Reg(2), Reg(6)],
+            },
+        ),
+        (
+            p.cb_fi,
+            Opcode::Call3 {
+                dst: Reg(0),
+                fun: act_end,
+                arg0: Reg(0),
+                arg1: Reg(1),
+                arg2: Reg(2),
+            },
+        ),
+    ] {
+        let f = &mut code.functions[fi];
+        f.regs.push(p.t.void);
+        let v = Reg((f.regs.len() - 1) as u32);
+        let op = match op {
+            Opcode::CallN { fun, args, .. } => Opcode::CallN { dst: v, fun, args },
+            Opcode::Call3 {
+                fun,
+                arg0,
+                arg1,
+                arg2,
+                ..
+            } => Opcode::Call3 {
+                dst: v,
+                fun,
+                arg0,
+                arg1,
+                arg2,
+            },
+            _ => unreachable!(),
+        };
+        insert_ops(f, 0, vec![op]);
+    }
     Ok(Added {
+        act_rec,
+        act_end,
         activity,
         mine,
         show,
@@ -6803,6 +7171,7 @@ fn touched(p: &Plan) -> Vec<usize> {
     v.extend([p.set_win_fi, p.focus_fi]);
     v.extend(p.self_gates.iter().map(|&(fi, _)| fi));
     v.extend(p.sync_sites.iter().map(|&(fi, _)| fi));
+    v.extend([p.sa_fi, p.cb_fi]);
     if let Some(tv) = &p.tav {
         v.extend([tv.ask_fi, tv.close_fi, tv.upd_fi]);
     }
@@ -6827,8 +7196,8 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
     match apply(code, &p) {
         Ok(a) => {
             eprintln!(
-                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, text fn@{}, notify fn@{}, windows fn@{}, dialog fn@{}, minigame fn@{} (mine fn@{}), activity fn@{}, release fn@{}), setWindow -> fn@{} / setFocus -> fn@{} (show fn@{}) during a minigame, talk/chest gate fn@{}, mode switch hold fn@{} (hold fn@{}, pump fn@{}), Window.alive defers to fn@{} during a minigame, tryClose -> fn@{}, leave -> fn@{}",
-                a.update.0, a.why.0, a.log.0, a.text.0, a.notify.0, a.closable.0, a.dialog.0, a.minigame.0, a.mine.0, a.activity.0, a.release.0, a.set_win.0, a.focus.0, a.show.0, a.self_locked.0, a.sync_held.0, a.hold.0, a.pump.0, a.defer.0, a.refused.0, a.paused.0
+                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, text fn@{}, notify fn@{}, windows fn@{}, dialog fn@{}, minigame fn@{} (mine fn@{}), activity fn@{}, release fn@{}), setWindow -> fn@{} / setFocus -> fn@{} (show fn@{}) during a minigame, talk/chest gate fn@{}, mode switch hold fn@{} (hold fn@{}, pump fn@{}, activity record fn@{} / end fn@{}), Window.alive defers to fn@{} during a minigame, tryClose -> fn@{}, leave -> fn@{}",
+                a.update.0, a.why.0, a.log.0, a.text.0, a.notify.0, a.closable.0, a.dialog.0, a.minigame.0, a.mine.0, a.activity.0, a.release.0, a.set_win.0, a.focus.0, a.show.0, a.self_locked.0, a.sync_held.0, a.hold.0, a.pump.0, a.act_rec.0, a.act_end.0, a.defer.0, a.refused.0, a.paused.0
             );
             if let Some(t) = a.tav {
                 eprintln!(
@@ -6872,9 +7241,9 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        // Appended only: 31 functions (+ their types), 15 globals.
+        // Appended only: 33 functions (+ their types), 15 globals.
         let nf = orig.functions.len();
-        assert_eq!(back.functions.len(), nf + 31);
+        assert_eq!(back.functions.len(), nf + 33);
         assert_eq!(&back.types[..orig.types.len()], &orig.types[..]);
         let ng = orig.globals.len();
         assert_eq!(&back.globals[..ng], &orig.globals[..]);
@@ -6940,6 +7309,8 @@ mod tests {
             ca.ask,
             ca.update,
             ca.close,
+            added.act_rec,
+            added.act_end,
         ];
         for (k, f) in back.functions[nf..].iter().enumerate() {
             assert_eq!(f.findex, new[k]);
@@ -6962,6 +7333,18 @@ mod tests {
             );
             check_types(&back, b, at..at + 1);
         }
+        // M: flActRec(this, player, element, callbId) in front of startActivity__impl,
+        // flActEnd(this, id, result) in front of _callbackResult__impl.
+        let (a, b) = (&orig.functions[p.sa_fi], &back.functions[p.sa_fi]);
+        shifted(a, b, 0, 1);
+        assert!(matches!(&b.ops[0],
+            Opcode::CallN { fun, args, .. } if *fun == added.act_rec && args[..] == [Reg(0), Reg(1), Reg(2), Reg(6)]));
+        check_types(&back, b, 0..1);
+        let (a, b) = (&orig.functions[p.cb_fi], &back.functions[p.cb_fi]);
+        shifted(a, b, 0, 1);
+        assert!(matches!(b.ops[0],
+            Opcode::Call3 { fun, arg0: Reg(0), arg1: Reg(1), arg2: Reg(2), .. } if fun == added.act_end));
+        check_types(&back, b, 0..1);
         // M: syncEnterMode / syncLeaveMode read flSyncHeld(this) instead of lockSyncMode.
         assert_eq!(p.sync_sites.len(), 2);
         for &(fi, at) in &p.sync_sites {
