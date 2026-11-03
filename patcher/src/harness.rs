@@ -51,8 +51,10 @@
 //       inspect <sub>   in a place: Npc.inspect(null) of the first NPC element
 //                       whose id contains <sub> (the right click's step on the
 //                       inspecting machine, netInspect__impl). Ack "noelem".
-//       act <sub>       in a place: Element.activate(game.me) (the click's
-//                       path) of the first element whose id contains <sub>;
+//       act <sub>       in a place: Controller.playerTriggerAction(mode storage,
+//                       element, false), the click's RPC (the host runs
+//                       Entity.onAction for this player: an NPC talks, a chest
+//                       opens), on the first element whose id contains <sub>;
 //                       `act ?` prints "harness: elem <id>" for each. Ack
 //                       "noelem" when nothing matched.
 //       enter <placeId> GameState.getPlace(id, checkCities = true) +
@@ -76,6 +78,9 @@
 //       lpstop          the open LockPick: stopActivity (its Leave button).
 //       song            the open SongRepertoire: onSongChoose (Play).
 //       endturn         Battle.endTurn (the End Turn button).
+//       skill <id>      the skill bar click: Battle.canPlay, setCurrentSkill(the
+//                       current unit's active skill <id>):
+//                       an instant one (WeaponSwapSword) runs at once.
 //       camp            GameUI.toggleCamp (the camp button: make / leave camp).
 //       fadecamp        Game.fadeIn(null..) then GameUI.toggleCamp in the same
 //                       frame: a camp switch started under a no-break fade.
@@ -92,9 +97,12 @@
 //       job <traitId>   the first unit of me with a job (else its first unit):
 //                       removeTrait(old job), addTrait(id), as JobSelector does.
 //       learn <i> <id>  Unit.learnSkill(id) of getUnits()[i] (dump army order).
-//       equip <i> <slot> <kind>  Unit.equipSlot of getUnits()[i]: the equip slot
-//                       whose identifier starts with <slot>, its current item,
-//                       the first own inventory item whose kind contains <kind>.
+//       equip <i> <slot> <kind>  a drag from the own inventory onto the equip slot
+//                       of getUnits()[i] whose identifier starts with <slot>: pick
+//                       one of the first cell whose kind contains <kind> into the
+//                       hand (_networkOperation PickSingle, leaves the inventory),
+//                       BasePlayer._drop, Unit.netEquipSlot(slot, its item, hand item,
+//                       cb: a refused equip puts it back), as UnitInfo's slot drop.
 //                       dump army: weapon2, left, slots; battle currentUnit:
 //                       shield (HealthBars guard counter value), shieldShown (its number's tf.visible),
 //                       guard, taken, reduce.
@@ -351,7 +359,9 @@ struct Ctx {
     pv_elements: RefField,
     pelem_t: RefType,
     pelem_id: RefField,
-    activate: RefFun,
+    /// `act`: Controller.playerTriggerAction (the click RPC; the host runs
+    /// Entity.onAction for the clicking player), GameMode.getPersistStorage.
+    trigger: Trigger,
     /// `inspect`: ent.p.Npc, Npc.inspect and its callback type.
     npc_t: RefType,
     npc_inspect: (RefFun, RefType),
@@ -393,6 +403,9 @@ struct Ctx {
     inv_netop: RefFun,
     /// `endturn`: Battle.endTurn (the HUD's End Turn button).
     end_turn: RefFun,
+    /// `skill`: Battle.canPlay, Battle.setCurrentSkill and its onEnd type.
+    can_play: RefFun,
+    set_skill: (RefFun, RefType),
     /// `camp`: GameUI.toggleCamp (the HUD's camp button).
     toggle_camp: RefFun,
     /// `fadecamp`: Game.fadeIn and its argument types.
@@ -430,10 +443,30 @@ struct Ctx {
     shield: Shield,
 }
 
+/// Controller.playerTriggerAction(storage, entity, ref right), the virtual slot of
+/// GameMode.getPersistStorage, its storage type and the ref<bool> type.
+struct Trigger {
+    fun: RefFun,
+    storage: RefField,
+    storage_t: RefType,
+    ref_bool_t: RefType,
+}
+
 /// st.Unit.learnSkill(id), getEquipSlots and its slot virtual (identifier,
-/// get), Unit.equipSlot(identifier, prev, item, keep) (the networked equip
-/// the inventory drop calls), st.Item.kind, Unit.secondaryWeapon / left.
+/// get), Unit.netEquipSlot (the networked equip the equip-slot drop calls), st.Item.kind, Unit.secondaryWeapon / left.
 struct WSet {
+    /// st.Inventory.content (hxbit ArrayProxyData) and its `array` (the
+    /// slot-indexed stacks), SlotOperation.PickSingle, the hand's `select`,
+    /// BasePlayer._drop: an inventory pick into the hand and its drop.
+    content: (RefField, RefType),
+    content_arr: (RefField, RefType),
+    pick_single: RefEnumConstruct,
+    pick_select: RefField,
+    /// Unit.netEquipSlot(slot, prev, item, keep, onResult) and its onResult type;
+    /// PlayerInventory.addItem(inv, item, ref count) (abstract, static) and its ref type.
+    net_equip: (RefFun, RefType),
+    add_item: (RefFun, RefType),
+    drop: RefFun,
     learn: RefFun,
     slots: RefFun,
     slot_t: RefType,
@@ -441,7 +474,6 @@ struct WSet {
     get: (RefField, RefType),
     item_t: RefType,
     kind: RefField,
-    equip: RefFun,
     null_bool_t: RefType,
     weapon2: (RefField, RefType),
     left: (RefField, RefType),
@@ -1065,6 +1097,15 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         },
         inv_auth: mfn(inv_t, "hasAuthority", &[inv_t], bool_t)?,
         end_turn: mfn(battle_t, "endTurn", &[battle_t], void_t)?,
+        can_play: mfn(battle_t, "canPlay", &[battle_t], bool_t)?,
+        set_skill: {
+            let m = method(code, battle_t, "setCurrentSkill")?;
+            let sa = fun_args(code, m);
+            if sa.len() != 3 || sa[..2] != [battle_t, skill_t] {
+                bail!("Battle.setCurrentSkill: unexpected signature");
+            }
+            (m.findex, sa[2])
+        },
         toggle_camp: mfn(game_ui.1, "toggleCamp", &[game_ui.1], void_t)?,
         fade_in: {
             let f = method(code, game_t, "fadeIn")?;
@@ -1232,12 +1273,25 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         pv_elements: typed(code, obj_type(code, "world.PlaceView")?, "elements", arr_t)?,
         pelem_t: obj_type(code, "ent.p.Element")?,
         pelem_id: typed(code, obj_type(code, "ent.p.Element")?, "id", str_t)?,
-        activate: mfn(
-            obj_type(code, "ent.p.Element")?,
-            "activate",
-            &[obj_type(code, "ent.p.Element")?, player_t],
-            void_t,
-        )?,
+        trigger: {
+            let m = method(code, ctrl_t, "playerTriggerAction")?;
+            let ta = fun_args(code, m);
+            let ent_t = obj_type(code, "ent.Entity")?;
+            if ta.len() != 4 || ta[0] != ctrl_t || ta[2] != ent_t {
+                bail!("Controller.playerTriggerAction: unexpected signature");
+            }
+            let gm = obj_type(code, "GameMode")?;
+            let (sa, sr) = sig(code, method(code, gm, "getPersistStorage")?.findex)?;
+            if sa != [gm] || sr != ta[1] {
+                bail!("GameMode.getPersistStorage: unexpected signature");
+            }
+            Trigger {
+                fun: m.findex,
+                storage: crate::force_leave::slot(code, gm, "getPersistStorage")?,
+                storage_t: ta[1],
+                ref_bool_t: ta[3],
+            }
+        },
         npc_t: obj_type(code, "ent.p.Npc")?,
         npc_inspect: {
             let npc_t = obj_type(code, "ent.p.Npc")?;
@@ -1344,12 +1398,42 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             if get_ret != item_t {
                 bail!("slot get does not return an Item");
             }
-            let eq = method(code, unit_t, "equipSlot")?;
-            let ea = fun_args(code, eq);
-            if ea.len() != 5 || ea[..4] != [unit_t, str_t, item_t, item_t] {
-                bail!("Unit.equipSlot: unexpected signature");
+            let neq = method(code, unit_t, "netEquipSlot")?;
+            let na = fun_args(code, neq);
+            if na.len() != 6 || na[..4] != [unit_t, str_t, item_t, item_t] {
+                bail!("Unit.netEquipSlot: unexpected signature");
             }
+            // UnitInfo's equip-slot drop callback: addItem(me.inventory, item, ref 0)
+            let add = static_fn(code, "st.player._PlayerInventory.$PlayerInventory_Impl_", "addItem")?;
+            let aa = fun_args(code, add);
+            if aa.len() != 3 || aa[..2] != [inv_t, item_t] {
+                bail!("PlayerInventory.addItem: unexpected signature");
+            }
+            let nop = method(code, inv_t, "_networkOperation")?;
+            let op_t = *fun_args(code, nop)
+                .get(2)
+                .context("_networkOperation: no op")?;
+            let Type::Enum { constructs, .. } = &code.types[op_t.0] else {
+                bail!("SlotOperation is not an enum");
+            };
+            let ps = constructs
+                .iter()
+                .position(|c| s(code, c.name) == "PickSingle" && c.params.is_empty())
+                .context("SlotOperation.PickSingle not found")?;
+            let content = field(code, inv_t, "content")?;
             WSet {
+                content,
+                content_arr: field(code, content.1, "array")?,
+                pick_single: RefEnumConstruct(ps),
+                pick_select: typed(code, pick.1, "select", bool_t)?,
+                net_equip: (neq.findex, na[5]),
+                add_item: (add.findex, aa[2]),
+                drop: mfn(
+                    player_t,
+                    "_drop",
+                    &[player_t, bool_t, item_t, i32_t],
+                    bool_t,
+                )?,
                 learn: mfn(unit_t, "learnSkill", &[unit_t, str_t], void_t)?,
                 slots: slots.findex,
                 slot_t,
@@ -1357,8 +1441,7 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
                 get: (get.0, get.1),
                 item_t,
                 kind: typed(code, item_t, "kind", str_t)?,
-                equip: eq.findex,
-                null_bool_t: ea[4],
+                null_bool_t: na[4],
                 weapon2: field(code, unit_t, "secondaryWeapon")?,
                 left: field(code, unit_t, "left")?,
             }
@@ -1692,6 +1775,42 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         a.op(Opcode::Ret { ret: v });
         push_fn(code, vec![c.dyn_t], c.void_t, r.0, a.finish(), c.dbg)?
     };
+    // `equip`'s netEquipSlot result (UnitInfo's equip-slot drop does the same):
+    // a refused equip puts the dropped item back into the own inventory
+    let equip_cb = {
+        let mut r = Regs(vec![c.wset.item_t, c.bool_t]);
+        let (gc, g, me, inv, n, rn, v) = (
+            r.r(c.game_cls_t),
+            r.r(c.game_t),
+            r.r(c.g.me.1),
+            r.r(c.loot.1),
+            r.r(c.i32_t),
+            r.r(c.wset.add_item.1),
+            r.r(c.void_t),
+        );
+        let z = int_const(code, 0);
+        let mut a = Asm::new();
+        a.jmp(
+            Opcode::JTrue {
+                cond: Reg(1),
+                offset: 0,
+            },
+            "ret",
+        );
+        a.gg(gc, c.game_g);
+        a.fld(g, gc, c.game_inst);
+        a.if_null(g, "ret");
+        a.fld(me, g, c.g.me.0);
+        a.if_null(me, "ret");
+        a.fld(inv, me, c.player_inv);
+        a.if_null(inv, "ret");
+        a.int(n, z);
+        a.op(Opcode::Ref { dst: rn, src: n });
+        a.call(v, c.wset.add_item.0, &[inv, Reg(0), rn]);
+        a.label("ret");
+        a.op(Opcode::Ret { ret: v });
+        push_fn(code, vec![c.wset.item_t, c.bool_t], c.void_t, r.0, a.finish(), c.dbg)?
+    };
     let k = |code: &mut Bytecode, v: i32| int_const(code, v);
     let (k0, k1, k2, k3, k4, k5, k6, k7, k8, k9) = (
         k(code, 0),
@@ -1744,6 +1863,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_lpstop = gs("lpstop");
     let s_song = gs("song");
     let s_endturn = gs("endturn");
+    let s_skill = gs("skill ");
     let s_camp = gs("camp");
     let s_fadecamp = gs("fadecamp");
     let s_inv = gs("inv");
@@ -1923,6 +2043,10 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         r.r(c.wset.weapon2.1),
         r.r(c.wset.left.1),
     );
+    let (wcont, wcad) = (r.r(c.wset.content.1), r.r(c.wset.content_arr.1));
+    let scb = r.r(c.set_skill.1);
+    let ecb = r.r(c.wset.net_equip.1);
+    let (tstore, tref) = (r.r(c.trigger.storage_t), r.r(c.trigger.ref_bool_t));
     let stf = r.r(c.shield.tf.1);
     let (shud, sbars, sctr, sval, sgv, sst) = (
         r.r(c.shield.hud.1),
@@ -2677,7 +2801,20 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.gg(res, s_ok);
     a.go("ack");
     a.label("act_activate");
-    a.call(void, c.activate, &[pe, me]);
+    // the click's RPC: the host runs element.onAction(the clicking player)
+    a.fld(ctrl, g, c.g_ctrl.0);
+    a.if_null(ctrl, "ack");
+    a.op(Opcode::CallMethod {
+        dst: tstore,
+        field: c.trigger.storage,
+        args: vec![mode],
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Ref { dst: tref, src: b });
+    a.call(void, c.trigger.fun, &[ctrl, tstore, pe, tref]);
     a.go("ack");
     a.label("not_act");
 
@@ -2813,6 +2950,76 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.gg(res, s_ok);
     a.go("ack");
     a.label("not_endturn");
+
+    // verb: skill <id>  (the skill bar click: Battle.canPlay, then
+    // setCurrentSkill(the current unit's active skill <id>, null): an instant one (mode 4, e.g. WeaponSwapSword) executes at once, a
+    // client's as the battleExecuteSkill RPC; others start targeting.
+    // Ack refused when the battle cannot play or the skill is not usable)
+    verb(&mut a, s_skill, "not_skill", Some(k6));
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.fld(battle, g, c.g.battle);
+    a.if_null(battle, "ack");
+    a.gg(res, s_refused);
+    a.call(b, c.can_play, &[battle]);
+    a.if_false(b, "ack");
+    a.gg(res, s_noelem);
+    a.fld(bu, battle, c.battle_cur);
+    a.if_null(bu, "ack");
+    a.call(list, c.active_skills, &[bu]);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.loop_head("sk_loop");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.op(Opcode::ToVirtual { dst: skill, src: d });
+    a.if_null(skill, "sk_loop");
+    a.fld(s2, skill, c.skill_id);
+    a.if_null(s2, "sk_loop");
+    a.call(i, c.index_of, &[s2, s, ni]);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JNotEq {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "sk_loop",
+    );
+    // and <id> starts with it: the same id (WeaponSwap vs WeaponSwapSword)
+    a.call(i, c.index_of, &[s, s2, ni]);
+    a.jmp(
+        Opcode::JNotEq {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "sk_loop",
+    );
+    a.gg(res, s_refused);
+    a.call(b, c.can_use, &[bu, skill]);
+    a.if_false(b, "ack");
+    a.op(Opcode::Null { dst: scb });
+    a.call(b, c.set_skill.0, &[battle, skill, scb]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_skill");
 
     // verb: fadecamp  (Game.fadeIn(null..) then GameUI.toggleCamp in one frame:
     // a switch started while a no-break fade is up, see fade_chain)
@@ -3200,11 +3407,11 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
 
     // verbs: learn <i> <skillId>  (Unit.learnSkill of GameState.getUnits()[i],
     // the dump's army order: the skill tree's learn, e.g. WeaponSwapSword)
-    //        equip <i> <slot> <kind>  (Unit.equipSlot(slot, prev, item, null),
-    // the networked equip of an inventory drop: the slot is the first of
-    // getEquipSlots whose identifier starts with <slot> (Weapon,
-    // SecondaryWeapon, LeftHand), prev its get(), item the first of the own
-    // inventory whose kind contains <kind>; ack noelem if either is missing)
+    //        equip <i> <slot> <kind>  (a drag onto the equip slot: the slot is
+    // the first of getEquipSlots whose identifier starts with <slot> (Weapon,
+    // SecondaryWeapon, LeftHand), prev its get(), the item picked from the
+    // first own inventory cell whose kind contains <kind>; ack noelem if
+    // either is missing, noauth / refused if the pick or drop fails)
     verb(&mut a, s_learn, "not_learn", Some(k6));
     a.op(Opcode::Bool {
         dst: b,
@@ -3337,10 +3544,17 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         fun: wget,
         args: vec![],
     });
-    // the item
+    // the item: the first own inventory cell (content index) whose kind
+    // contains <kind>
     a.fld(inv, me, c.player_inv);
     a.if_null(inv, "ack");
-    a.call(list, c.all_items, &[inv]);
+    a.fld(wcont, inv, c.wset.content.0);
+    a.if_null(wcont, "ack");
+    a.fld(wcad, wcont, c.wset.content_arr.0);
+    a.op(Opcode::SafeCast {
+        dst: list,
+        src: wcad,
+    });
     a.if_null(list, "ack");
     a.fld(n, list, c.arr_len);
     a.fld(arr, list, c.arr_arr.0);
@@ -3381,10 +3595,43 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         },
         "wu_i",
     );
+    // a player's drag: pick one from that cell into the hand (the slot api's
+    // own-inventory path, the item leaves the inventory), drop it from the
+    // hand and equip it (UnitInfo's equip-slot DropSingle: BasePlayer.drop
+    // then netEquipSlot); the unequipped item goes back to the inventory
+    a.op(Opcode::Decr { dst: ix });
+    a.gg(res, s_noauth);
+    a.call(b, c.inv_auth, &[inv]);
+    a.if_false(b, "ack");
+    a.op(Opcode::MakeEnum {
+        dst: sop,
+        construct: c.wset.pick_single,
+        args: vec![],
+    });
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.call(b, c.inv_netop, &[inv, ix, sop, b]);
+    a.gg(res, s_refused);
+    a.if_false(b, "ack");
+    a.fld(pk, me, c.pick.0);
+    a.if_null(pk, "ack");
+    a.fld(witem, pk, c.pick_k.0);
+    a.if_null(witem, "ack");
+    a.fld(b, pk, c.wset.pick_select);
+    a.int(kk, k1);
+    a.call(b, c.wset.drop, &[me, b, witem, kk]);
+    a.if_false(b, "ack");
     // the slot's own identifier (eid is only its prefix)
     a.fld(s2, wslot, c.wset.ident);
     a.op(Opcode::Null { dst: wnb });
-    a.call(void, c.wset.equip, &[unit, s2, wprev, witem, wnb]);
+    a.op(Opcode::InstanceClosure {
+        dst: ecb,
+        fun: equip_cb,
+        obj: witem,
+    });
+    a.call(void, c.wset.net_equip.0, &[unit, s2, wprev, witem, wnb, ecb]);
     a.gg(res, s_ok);
     a.go("ack");
     a.label("not_equip");
@@ -4214,9 +4461,9 @@ mod tests {
         patch_harness(&mut code);
         let back = read(&write(&code));
         let n = back.functions.len();
-        let [uid, find, cam, cb, tick] =
-            [n - 5, n - 4, n - 3, n - 2, n - 1].map(|i| &back.functions[i]);
-        for (f, traps) in [(uid, 0), (find, 0), (cam, 1), (cb, 0), (tick, 2)] {
+        let [uid, find, cam, cb, ecb, tick] =
+            [n - 6, n - 5, n - 4, n - 3, n - 2, n - 1].map(|i| &back.functions[i]);
+        for (f, traps) in [(uid, 0), (find, 0), (cam, 1), (cb, 0), (ecb, 0), (tick, 2)] {
             check_flow(f);
             check_types(&back, f, 0..f.ops.len());
             assert_eq!(traps_ok(f), traps);
