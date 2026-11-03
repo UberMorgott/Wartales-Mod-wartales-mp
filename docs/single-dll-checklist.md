@@ -117,3 +117,26 @@ Runs (dll dist-test from f63ab57 unless noted; `D:\WartalesTest\runs\…`): R1 `
 | activity_join (new, faf2201) | R10: guest rejoins inside the host's open NinePuzzle, loads (was R8/R9 `Null access .getRotationQuat`) | PASS |
 
 Counts (per pass call of `patch_image`, 87 with activity_join): PASS 46, NOT-OBSERVABLE 41, FAIL 0 open (ready_start fixed 96efa41, puzzle rejoin fixed faf2201). Re-check of NOT-OBSERVABLE (R10-R12): weapon_set, shield_total, npc_inspect, fake_npc, skillbar_compact -> PASS; the rest keep their reason (new-game UI, mouse/keyboard input, race / failure-only guards, no forceable trigger).
+
+## v0.3.0 harness re-check (2026-11-03, dist-test from bf2bf39 + harness-only changes)
+
+Runs `D:\WartalesTest\runs\20261103-091434` (items 3, 4, 7, 8), `-100311` (save list without the save_list pass), `-100451` (save list, corrupt save), `-100839` (shield shown). Background only (dump, `snap`, PrintWindow flag 2 without raising).
+
+| Item | Evidence | Status |
+| --- | --- | --- |
+| 3 host load from world | `regress.ps1 -Case reload`: B `mp: reload: connecting to the server id this game joined by`, host 2nd `> Join` (86655296) | PASS |
+| 3 host load from a battle | host `host save006` in battle.Battle (RatInvasion): B reload line 86701593, host `> Join` 86713031, both world.World, B connected; again later from a stuck battle | PASS |
+| 3 host load, guest dead | B killed, `host save006`: `host loaded ready=0` 86755437, `a player who never connected is no longer waited for: X29f792402` 86770437 (15.0 s), gameplayStart; B relaunched, `join 01ZG00016YNKFARE`: host `> Join` 86817968, Одик/Анян owner X2 connected | PASS |
+| 4 guest network drop | new `coop.ps1 drop -Inst B -TimeoutSec 15` (SetTcpEntry DELETE_TCB on B's links to other processes, repeated 15 s; 5 resets): B `connection to the host lost, rejoining` x3 (86895296, +9.5 s, +18.4 s), host `> Join` 86915375, B connected 13 s after the drop ended, no input | PASS |
+| 5 save list | 33 saves (save006 copies): `host zzznone` (LoadGame.loadGames, no load) minus a no-op verb, from ack ticks: without save_list (pass commented out, test build only) +528/+501/+490 ms; with it +33/+15 ms. `host save099` (64 bytes XOR-ed mid-file): listed, load refused, vanilla popup "Файл поврежден и не может быть прочитан. save/save099.dat" (PrintWindow); `host save020` opens the co-op lobby | PASS |
+| 6 shield_total | Одик with Torch (no shield): currentUnit dump `shield=0 shieldShown=False guard=0 reduce=0`; host `console status Protection`: `shield=25 shieldShown=True reduce=25` on A and B (new dump field `shieldShown` = Counter.tf.visible) | PASS |
+| 7 weapon_set | Анян + WeaponSwapSword, A and B dumps equal each step: 2H set1 + 1H set2 + Torch -> `w= w2=SwordStart l=Torch`; + Shield -> `w= w2=SwordStart l=ShieldStart`; 1H set1 + 2H set2 + Torch -> `w=SwordStart w2= l=Torch`; + Shield -> `w=SwordStart w2= l=ShieldStart`; 2H + 2H + Torch -> `w= w2= l=Torch`. Battle after 1H set2 + Torch: Анян skills `Move,SliceStart,FirstAid,WeaponSwapSword(off),TorchStrike,...` (2H before: `CleaveStart`), sbar `[FirstAid,TorchStrike]` | PASS |
+| 8 remote popup over a minigame | no harness path to a window another machine opens through Window.alive while this one plays: `play` runs on the host only, guest `act FoodCrate` / `console notify` open nothing | NOT-OBSERVABLE (live test) |
+| 8 own sheet across modes | B `sheet` (UnitInfo): kept through place -> world -> place -> camp -> world; gone on battle entry | PASS |
+| 8 non-party sheet | T2Tavern, B `inspect T2Recruit1` (UnitInfo, meLock Npc(T2Recruit1)); host `console quit`: B UnitInfo closed, meLock empty | PASS |
+
+Found:
+- harness `equip` verb calls Unit.equipSlot without taking the item out of the inventory: the item stays listed (count grows on every swap), even for a host item on the host; R11 shared it. Slot results above are still valid; inventory counts after `equip` are not. OPEN (verb should remove the stack like a drag's pick).
+- two RatInvasion battles started after guest `equip` swaps (items both equipped and listed) stalled: once `Simultaneous attacks` + `assert: onEnd was not called on Bite` (wolf AI, lockCounter 2 forever, `console win` no effect), once no current unit on the host with no error; same battle with no swaps or with a host-equipped Torch ran normally. Not root-caused; suspected the duplicated item. OPEN.
+- `coop.ps1 stop` returned while a game was still exiting (its last shim.log line came after the next run's start): the new A logged `net: already running in this session, not started`, no master, "Не удалось создать сеанс игры". Fixed: stop waits on the process objects (WaitForExit). Players: same if the game is relaunched while the old process still exits (Steam blocks that).
+- a guest's Leave during the host's LockPick ends it at once (`leave pending: go`): LockPick sets no lockedWith (meLock empty), so force_leave has nothing to wait on. Vanilla gating is the same lock; noted, not changed.
