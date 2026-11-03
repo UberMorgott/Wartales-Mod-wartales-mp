@@ -54,9 +54,13 @@
 //     stage and shows its HandTool again).
 //     Exception (CAMERA_ACTIVITIES: LockPick, NinePuzzle, CylinderPuzzle):
 //     seen only through the activity camera (the lock in front of it, the
-//     puzzle board), so spectPre gives false and the spectator gets the
-//     vanilla start.
-//   onReady closure: showTutorial(..., cb) -> spectTut: a spectator gets no
+//     puzzle board), so an idle watcher gets the vanilla view (camera move,
+//     window) but never lockCamera / padCursor.locked: it keeps its input and
+//     can pan away; a watcher busy with its own minigame or lock
+//     (mode.lockCamera, me.lockedWith) watches from its own camera instead.
+//   onReady closure: showTutorial(..., cb) -> spectTut: the host playing in co-op gets
+//     the mini-game window at once and the tutorial over it (no gap in which the
+//     minigame has no window: force_leave sees it); a spectator gets no
 //     tutorial; cb (the window closure) runs at once on the host and not at
 //     all on a client spectator: the mini-game windows are built for the
 //     host and the acting player only. On a client spectator their
@@ -128,6 +132,8 @@ pub(crate) struct Plan {
     g_auth: RefField,
     #[cfg_attr(not(test), allow(dead_code))]
     g_mode: RefField,
+    /// BasePlayer.lockedWith (a busy watcher keeps its own camera).
+    p_locked: (RefField, RefType),
     #[cfg_attr(not(test), allow(dead_code))]
     g_gui: RefField,
     g_ui: RefField,
@@ -159,6 +165,11 @@ pub(crate) struct Plan {
     /// h3d.scene.Object.cullingCollider, as onActionDone's Sing block calls it.
     cull_pi: RefField,
     cancel_fi: usize,
+    /// _cancel__impl's lockCamera / padCursor.locked writes; Activity.cameraSave.
+    c_lock_at: usize,
+    c_pad_at: usize,
+    a_cam: RefField,
+    cam_t: RefType,
     lock_at: usize,
     pad_at: usize,
     cam_at: usize,
@@ -540,6 +551,23 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         bail!("Activity._cancel__impl: unexpected shape");
     }
     let cancel_fi = fun_index(code, cancel.findex)?;
+    // its lockCamera = false / padCursor.locked = false (gated for a spectator,
+    // who never set them: a watcher's own minigame may hold them now)
+    let c_only = |what: &str, want: &dyn Fn(&Opcode) -> bool| -> Result<usize> {
+        let at: Vec<usize> = (0..cancel.ops.len()).filter(|&k| want(&cancel.ops[k])).collect();
+        match at[..] {
+            [k] if !jump_targets_any(cancel, k) => Ok(k),
+            _ => bail!("Activity._cancel__impl: not one plain {what} write"),
+        }
+    };
+    let c_lock_at = c_only(
+        "lockCamera",
+        &|o| matches!(o, Opcode::SetField { obj, field, .. } if *field == m_lock && cancel.regs[obj.0 as usize] == mode_t),
+    )?;
+    let c_pad_at = c_only(
+        "padCursor.locked",
+        &|o| matches!(o, Opcode::SetField { obj, field, .. } if *field == pad_locked && cancel.regs[obj.0 as usize] == pad_t),
+    )?;
 
     Ok(Plan {
         act_t,
@@ -573,6 +601,7 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         g_me,
         g_auth,
         g_mode,
+        p_locked: field(code, player_t, "lockedWith")?,
         g_gui,
         g_ui,
         m_lock,
@@ -599,6 +628,10 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         o3_flags,
         cull_pi,
         cancel_fi,
+        c_lock_at,
+        c_pad_at,
+        a_cam,
+        cam_t,
         lock_at,
         pad_at,
         cam_at,
@@ -710,6 +743,12 @@ fn add_pre(
         r.r(p.int_t),
         r.r(p.void_),
     );
+    let (gm, md, pm, lw) = (
+        r.r(p.game_t),
+        r.r(p.mode_t),
+        r.r(p.player_t),
+        r.r(p.p_locked.1),
+    );
     let (inf, id, acc, t, d, m) = (
         r.r(p.inf_t),
         r.r(p.str_t),
@@ -750,7 +789,41 @@ fn add_pre(
         field: p.i_id,
     });
     a.jmp(Opcode::JNull { reg: id, offset: 0 }, "watch");
-    // a mini-game seen only through the activity camera: vanilla start
+    // a watcher busy with its own minigame / lock (mode.lockCamera set by its
+    // own activity, me.lockedWith): its own camera, never pulled into the view
+    a.op(Opcode::Field {
+        dst: gm,
+        obj: act,
+        field: p.a_game,
+    });
+    a.jmp(Opcode::JNull { reg: gm, offset: 0 }, "watch");
+    a.op(Opcode::Field {
+        dst: md,
+        obj: gm,
+        field: p.g_mode,
+    });
+    a.jmp(Opcode::JNull { reg: md, offset: 0 }, "watch");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: md,
+        field: p.m_lock,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "watch");
+    a.op(Opcode::Field {
+        dst: pm,
+        obj: gm,
+        field: p.g_me,
+    });
+    a.jmp(Opcode::JNull { reg: pm, offset: 0 }, "watch");
+    a.op(Opcode::Field {
+        dst: lw,
+        obj: pm,
+        field: p.p_locked.0,
+    });
+    a.jmp(Opcode::JNotNull { reg: lw, offset: 0 }, "watch");
+    // an idle watcher of a camera mini-game: the vanilla view (camera on the
+    // lock / board, the window), its input and camera stay free (_start skips
+    // lockCamera / padCursor.locked for every spectator)
     int(&mut a, code, z, 0);
     for gl in cam_ids {
         a.op(Opcode::GetGlobal {
@@ -925,7 +998,8 @@ fn add_inv(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
 }
 
 /// `spectTut(ui, id, opts, cb, act) -> Bool`: a spectator gets no tutorial
-/// (false); cb (the window closure) runs at once on the host only. A client
+/// (false); cb (the window closure) runs at once on the host only. The host
+/// playing in co-op: cb at once, then the tutorial without callback (over the window). A client
 /// spectator never builds the mini-game window: its constructor / netSharing
 /// are owner- or host-only (GatherAction register, FishingAction
 /// keepOnGathered, LockPick lockData) and threw out of `_start`.
@@ -933,6 +1007,7 @@ fn add_tut(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
     let args = vec![p.ui_t, p.str_t, p.tut_t, p.cb_t, p.act_t];
     let mut r = Regs(args.clone());
     let (b, v, game) = (r.r(p.bool_), r.r(p.void_), r.r(p.game_t));
+    let (host, nc) = (r.r(p.host_t), r.r(p.cb_t));
     let mut a = Asm::new();
     a.op(Opcode::Call1 {
         dst: b,
@@ -970,7 +1045,53 @@ fn add_tut(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
         value: ValBool(false),
     });
     a.op(Opcode::Ret { ret: b });
+    // the player in co-op: the mini-game window first, the tutorial over it (no
+    // callback): the minigame exists while its tutorial is read, so another
+    // player's window waits and a party move waits (force_leave flMinigame /
+    // flActivity), instead of a gap before the window
     a.label("vanilla");
+    a.op(Opcode::Field {
+        dst: host,
+        obj: Reg(4),
+        field: p.a_host,
+    });
+    a.jmp(Opcode::JNull { reg: host, offset: 0 }, "solo");
+    // the host only: a client's window registers once its ownership arrived
+    // (cb run early threw "Can't register ... without ownership"); a client's
+    // minigame is covered meanwhile by the host's own copy / start record
+    a.op(Opcode::Field {
+        dst: game,
+        obj: Reg(4),
+        field: p.a_game,
+    });
+    a.jmp(Opcode::JNull { reg: game, offset: 0 }, "solo");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: game,
+        field: p.g_auth,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "solo");
+    a.op(Opcode::CallClosure {
+        dst: v,
+        fun: Reg(3),
+        args: vec![],
+    });
+    a.op(Opcode::Null { dst: nc });
+    a.op(Opcode::Call4 {
+        dst: b,
+        fun: p.show_tut,
+        arg0: Reg(0),
+        arg1: Reg(1),
+        arg2: Reg(2),
+        arg3: nc,
+    });
+    // the window is built: true, so the caller never runs cb a second time
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("solo");
     a.op(Opcode::Call4 {
         dst: b,
         fun: p.show_tut,
@@ -983,6 +1104,74 @@ fn add_tut(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
     push_fn(code, args, p.bool_, r.0, a.finish(), p.dbg_file)
 }
 
+/// `spectQuiet(act) -> Bool`, at _cancel__impl entry: true on a spectator (the
+/// end then skips lockCamera / padCursor.locked = false: it never set them);
+/// a spectator now busy with its own minigame or lock (mode.lockCamera,
+/// me.lockedWith) also loses `cameraSave`, so the end leaves its camera alone.
+fn add_quiet(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
+    let mut r = Regs(vec![p.act_t]);
+    let (b, gm, md, pm, lw, cs) = (
+        r.r(p.bool_),
+        r.r(p.game_t),
+        r.r(p.mode_t),
+        r.r(p.player_t),
+        r.r(p.p_locked.1),
+        r.r(p.cam_t),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: spect,
+        arg0: Reg(0),
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ret");
+    a.op(Opcode::Field {
+        dst: gm,
+        obj: Reg(0),
+        field: p.a_game,
+    });
+    a.jmp(Opcode::JNull { reg: gm, offset: 0 }, "yes");
+    a.op(Opcode::Field {
+        dst: md,
+        obj: gm,
+        field: p.g_mode,
+    });
+    a.jmp(Opcode::JNull { reg: md, offset: 0 }, "lw");
+    a.op(Opcode::Field {
+        dst: b,
+        obj: md,
+        field: p.m_lock,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "busy");
+    a.label("lw");
+    a.op(Opcode::Field {
+        dst: pm,
+        obj: gm,
+        field: p.g_me,
+    });
+    a.jmp(Opcode::JNull { reg: pm, offset: 0 }, "yes");
+    a.op(Opcode::Field {
+        dst: lw,
+        obj: pm,
+        field: p.p_locked.0,
+    });
+    a.jmp(Opcode::JNull { reg: lw, offset: 0 }, "yes");
+    a.label("busy");
+    a.op(Opcode::Null { dst: cs });
+    a.op(Opcode::SetField {
+        obj: Reg(0),
+        field: p.a_cam,
+        src: cs,
+    });
+    a.label("yes");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![p.act_t], p.bool_, r.0, a.finish(), p.dbg_file)
+}
 /// `spectWin(mode, win, act)`: a spectator's window is hidden, never the current one.
 fn add_win(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
     let args = vec![p.mode_t, p.win_t, p.act_t];
@@ -1304,19 +1493,35 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 9]> {
     let fade = add_fade(code, p)?;
     let end = add_stage(code, p, spect, sing, hand, false)?;
 
-    // _cancel__impl: spectEnd(this) first (a spectator's end of the Sing stage)
+    // _cancel__impl: spectEnd(this) first (a spectator's end of the Sing stage),
+    // then q = spectQuiet(this); "if (!q)" over its lockCamera / padCursor writes
+    let quiet = add_quiet(code, p, spect)?;
     {
         let f = &mut code.functions[p.cancel_fi];
         f.regs.push(p.void_);
         let v = Reg((f.regs.len() - 1) as u32);
+        f.regs.push(p.bool_);
+        let q = Reg((f.regs.len() - 1) as u32);
+        let mut sites = [p.c_lock_at, p.c_pad_at];
+        sites.sort_unstable_by(|x, y| y.cmp(x));
+        for at in sites {
+            insert_ops(f, at, vec![Opcode::JTrue { cond: q, offset: 1 }]);
+        }
         insert_ops(
             f,
             0,
-            vec![Opcode::Call1 {
-                dst: v,
-                fun: end,
-                arg0: Reg(0),
-            }],
+            vec![
+                Opcode::Call1 {
+                    dst: v,
+                    fun: end,
+                    arg0: Reg(0),
+                },
+                Opcode::Call1 {
+                    dst: q,
+                    fun: quiet,
+                    arg0: Reg(0),
+                },
+            ],
         );
     }
     // _start: s = spect(this), g = spectPre(this) at entry; the vanilla writes
@@ -1324,9 +1529,10 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 9]> {
     //   prevInventory = s ? spectInv(this) : ui.showInventory(false)
     //     (every spectator: a client spectator of a camera activity never runs
     //     the end that shows the inventory again, onActionDone's closure)
-    //   if (!g) mode.lockCamera = true; if (!g) padCursor.locked = true;
+    //   if (!s) mode.lockCamera = true; if (!s) padCursor.locked = true;
     //   if (!g) this.cameraSave = <camera snapshot>   (g: watching from its
-    //     own camera; a camera activity's spectator gets the vanilla camera)
+    //     own camera; an idle camera activity's watcher gets the vanilla camera,
+    //     restored at the end, with free input)
     // Inserted from the last site up, so every earlier index still holds.
     {
         let f = &mut code.functions[p.start_fi];
@@ -1337,8 +1543,13 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 9]> {
         let Opcode::Call2 { dst: si_dst, .. } = f.ops[p.si_at] else {
             unreachable!()
         };
-        for at in [p.cam_at, p.pad_at, p.lock_at] {
-            insert_ops(f, at, vec![Opcode::JTrue { cond: g, offset: 1 }]);
+        // cameraSave: only a watcher on its own camera skips it (a camera
+        // watcher's view is restored at the end); lockCamera / padCursor.locked:
+        // every spectator skips them (input and camera stay free)
+        let mut sites = [(p.cam_at, g), (p.pad_at, s), (p.lock_at, s)];
+        sites.sort_by(|x, y| y.0.cmp(&x.0));
+        for (at, cond) in sites {
+            insert_ops(f, at, vec![Opcode::JTrue { cond, offset: 1 }]);
         }
         insert_ops(
             f,
@@ -1510,7 +1721,7 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 9);
+        assert_eq!(back.functions.len(), n + 10);
         let sites = [
             p.start_fi,
             p.ready_fi,
@@ -1549,7 +1760,7 @@ mod tests {
         }
         // _start: s = spect(this), g = spectPre(this) in front; before
         // showInventory a 3-op `s ? spectInv(this) : ...` into the same register;
-        // a JTrue g over each of lockCamera / padCursor.locked / cameraSave
+        // a JTrue s over lockCamera / padCursor.locked, a JTrue g over cameraSave
         let (a, b) = (&orig.functions[p.start_fi], &back.functions[p.start_fi]);
         let g = Reg((b.regs.len() - 1) as u32);
         let sr = Reg((b.regs.len() - 2) as u32);
@@ -1579,8 +1790,9 @@ mod tests {
             matches!(b.ops[s - 2], Opcode::Call1 { dst, fun, arg0: Reg(0) } if fun == inv && dst == si_dst)
         );
         assert!(matches!(b.ops[s - 1], Opcode::JAlways { offset: 1 }));
-        for site in [p.lock_at, p.pad_at, p.cam_at] {
-            assert!(matches!(b.ops[at(site) - 1], Opcode::JTrue { cond, offset: 1 } if cond == g));
+        // cameraSave: watchers on their own camera; lock / pad: every spectator
+        for (site, want) in [(p.lock_at, sr), (p.pad_at, sr), (p.cam_at, g)] {
+            assert!(matches!(b.ops[at(site) - 1], Opcode::JTrue { cond, offset: 1 } if cond == want));
         }
         for i in 0..a.ops.len() {
             let want: Vec<usize> = jump_targets(a, i).into_iter().map(at).collect();
@@ -1592,9 +1804,15 @@ mod tests {
         // _cancel__impl: spectEnd(this) in front, the rest shifted by one
         let (ca, cb) = (&orig.functions[p.cancel_fi], &back.functions[p.cancel_fi]);
         assert!(matches!(cb.ops[0], Opcode::Call1 { fun, arg0: Reg(0), .. } if fun == end));
-        let mut want = ca.clone();
-        want.regs = cb.regs.clone();
-        shifted(&want, cb, 0, 1);
+        let q = Reg((cb.regs.len() - 1) as u32);
+        assert!(matches!(cb.ops[1], Opcode::Call1 { dst, arg0: Reg(0), .. } if dst == q));
+        assert_eq!(cb.ops.len(), ca.ops.len() + 4);
+        // the two gated writes: a JTrue q right before each
+        let cat = |i: usize| 2 + i + usize::from(i >= p.c_lock_at) + usize::from(i >= p.c_pad_at);
+        for site in [p.c_lock_at, p.c_pad_at] {
+            assert!(matches!(cb.ops[cat(site) - 1], Opcode::JTrue { cond, offset: 1 } if cond == q));
+        }
+        check_flow(cb);
         // the three call sites keep their registers, plus this
         let ready = &back.functions[p.ready_fi];
         assert!(matches!(&ready.ops[p.tut_at],
@@ -2047,8 +2265,20 @@ mod tests {
             s.c.take("setWindow"),
             vec![vec![w.mode.clone(), window.clone()]]
         );
+        // a client playing: the vanilla tutorial with its callback
         assert_eq!(s.run(tut, args(&cb)), V::B(true));
-        assert_eq!(s.c.take("showTutorial").len(), 1);
+        let st = s.c.take("showTutorial");
+        assert_eq!(st.len(), 1);
+        assert_eq!(st[0].last(), Some(&cb));
+        // the host playing: the window closure at once, the tutorial over it
+        // without callback
+        s.c.set(&w.game, p.g_auth, V::B(true));
+        assert_eq!(s.run(tut, args(&cb)), V::B(true));
+        let st = s.c.take("showTutorial");
+        assert_eq!(st.len(), 1);
+        assert_eq!(st[0].last(), Some(&V::Null));
+        assert_eq!(s.c.take("addHelpIcon"), vec![vec![w.act.clone()]]);
+        s.c.set(&w.game, p.g_auth, V::B(false));
         s.run(help, vec![w.act.clone()]);
         assert_eq!(s.c.take("addHelpIcon"), vec![vec![w.act.clone()]]);
         // a unit-less activity keeps the shared fade; coop = false stays false
