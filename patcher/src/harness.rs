@@ -73,7 +73,7 @@
 //                       disable reason, validate (Confirm).
 //       tutorial        the open Tutorial: close (Continue, runs its callback).
 //       craft / confirm the open Craft: forgeRecipe(selectedRecipe); the open
-//                       Confirm: onResult(true).
+//                       Confirm: onResult(true), else the open CraftConfirm: onResult().
 //       forgehit <k>    the open ForgeAction: validateStep(metalShards[k]).
 //       lpstop          the open LockPick: stopActivity (its Leave button).
 //       song            the open SongRepertoire: onSongChoose (Play).
@@ -537,6 +537,9 @@ struct Craft {
     selected: RefField,
     forge: RefFun,
     confirm_t: RefType,
+    /// `confirm`'s fallback: ui.win.CraftConfirm and its onResult (the OK).
+    cc_t: RefType,
+    cc_result: RefFun,
     on_result: RefFun,
     fa_t: RefType,
     obj3d_t: RefType,
@@ -1255,6 +1258,11 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
                 forge,
                 confirm_t,
                 on_result: mfn(confirm_t, "onResult", &[confirm_t, bool_t], void_t)?,
+                cc_t: obj_type(code, "ui.win.CraftConfirm")?,
+                cc_result: {
+                    let cc = obj_type(code, "ui.win.CraftConfirm")?;
+                    mfn(cc, "onResult", &[cc], void_t)?
+                },
                 fa_t,
                 obj3d_t,
                 shards: typed(code, fa_t, "metalShards", arr_t)?,
@@ -2014,6 +2022,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let crw = r.r(c.craft.t);
     let rec = r.r(c.craft.rec_t);
     let cfw = r.r(c.craft.confirm_t);
+    let ccw = r.r(c.craft.cc_t);
     let faw = r.r(c.craft.fa_t);
     let sho = r.r(c.craft.obj3d_t);
     let jb = r.r(c.ujob.job.1);
@@ -3269,13 +3278,25 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         ty: c.craft.confirm_t,
     });
     a.call(win, find, &[ty]);
-    a.if_null(win, "ack");
+    a.if_null(win, "cf_craft");
     a.op(Opcode::SafeCast { dst: cfw, src: win });
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(true),
     });
     a.call(void, c.craft.on_result, &[cfw, b]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    // else the open CraftConfirm (a craft's result): its OK, onResult()
+    a.label("cf_craft");
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.craft.cc_t,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: ccw, src: win });
+    a.call(void, c.craft.cc_result, &[ccw]);
     a.gg(res, s_ok);
     a.go("ack");
     a.label("not_confirm");
