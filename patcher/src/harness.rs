@@ -398,6 +398,8 @@ struct Ctx {
     tutorial: (RefType, RefFun),
     /// `lpstop`: ui.win.LockPick and its stopActivity (the Leave button's onClick).
     lpstop: (RefType, RefFun),
+    /// `esc` / dump `aw`: a watched camera minigame window.
+    watch: Watch,
     /// `put` / `take`: st.Inventory.hasAuthority, _networkOperation (the slot
     /// api's authority branch), ui.comp.SlotOperation and its MoveTo(Inventory, Int).
     inv_auth: RefFun,
@@ -503,6 +505,24 @@ struct Shield {
     stats: (RefField, RefType),
     taken: RefField,
     reduce: RefField,
+}
+
+/// The open LockPick / NinePuzzle window (`activity` field each), Window.windowRoot,
+/// Flow.interactive and its width / height / propagateEvents, Activity.int /
+/// cameraSave; `spect_esc`: the function Game.update's Escape loop calls per
+/// window (coop_spectate's spectEsc, found by its (ui.Window) -> Int call there;
+/// None without that pass).
+struct Watch {
+    wins: [(RefType, RefField); 2],
+    act_t: RefType,
+    root: (RefField, RefType),
+    inter: (RefField, RefType),
+    iw: RefField,
+    ih: RefField,
+    prop: RefField,
+    a_int: (RefField, RefType),
+    a_cam: (RefField, RefType),
+    spect_esc: Option<RefFun>,
 }
 
 /// The dump's `place`: {id, parent (its id), region (the kind getRegion gives)}.
@@ -1104,6 +1124,38 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         lpstop: {
             let t = obj_type(code, "ui.win.LockPick")?;
             (t, mfn(t, "stopActivity", &[t], void_t)?)
+        },
+        watch: {
+            let act_t = obj_type(code, "ui.win.Activity")?;
+            let win_t = obj_type(code, "ui.Window")?;
+            let i32w = prim_type(code, "i32", |t| matches!(t, Type::I32))?;
+            let mut wins = vec![];
+            for name in ["ui.win.LockPick", "ui.win.NinePuzzle"] {
+                let t = obj_type(code, name)?;
+                wins.push((t, typed(code, t, "activity", act_t)?));
+            }
+            let root = field(code, win_t, "windowRoot")?;
+            let inter = field(code, root.1, "interactive")?;
+            let f64w = prim_type(code, "f64", |t| matches!(t, Type::F64))?;
+            let up = method(code, obj_type(code, "Game")?, "update")?;
+            let spect_esc = up.ops.iter().find_map(|o| match o {
+                Opcode::Call1 { fun, .. } if sig(code, *fun).ok() == Some((vec![win_t], i32w)) => {
+                    Some(*fun)
+                }
+                _ => None,
+            });
+            Watch {
+                wins: [wins[0], wins[1]],
+                act_t,
+                root,
+                inter,
+                iw: typed(code, inter.1, "width", f64w)?,
+                ih: typed(code, inter.1, "height", f64w)?,
+                prop: typed(code, inter.1, "propagateEvents", bool_t)?,
+                a_int: field(code, act_t, "int")?,
+                a_cam: field(code, act_t, "cameraSave")?,
+                spect_esc,
+            }
         },
         inv_auth: mfn(inv_t, "hasAuthority", &[inv_t], bool_t)?,
         end_turn: mfn(battle_t, "endTurn", &[battle_t], void_t)?,
@@ -1886,6 +1938,8 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_equip = gs("equip ");
     let s_tutorial = gs("tutorial");
     let s_lpstop = gs("lpstop");
+    let s_esc = gs("esc");
+    let (s_esc0, s_esc2) = (gs("vanilla"), gs("hidden"));
     let s_song = gs("song");
     let s_endturn = gs("endturn");
     let s_skill = gs("skill ");
@@ -2050,6 +2104,18 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let jcb = r.r(c.ujob.cb_t);
     let tw = r.r(c.tutorial.0);
     let lpw = r.r(c.lpstop.0);
+    let wt = &c.watch;
+    let (ww0, ww1, wact, wroot, wint, wcs, wk, wz) = (
+        r.r(wt.wins[0].0),
+        r.r(wt.wins[1].0),
+        r.r(wt.act_t),
+        r.r(wt.root.1),
+        r.r(wt.inter.1),
+        r.r(wt.a_cam.1),
+        r.r(c.i32_t),
+        r.r(c.i32_t),
+    );
+    let wai = r.r(wt.a_int.1);
     let sgw = r.r(c.song.0);
     let sp = r.r(c.state_player.1);
     let (msrc, mdst, sop) = (r.r(c.loot.1), r.r(c.loot.1), r.r(c.slot_op_t));
@@ -2963,6 +3029,51 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.gg(res, s_ok);
     a.go("ack");
     a.label("not_lpstop");
+
+    // verb: esc  (the open LockPick / NinePuzzle through Game.update's Escape
+    // hook: ack ok = this watcher stepped out, hidden = a hidden copy (Escape
+    // goes on), vanilla = this player's own window, Escape as the game does)
+    if let Some(esc) = wt.spect_esc {
+        verb(&mut a, s_esc, "not_esc", None);
+        a.gg(res, s_nowindow);
+        a.op(Opcode::Type {
+            dst: ty,
+            ty: wt.wins[0].0,
+        });
+        a.call(win, find, &[ty]);
+        a.if_set(win, "esc_w");
+        a.op(Opcode::Type {
+            dst: ty,
+            ty: wt.wins[1].0,
+        });
+        a.call(win, find, &[ty]);
+        a.if_null(win, "ack");
+        a.label("esc_w");
+        a.call(wk, esc, &[win]);
+        a.gg(res, s_ok);
+        a.int(wz, k1);
+        a.jmp(
+            Opcode::JEq {
+                a: wk,
+                b: wz,
+                offset: 0,
+            },
+            "ack",
+        );
+        a.gg(res, s_esc2);
+        a.int(wz, k2);
+        a.jmp(
+            Opcode::JEq {
+                a: wk,
+                b: wz,
+                offset: 0,
+            },
+            "ack",
+        );
+        a.gg(res, s_esc0);
+        a.go("ack");
+        a.label("not_esc");
+    }
 
     // verb: endturn  (Battle.endTurn, the HUD's End Turn button: the current
     // unit's turn ends if this game may end it; a client asks the host)
@@ -4174,6 +4285,69 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.fld(list, mode, c.windows);
     w.a.label("mw_q");
     w.obj_q(list);
+    // the open LockPick / NinePuzzle: windowRoot shown, its full-window input
+    // catcher (size, propagateEvents), its activity's chooseUnit Interactive
+    // and saved camera (a watcher's view to restore)
+    w.lit(code, ",\"aw\":");
+    for (k, (t, act_f)) in wt.wins.iter().enumerate() {
+        let (wr, skip) = ([ww0, ww1][k], ["aw_n0", "aw_n1"][k]);
+        w.a.op(Opcode::Type { dst: ty, ty: *t });
+        w.a.call(win, find, &[ty]);
+        w.a.if_null(win, skip);
+        w.a.op(Opcode::SafeCast { dst: wr, src: win });
+        w.a.fld(wact, wr, *act_f);
+        w.a.go("aw_got");
+        w.a.label(skip);
+    }
+    w.lit(code, "null");
+    w.a.go("aw_end");
+    w.a.label("aw_got");
+    w.lit(code, "{\"cls\":");
+    w.obj_q(win);
+    w.lit(code, ",\"vis\":");
+    w.a.fld(wroot, win, wt.root.0);
+    w.a.if_null(wroot, "aw_nr");
+    w.a.fld(b, wroot, c.obj_visible);
+    w.val(b);
+    w.a.fld(wint, wroot, wt.inter.0);
+    w.a.if_null(wint, "aw_ni");
+    w.kv(code, "iw", wint, wt.iw, fl);
+    w.kv(code, "ih", wint, wt.ih, fl);
+    w.kv(code, "prop", wint, wt.prop, b);
+    w.a.go("aw_ni");
+    w.a.label("aw_nr");
+    w.lit(code, "null");
+    w.a.label("aw_ni");
+    w.lit(code, ",\"actInt\":");
+    w.a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    w.a.if_null(wact, "aw_ai");
+    w.a.fld(wai, wact, wt.a_int.0);
+    w.a.if_null(wai, "aw_ai");
+    w.a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    w.a.label("aw_ai");
+    w.val(b);
+    w.lit(code, ",\"camSave\":");
+    w.a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    w.a.if_null(wact, "aw_cs");
+    w.a.fld(wcs, wact, wt.a_cam.0);
+    w.a.if_null(wcs, "aw_cs");
+    w.a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    w.a.label("aw_cs");
+    w.val(b);
+    w.lit(code, "}");
+    w.a.label("aw_end");
     w.lit(code, ",\"invVisible\":");
     w.a.fld(gui, g, c.game_ui.0);
     w.a.if_null(gui, "no_invp");

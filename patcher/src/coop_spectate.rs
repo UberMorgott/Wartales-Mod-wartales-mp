@@ -76,8 +76,21 @@
 //   addHelpIcon__impl: returns at once on a spectator (the player's icon RPC).
 //   onActionDone's end fade: netFade(coop) -> spectFade: no replicated fade
 //     when spectators are not in the activity camera (unit + owner set).
+//   Step-out (a watcher of a camera activity is never trapped by watching):
+//     spectPre removes the chooseUnit full-screen wait Interactive for every
+//     spectator (a camera watcher kept it: no click reached its screen);
+//     initInteractive of LockPick / NinePuzzle / CylinderPuzzle ends in
+//     spectInt: a watcher's full-window input catcher passes every event on
+//     (propagateEvents). Game.update's Escape loop calls spectEsc(w) per window
+//     before vanilla: a watched copy steps out (spectOut: hidden, not the
+//     current window, an idle watcher's camera restored by _cancel__impl's own
+//     restore block, cameraSave dropped; this machine only, nothing is sent),
+//     Escape used up; a hidden ActivityWindow (spectWin's copy, or stepped out
+//     of) is skipped (vanilla: a client's Escape did nothing on it, the host's
+//     ran the other player's minigame escape). The window's Leave button
+//     (stopActivity, refused for a watcher: `not allowed object`) steps out too.
 // shim.log: `mp: spectate <activity id> 1` on each watching spectator, `0` on a
-// spectator of a camera activity.
+// spectator of a camera activity, `<id> out` on a step-out.
 // Not covered: the host's unit choice (a shared ChooseUnit, chooseUnit's
 // full-screen wait Interactive on clients) before the start: which player
 // starts it is known on the host only (`conds`, not synced).
@@ -190,6 +203,42 @@ pub(crate) struct Plan {
     fade_at: usize,
     fade_act: Reg,
     dbg_file: usize,
+    /// Step-out: _cancel__impl's camera restore + PlaceView camera reset (its
+    /// ops [cam_s, cam_e), copied as spectCam with its register file).
+    cam_ops: Vec<Opcode>,
+    cam_regs: Vec<RefType>,
+    /// The CallMethod slot of that PlaceView call (the only one the block makes).
+    #[cfg_attr(not(test), allow(dead_code))]
+    cam_pi: RefField,
+    /// hl.BaseType.check; ui.win.ActivityWindow class global.
+    base_check: RefFun,
+    aw_cls: (RefGlobal, RefType),
+    /// The windows of CAMERA_ACTIVITIES: class global, type, `activity` field,
+    /// stopActivity (the Leave button's onClick) and initInteractive (fn index,
+    /// its Ret) fn indices.
+    cam_wins: Vec<CamWin>,
+    /// h2d.Flow.interactive, h2d.Interactive.propagateEvents, GameMode.currentWindow.
+    flow_int: RefField,
+    int_prop: RefField,
+    m_cur: RefField,
+    gui_t: RefType,
+    pad_t: RefType,
+    /// Game.update's Escape loop: fn index, the `NullCheck w` before
+    /// `w.canEscape()` (the hook goes in front), the window register, the
+    /// `found = true` op after its escape call (break), the loop's back edge.
+    esc_fi: usize,
+    esc_at: usize,
+    esc_w: Reg,
+    esc_found: usize,
+    esc_next: usize,
+}
+
+pub(crate) struct CamWin {
+    cls: (RefGlobal, RefType),
+    activity: RefField,
+    stop_fi: usize,
+    init_fi: usize,
+    init_ret: usize,
 }
 
 fn want(code: &Bytecode, f: RefFun, what: &str, args: &[RefType], ret: RefType) -> Result<()> {
@@ -569,6 +618,149 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         &|o| matches!(o, Opcode::SetField { obj, field, .. } if *field == pad_locked && cancel.regs[obj.0 as usize] == pad_t),
     )?;
 
+    // Step-out. spectCam = _cancel__impl's ops right after its lockCamera write up
+    // to its PlaceView camera call: camera restored from cameraSave, the view's
+    // activity camera dropped. Self-contained: jumps stay inside, one BaseType.check.
+    let view_t = obj_type(code, "world.PlaceView")?;
+    let base_t = obj_type(code, "hl.BaseType")?;
+    let base_check = method(code, base_t, "check")?.findex;
+    let cam_s = c_lock_at + 1;
+    let cam_e = 1
+        + (cam_s..cancel.ops.len())
+            .find(|&k| {
+                matches!(&cancel.ops[k], Opcode::CallMethod { args, .. }
+            if args.first().is_some_and(|r| cancel.regs[r.0 as usize] == view_t))
+            })
+            .context("Activity._cancel__impl: no PlaceView camera call")?;
+    let cam_ops = cancel.ops[cam_s..cam_e].to_vec();
+    let Some(Opcode::CallMethod { field: cam_pi, .. }) = cam_ops.last().cloned() else {
+        unreachable!()
+    };
+    let inside = (cam_s..cam_e).all(|k| {
+        jump_targets(cancel, k)
+            .iter()
+            .all(|&t| (cam_s..=cam_e).contains(&t))
+    }) && (0..cancel.ops.len())
+        .filter(|k| !(cam_s..cam_e).contains(k))
+        .all(|k| {
+            jump_targets(cancel, k)
+                .iter()
+                .all(|&t| t <= cam_s || t > cam_e)
+        });
+    let calls_ok = cam_ops
+        .iter()
+        .all(|o| call_of(o).is_none_or(|(g, _)| g == base_check));
+    if !matches!(cam_ops[0], Opcode::GetThis { field, .. } if field == a_game)
+        || !cam_ops
+            .iter()
+            .any(|o| matches!(o, Opcode::GetThis { field, .. } if *field == a_cam))
+        || !inside
+        || !calls_ok
+        || cam_ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::CallMethod { .. }))
+            .count()
+            != 1
+    {
+        bail!("Activity._cancel__impl: unexpected camera restore block");
+    }
+    let cam_regs = cancel.regs.clone();
+    let aw_t = obj_type(code, "ui.win.ActivityWindow")?;
+    if !is_sub(code, aw_t, win_t) {
+        bail!("ui.win.ActivityWindow is not a ui.Window");
+    }
+    let aw_cls = class_global(code, "ui.win.ActivityWindow")?;
+    let mut cam_wins = vec![];
+    for name in [
+        "ui.win.LockPick",
+        "ui.win.NinePuzzle",
+        "ui.win.CylinderPuzzle",
+    ] {
+        let t = obj_type(code, name)?;
+        if !is_sub(code, t, aw_t) {
+            bail!("{name} is not an ActivityWindow");
+        }
+        let activity = typed(code, t, "activity", act_t)?;
+        let stop = method(code, t, "stopActivity")?;
+        let init = method(code, t, "initInteractive")?;
+        for (f, what) in [(stop, "stopActivity"), (init, "initInteractive")] {
+            if fun_args(code, f) != [t] || sig(code, f.findex)?.1 != void_ || jump_targets_any(f, 0)
+            {
+                bail!("{name}.{what}: unexpected shape");
+            }
+        }
+        let init_ret = init.ops.len() - 1;
+        if !matches!(init.ops[init_ret], Opcode::Ret { .. })
+            || init
+                .ops
+                .iter()
+                .filter(|o| matches!(o, Opcode::Ret { .. }))
+                .count()
+                != 1
+            || jump_targets_any(init, init_ret)
+        {
+            bail!("{name}.initInteractive: not one plain Ret at its end");
+        }
+        // the Leave button calls it: `leaveButton.onClick = this.stopActivity` in init
+        let ini = method(code, t, "init")?;
+        if !ini.ops.iter().any(|o| matches!(o, Opcode::InstanceClosure { fun, obj: Reg(0), .. } if *fun == stop.findex)) {
+            bail!("{name}.init: the Leave button is not this.stopActivity");
+        }
+        cam_wins.push(CamWin {
+            cls: class_global(code, name)?,
+            activity,
+            stop_fi: fun_index(code, stop.findex)?,
+            init_fi: fun_index(code, init.findex)?,
+            init_ret,
+        });
+    }
+    let flow_int = typed(code, flow_t, "interactive", int_t)?;
+    let int_prop = typed(code, int_t, "propagateEvents", bool_)?;
+    let m_cur = typed(code, mode_t, "currentWindow", win_t)?;
+    // Game.update, Escape: for each window w (top first):
+    //   NullCheck w; c = w.canEscape(); JFalse c -> modal test;
+    //   h = w.__host; JNull h -> esc; isAuth; JFalse -> found; esc: w.escape();
+    //   found = true; ...; JAlways break.   The modal test ends in the back edge.
+    let up = method(code, game_t, "update")?;
+    let o = &up.ops;
+    let sites: Vec<usize> = (1..o.len().saturating_sub(9))
+        .filter(|&k| {
+            let Opcode::CallMethod { dst: c, args, .. } = &o[k] else {
+                return false;
+            };
+            let [w] = args[..] else { return false };
+            up.regs[w.0 as usize] == win_t
+                && matches!(o[k - 1], Opcode::NullCheck { reg } if reg == w)
+                && matches!(o[k + 1], Opcode::JFalse { cond, .. } if cond == *c)
+                && matches!(o[k + 2], Opcode::Field { obj, .. } if obj == w)
+                && matches!(o[k + 3], Opcode::JNull { .. })
+                && matches!(o[k + 4], Opcode::GetThis { field, .. } if field == g_auth)
+                && matches!(o[k + 5], Opcode::JFalse { .. })
+                && matches!(&o[k + 6], Opcode::CallMethod { args, .. } if args[..] == [w])
+                && matches!(
+                    o[k + 7],
+                    Opcode::Bool {
+                        value: ValBool(true),
+                        ..
+                    }
+                )
+        })
+        .collect();
+    let [k] = sites[..] else {
+        bail!("Game.update: {} Escape window loops, want 1", sites.len());
+    };
+    let Opcode::CallMethod { args, .. } = &o[k] else {
+        unreachable!()
+    };
+    let esc_w = args[0];
+    let modal_at = jump_targets(up, k + 1)[0];
+    let esc_next = (modal_at..o.len())
+        .find(|&j| matches!(o[j], Opcode::JAlways { offset } if offset < 0))
+        .context("Game.update: no Escape loop back edge")?;
+    if jump_targets_any(up, k - 1) || jump_targets(up, esc_next)[0] > k - 1 {
+        bail!("Game.update: unexpected Escape loop shape");
+    }
+
     Ok(Plan {
         act_t,
         game_t,
@@ -651,6 +843,22 @@ pub(crate) fn plan(code: &Bytecode) -> Result<Plan> {
         fade_at,
         fade_act,
         dbg_file: dbg,
+        cam_ops,
+        cam_regs,
+        cam_pi,
+        base_check,
+        aw_cls,
+        cam_wins,
+        flow_int,
+        int_prop,
+        m_cur,
+        gui_t,
+        pad_t,
+        esc_fi: fun_index(code, up.findex)?,
+        esc_at: k - 1,
+        esc_w,
+        esc_found: k + 7,
+        esc_next,
     })
 }
 
@@ -842,7 +1050,7 @@ fn add_pre(
                 b: z,
                 offset: 0,
             },
-            "log",
+            "int",
         );
     }
     // watching from its own camera: no camera change, the wait Interactive
@@ -867,6 +1075,9 @@ fn add_pre(
         field: p.a_cc,
         src: b,
     });
+    // every spectator loses the chooseUnit wait Interactive (10000 x 10000 on
+    // s2d: a camera watcher kept it, so the whole screen took no click)
+    a.label("int");
     a.op(Opcode::Field {
         dst: it,
         obj: act,
@@ -1262,6 +1473,464 @@ fn add_help(code: &mut Bytecode, p: &Plan, spect: RefFun) -> Result<RefFun> {
     push_fn(code, vec![p.act_t], p.void_, r.0, a.finish(), p.dbg_file)
 }
 
+/// `spectCam(act)`: _cancel__impl's own camera restore (cameraSave) and PlaceView
+/// camera reset, copied with its register file (see Plan::cam_ops).
+fn add_cam(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
+    let mut ops = p.cam_ops.clone();
+    let mut regs = p.cam_regs.clone();
+    regs.push(p.void_);
+    ops.push(Opcode::Ret {
+        ret: Reg((regs.len() - 1) as u32),
+    });
+    push_fn(code, vec![p.act_t], p.void_, regs, ops, p.dbg_file)
+}
+
+/// `spectAct(w) -> Activity`: the activity of a CAMERA_ACTIVITIES window, else null.
+fn add_act_of(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
+    let mut r = Regs(vec![p.win_t]);
+    let (b, act) = (r.r(p.bool_), r.r(p.act_t));
+    let cw: Vec<(Reg, Reg)> = p
+        .cam_wins
+        .iter()
+        .map(|c| (r.r(c.cls.1), r.r(obj_t_of(code, c))))
+        .collect();
+    let mut a = Asm::new();
+    a.op(Opcode::Null { dst: act });
+    a.jmp(
+        Opcode::JNull {
+            reg: Reg(0),
+            offset: 0,
+        },
+        "ret",
+    );
+    let next = ["n0", "n1", "n2"];
+    for (i, (c, (cls, w))) in p.cam_wins.iter().zip(&cw).enumerate() {
+        a.op(Opcode::GetGlobal {
+            dst: *cls,
+            global: c.cls.0,
+        });
+        a.op(Opcode::Call2 {
+            dst: b,
+            fun: p.base_check,
+            arg0: *cls,
+            arg1: Reg(0),
+        });
+        a.jmp(Opcode::JFalse { cond: b, offset: 0 }, next[i]);
+        a.op(Opcode::SafeCast {
+            dst: *w,
+            src: Reg(0),
+        });
+        a.op(Opcode::Field {
+            dst: act,
+            obj: *w,
+            field: c.activity,
+        });
+        a.jmp(Opcode::JAlways { offset: 0 }, "ret");
+        a.label(next[i]);
+    }
+    a.label("ret");
+    a.op(Opcode::Ret { ret: act });
+    push_fn(code, vec![p.win_t], p.act_t, r.0, a.finish(), p.dbg_file)
+}
+
+/// The window type of a CamWin (its `activity` field's owner).
+fn obj_t_of(code: &Bytecode, c: &CamWin) -> RefType {
+    code.functions[c.stop_fi].regs[0]
+}
+
+/// `spectOut(win, act) -> Bool`: the watcher steps out of the live view of
+/// another player's minigame, on this machine only (nothing is sent): the
+/// copy is hidden (window and windowRoot: no draw, no clicks; it stays
+/// registered and updated), no longer the mode's current window, and an idle
+/// watcher's camera comes back (spectCam: _cancel__impl's own restore, then
+/// cameraSave = null so the end leaves it alone); a watcher busy with its own
+/// minigame or lock keeps its camera. The chooseUnit full-screen Interactive
+/// goes too. `mp: spectate <id> out`. False (nothing done) unless spect(act).
+fn add_out(code: &mut Bytecode, p: &Plan, spect: RefFun, cam: RefFun) -> Result<RefFun> {
+    let args = vec![p.win_t, p.act_t];
+    let mut r = Regs(args.clone());
+    let (win, act) = (Reg(0), Reg(1));
+    let (res, b, f, exc, root, gm, md, cur, cs, pm, lw, it, v) = (
+        r.r(p.bool_),
+        r.r(p.bool_),
+        r.r(p.bool_),
+        r.r(p.dyn_t),
+        r.r(p.flow_t),
+        r.r(p.game_t),
+        r.r(p.mode_t),
+        r.r(p.win_t),
+        r.r(p.cam_t),
+        r.r(p.player_t),
+        r.r(p.p_locked.1),
+        r.r(p.int_t),
+        r.r(p.void_),
+    );
+    let (inf, id, s, t) = (r.r(p.inf_t), r.r(p.str_t), r.r(p.str_t), r.r(p.str_t));
+    let (gui, pad) = (r.r(p.gui_t), r.r(p.pad_t));
+    let tag = str_global(code, p.str_t, "mp: spectate ");
+    let out = str_global(code, p.str_t, " out");
+    let mut a = Asm::new();
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: spect,
+        arg0: act,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ret");
+    a.op(Opcode::Bool {
+        dst: res,
+        value: ValBool(true),
+    });
+    a.jmp(Opcode::Trap { exc, offset: 0 }, "ret");
+    a.op(Opcode::Bool {
+        dst: f,
+        value: ValBool(false),
+    });
+    let hide = |a: &mut Asm, o: Reg| {
+        if p.set_vis_pi >= 0 {
+            a.op(Opcode::CallMethod {
+                dst: b,
+                field: RefField(p.set_vis_pi as usize),
+                args: vec![o, f],
+            });
+        } else {
+            a.op(Opcode::Call2 {
+                dst: b,
+                fun: p.set_vis,
+                arg0: o,
+                arg1: f,
+            });
+        }
+    };
+    a.op(Opcode::Field {
+        dst: root,
+        obj: win,
+        field: p.w_root,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: root,
+            offset: 0,
+        },
+        "self",
+    );
+    hide(&mut a, root);
+    a.label("self");
+    hide(&mut a, win);
+    a.op(Opcode::Field {
+        dst: gm,
+        obj: act,
+        field: p.a_game,
+    });
+    a.jmp(Opcode::JNull { reg: gm, offset: 0 }, "int");
+    a.op(Opcode::Field {
+        dst: md,
+        obj: gm,
+        field: p.g_mode,
+    });
+    a.jmp(Opcode::JNull { reg: md, offset: 0 }, "int");
+    a.op(Opcode::Field {
+        dst: cur,
+        obj: md,
+        field: p.m_cur,
+    });
+    a.jmp(
+        Opcode::JNotEq {
+            a: cur,
+            b: win,
+            offset: 0,
+        },
+        "cam",
+    );
+    a.op(Opcode::Null { dst: cur });
+    a.op(Opcode::SetField {
+        obj: md,
+        field: p.m_cur,
+        src: cur,
+    });
+    // the camera: an idle watcher's (cameraSave set, no lock of its own)
+    a.label("cam");
+    a.op(Opcode::Field {
+        dst: cs,
+        obj: act,
+        field: p.a_cam,
+    });
+    a.jmp(Opcode::JNull { reg: cs, offset: 0 }, "int");
+    // busy: its own minigame locks the pad cursor (_start, never for a
+    // spectator); mode.lockCamera is the watched view's own (doSetCamera)
+    a.op(Opcode::Field {
+        dst: gui,
+        obj: gm,
+        field: p.g_gui,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: gui,
+            offset: 0,
+        },
+        "lw",
+    );
+    a.op(Opcode::Field {
+        dst: pad,
+        obj: gui,
+        field: p.gui_pad,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: pad,
+            offset: 0,
+        },
+        "lw",
+    );
+    a.op(Opcode::Field {
+        dst: b,
+        obj: pad,
+        field: p.pad_locked,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "drop");
+    a.label("lw");
+    a.op(Opcode::Field {
+        dst: pm,
+        obj: gm,
+        field: p.g_me,
+    });
+    a.jmp(Opcode::JNull { reg: pm, offset: 0 }, "drop");
+    a.op(Opcode::Field {
+        dst: lw,
+        obj: pm,
+        field: p.p_locked.0,
+    });
+    a.jmp(Opcode::JNotNull { reg: lw, offset: 0 }, "drop");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: cam,
+        arg0: act,
+    });
+    a.label("drop");
+    a.op(Opcode::Null { dst: cs });
+    a.op(Opcode::SetField {
+        obj: act,
+        field: p.a_cam,
+        src: cs,
+    });
+    a.label("int");
+    a.op(Opcode::Field {
+        dst: it,
+        obj: act,
+        field: p.a_int,
+    });
+    a.jmp(Opcode::JNull { reg: it, offset: 0 }, "log");
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.obj_remove,
+        arg0: it,
+    });
+    a.op(Opcode::Null { dst: it });
+    a.op(Opcode::SetField {
+        obj: act,
+        field: p.a_int,
+        src: it,
+    });
+    a.label("log");
+    a.op(Opcode::GetGlobal {
+        dst: s,
+        global: tag,
+    });
+    a.op(Opcode::Field {
+        dst: inf,
+        obj: act,
+        field: p.a_inf,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: inf,
+            offset: 0,
+        },
+        "tail",
+    );
+    a.op(Opcode::Field {
+        dst: id,
+        obj: inf,
+        field: p.i_id,
+    });
+    a.jmp(Opcode::JNull { reg: id, offset: 0 }, "tail");
+    a.op(Opcode::Call2 {
+        dst: s,
+        fun: p.str_add,
+        arg0: s,
+        arg1: id,
+    });
+    a.label("tail");
+    a.op(Opcode::GetGlobal {
+        dst: t,
+        global: out,
+    });
+    a.op(Opcode::Call2 {
+        dst: s,
+        fun: p.str_add,
+        arg0: s,
+        arg1: t,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: s,
+    });
+    a.op(Opcode::EndTrap { exc });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: res });
+    push_fn(code, args, p.bool_, r.0, a.finish(), p.dbg_file)
+}
+
+/// `spectEsc(w) -> Int`, Game.update's Escape loop for window `w` and the
+/// watcher's Leave button: 1 = `w` was another player's live minigame copy on
+/// this machine and the watcher stepped out (spectOut): Escape is used up;
+/// 2 = `w` is a hidden ActivityWindow (a spectator's copy: spectWin, or one
+/// stepped out of): not this player's, Escape goes on to the next window
+/// (vanilla found it first: a client did nothing, the host ran the other
+/// player's minigame escape); 0 = vanilla.
+fn add_esc(code: &mut Bytecode, p: &Plan, act_of: RefFun, out: RefFun) -> Result<RefFun> {
+    let mut r = Regs(vec![p.win_t]);
+    let (k, b, cls, root, act) = (
+        r.r(p.i32_),
+        r.r(p.bool_),
+        r.r(p.aw_cls.1),
+        r.r(p.flow_t),
+        r.r(p.act_t),
+    );
+    let mut a = Asm::new();
+    int(&mut a, code, k, 0);
+    a.jmp(
+        Opcode::JNull {
+            reg: Reg(0),
+            offset: 0,
+        },
+        "ret",
+    );
+    a.op(Opcode::GetGlobal {
+        dst: cls,
+        global: p.aw_cls.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: cls,
+        arg1: Reg(0),
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ret");
+    a.op(Opcode::Field {
+        dst: root,
+        obj: Reg(0),
+        field: p.w_root,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: root,
+            offset: 0,
+        },
+        "act",
+    );
+    a.op(Opcode::Field {
+        dst: b,
+        obj: root,
+        field: p.o_visible,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "act");
+    int(&mut a, code, k, 2);
+    a.jmp(Opcode::JAlways { offset: 0 }, "ret");
+    a.label("act");
+    a.op(Opcode::Call1 {
+        dst: act,
+        fun: act_of,
+        arg0: Reg(0),
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: act,
+            offset: 0,
+        },
+        "ret",
+    );
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: out,
+        arg0: Reg(0),
+        arg1: act,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ret");
+    int(&mut a, code, k, 1);
+    a.label("ret");
+    a.op(Opcode::Ret { ret: k });
+    push_fn(code, vec![p.win_t], p.i32_, r.0, a.finish(), p.dbg_file)
+}
+
+/// `spectInt(w)`, at the end of a CAMERA_ACTIVITIES window's initInteractive:
+/// on a watcher its full-window input catcher (windowRoot.interactive, the
+/// player's lock / board input) lets every event through (propagateEvents),
+/// so the watcher's clicks reach its own scene; the window's buttons keep theirs.
+fn add_int(code: &mut Bytecode, p: &Plan, spect: RefFun, act_of: RefFun) -> Result<RefFun> {
+    let mut r = Regs(vec![p.win_t]);
+    let (act, b, root, it, v) = (
+        r.r(p.act_t),
+        r.r(p.bool_),
+        r.r(p.flow_t),
+        r.r(p.int_t),
+        r.r(p.void_),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Call1 {
+        dst: act,
+        fun: act_of,
+        arg0: Reg(0),
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: act,
+            offset: 0,
+        },
+        "ret",
+    );
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: spect,
+        arg0: act,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "ret");
+    a.op(Opcode::Field {
+        dst: root,
+        obj: Reg(0),
+        field: p.w_root,
+    });
+    a.jmp(
+        Opcode::JNull {
+            reg: root,
+            offset: 0,
+        },
+        "ret",
+    );
+    a.op(Opcode::Field {
+        dst: it,
+        obj: root,
+        field: p.flow_int,
+    });
+    a.jmp(Opcode::JNull { reg: it, offset: 0 }, "ret");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetField {
+        obj: it,
+        field: p.int_prop,
+        src: b,
+    });
+    a.label("ret");
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.win_t], p.void_, r.0, a.finish(), p.dbg_file)
+}
+
 /// Vanilla's Sing stage pair on a spectator of the bard's song: `_start`'s
 /// fade-in shows the stage (`target.obj.flags |= 2`, the parent of the unit's
 /// unitView: the bard) and hides its `HandTool`; onActionDone's closure does
@@ -1473,8 +2142,9 @@ fn add_fade(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
 }
 
 /// New functions, in this order: spect, spectStage, spectPre, spectInv,
-/// spectTut, spectWin, spectHelp, spectFade, spectEnd.
-fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 9]> {
+/// spectTut, spectWin, spectHelp, spectFade, spectEnd, (spectQuiet), spectCam,
+/// spectAct, spectOut, spectEsc, spectInt (the returned array skips spectQuiet).
+fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 14]> {
     let tag = str_global(code, p.str_t, "mp: spectate ");
     let sp = str_global(code, p.str_t, " ");
     let spect = add_spect(code, p)?;
@@ -1669,6 +2339,96 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 9]> {
             arg3: p.fade_act,
         };
     }
+    // Step-out of a watched camera minigame (this machine only)
+    let cam = add_cam(code, p)?;
+    let act_of = add_act_of(code, p)?;
+    let out = add_out(code, p, spect, cam)?;
+    let esc = add_esc(code, p, act_of, out)?;
+    let wint = add_int(code, p, spect, act_of)?;
+    // Game.update's Escape loop: k = spectEsc(w); 1 -> found (break); 2 -> next window
+    {
+        let one = int_const(code, 1);
+        let two = int_const(code, 2);
+        let f = &mut code.functions[p.esc_fi];
+        f.regs.push(p.i32_);
+        let k = Reg((f.regs.len() - 1) as u32);
+        f.regs.push(p.i32_);
+        let c = Reg((f.regs.len() - 1) as u32);
+        let at = p.esc_at;
+        let n = 5;
+        let to = |from: usize, target: usize| (target + n) as i32 - from as i32 - 1;
+        insert_ops(
+            f,
+            at,
+            vec![
+                Opcode::Call1 {
+                    dst: k,
+                    fun: esc,
+                    arg0: p.esc_w,
+                },
+                Opcode::Int { dst: c, ptr: one },
+                Opcode::JEq {
+                    a: k,
+                    b: c,
+                    offset: to(at + 2, p.esc_found),
+                },
+                Opcode::Int { dst: c, ptr: two },
+                Opcode::JEq {
+                    a: k,
+                    b: c,
+                    offset: to(at + 4, p.esc_next),
+                },
+            ],
+        );
+    }
+    // the Leave button (stopActivity): `if (spectEsc(this) != 0) return;`;
+    // initInteractive: spectInt(this) before its Ret
+    {
+        let zero = int_const(code, 0);
+        for c in &p.cam_wins {
+            let f = &mut code.functions[c.stop_fi];
+            f.regs.push(p.i32_);
+            let k = Reg((f.regs.len() - 1) as u32);
+            f.regs.push(p.i32_);
+            let z = Reg((f.regs.len() - 1) as u32);
+            f.regs.push(p.void_);
+            let v = Reg((f.regs.len() - 1) as u32);
+            insert_ops(
+                f,
+                0,
+                vec![
+                    Opcode::Call1 {
+                        dst: k,
+                        fun: esc,
+                        arg0: Reg(0),
+                    },
+                    Opcode::Int { dst: z, ptr: zero },
+                    Opcode::JEq {
+                        a: k,
+                        b: z,
+                        offset: 1,
+                    },
+                    Opcode::Ret { ret: v },
+                ],
+            );
+            let f = &mut code.functions[c.init_fi];
+            f.regs.push(p.void_);
+            let v = Reg((f.regs.len() - 1) as u32);
+            insert_ops(
+                f,
+                c.init_ret,
+                vec![Opcode::Call1 {
+                    dst: v,
+                    fun: wint,
+                    arg0: Reg(0),
+                }],
+            );
+        }
+    }
+    eprintln!(
+        "patched coop spectate: watcher step-out spectEsc fn@{} (Game.update Escape, Leave buttons), spectOut fn@{}, spectInt fn@{}",
+        esc.0, out.0, wint.0
+    );
     eprintln!(
         "patched coop spectate: Activity._start fn@{} (gate fn@{}, inventory fn@{}), onReady fn@{} \
          tutorial -> fn@{}, window closure fn@{} setWindow -> fn@{} / addHelpIcon -> fn@{}, \
@@ -1688,7 +2448,9 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<[RefFun; 9]> {
         stage.0,
         end.0
     );
-    Ok([spect, stage, pre, inv, tut, win, help, fade, end])
+    Ok([
+        spect, stage, pre, inv, tut, win, help, fade, end, cam, act_of, out, esc, wint,
+    ])
 }
 
 /// Keeps shared mini-game windows off the other players' screens, or leaves
@@ -1721,15 +2483,17 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
         let n = orig.functions.len();
-        assert_eq!(back.functions.len(), n + 10);
-        let sites = [
+        assert_eq!(back.functions.len(), n + 15);
+        let mut sites = vec![
             p.start_fi,
             p.ready_fi,
             p.make_fi,
             p.help_fi,
             p.fade_fi,
             p.cancel_fi,
+            p.esc_fi,
         ];
+        sites.extend(p.cam_wins.iter().flat_map(|c| [c.stop_fi, c.init_fi]));
         for i in 0..n {
             assert_eq!(
                 !same(&orig.functions[i], &back.functions[i]),
@@ -1868,8 +2632,12 @@ mod tests {
             p.std_string,
             p.str_add,
             p.str_cmp,
+            p.base_check,
             spect,
             stage,
+            nf(10),
+            nf(11),
+            nf(12),
         ];
         for f in &back.functions[n..] {
             for op in &f.ops {
@@ -1877,7 +2645,9 @@ mod tests {
                     assert!(allowed.contains(&g), "fn@{} calls fn@{}", f.findex.0, g.0);
                 }
                 if let Opcode::CallMethod { field, .. } = op {
-                    assert!(field.0 as i32 == p.set_vis_pi || *field == p.cull_pi);
+                    assert!(
+                        field.0 as i32 == p.set_vis_pi || *field == p.cull_pi || *field == p.cam_pi
+                    );
                 }
             }
         }
@@ -2118,7 +2888,8 @@ mod tests {
         assert_eq!(s.c.get(&w.pad, p.pad_locked), V::B(false));
         assert!(s.c.log.is_empty());
 
-        // a spectator of a camera-only mini-game keeps the vanilla start
+        // a spectator of a camera-only mini-game keeps the vanilla start, but
+        // not the full-screen wait Interactive
         for id in CAMERA_ACTIVITIES {
             let inf = s.c.get(&w.act, p.a_inf);
             s.c.set(&inf, p.i_id, V::S(id.into()));
@@ -2126,7 +2897,8 @@ mod tests {
             s.c.set(&w.act, p.a_int, it.clone());
             assert_eq!(s.run(pre, vec![w.act.clone()]), V::B(false));
             assert_eq!(s.c.get(&w.act, p.a_cc), V::B(true));
-            assert_eq!(s.c.get(&w.act, p.a_int), it);
+            assert_eq!(s.c.get(&w.act, p.a_int), V::Null);
+            assert_eq!(s.c.take("remove"), vec![vec![it.clone()]]);
             assert_eq!(
                 s.c.take("println"),
                 vec![vec![V::S(format!("mp: spectate {id} 0"))]]
