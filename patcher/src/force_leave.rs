@@ -53,7 +53,11 @@
 //      Gathering
 //      and scripted activities are cancelled in their ChooseUnit, as before.
 //      Started activities, crafts and gathering have no safe cancel: the leave
-//      waits until they end ("player busy" with their `lockedWith`). Their
+//      waits until they end ("player busy" with their `lockedWith`). A coop
+//      activity (LockPick, the ruins puzzles, ...) locks nobody (startActivity__impl
+//      sets lockedWith only for a non-coop one), so flWhy / tlWhy / cpWhy also
+//      give "player busy" while flActivity finds a minigame window
+//      (ActivityWindow, hidden on a spectator too) on the host. Their
 //      minigame windows (ui.win.ForgeAction, GatherAction, AnalyzeAction,
 //      SingAction, FishingAction, UnitAction: ActivityWindows) only exist after
 //      Activity._start paid `onStartActivityCost`; their close() only drops the
@@ -179,6 +183,17 @@
 //      shares (they arrive through alive); a window the host builds itself for
 //      a client's request skips alive and is not deferred on the host.
 //
+//   I  No player's element click reaches into another's minigame. The host
+//      runs every player's click as a virtual Entity.onAction(entity, player),
+//      from Controller.playerTriggerAction__impl (the click RPC) or
+//      MovingObject.onTargetReached (the walk to it). Both calls become
+//      `flClick(entity, from)`: in co-op, while flActivity (a minigame window on
+//      the host: a coop activity, which locks nobody, or the host's own), the
+//      click is refused (logged "mp: busy: ..."), as vanilla Npc.talk / Chest
+//      refuse while anyPlayerLocked; else onAction as before. Without it a
+//      spectator (free since coop_spectate) talking to an NPC opened the shared
+//      Dialog as every mode's window and ended the host's song at once.
+//
 // Coordination: the G1 repeat guard still runs the Leave button once per click
 // burst and drops clicks while the mode-switch barrier runs; the pending leave
 // waits for that barrier too and leave() runs once per PlaceView. The follow
@@ -223,6 +238,8 @@ const ASK_EVERY: f64 = 1.0;
 /// its window closing before flRelease clears it.
 const RELEASE_AFTER: f64 = 3.0;
 const RELEASES: &str = "mp: leave releases lock ";
+/// A player's element click refused while a minigame runs (flClick).
+const BUSY: &str = "mp: busy: element click refused while a minigame runs";
 
 /// Reason codes of `flWhy` / `flDialog` / `tlWhy` / `cpWhy` (0 = nothing refuses) and their log text.
 const REASONS: [&str; 15] = [
@@ -451,6 +468,13 @@ struct Plan {
     set_locked: RefFun,
     /// ui.win.ActivityWindow class global: a running minigame.
     act_win_cls: (RefGlobal, RefType),
+    /// I: ent.Entity, the virtual slot of Entity.onAction, and (function index,
+    /// op) of its call in playerTriggerAction__impl and onTargetReached.
+    ent_t: RefType,
+    on_action: RefField,
+    clicks: Vec<(usize, usize)>,
+    /// ent.BasePlayer's class global: only a player's click is refused.
+    bp_cls: (RefGlobal, RefType),
     /// h2d.Object.visible (a spectator's hidden minigame window is no minigame).
     o_visible: RefField,
     /// D: Window.alive (fn index, findex, its own closure type), Game.inst,
@@ -817,6 +841,37 @@ fn plan(code: &Bytecode) -> Result<Plan> {
     }
     let sys_time = native(code, "sys_time", &[], t.f64_)?;
 
+    // I: the two host-side ends of a player's element click, each with one
+    // virtual Entity.onAction(entity, from) call: Controller.playerTriggerAction__impl
+    // (the click RPC) and MovingObject.onTargetReached (the walk to it).
+    let ent_t = obj_type(code, "ent.Entity")?;
+    let on_action = slot(code, ent_t, "onAction")?;
+    if fun_args(code, method(code, ent_t, "onAction")?) != [ent_t, ent_t] {
+        bail!("unexpected Entity.onAction signature");
+    }
+    let bp_cls = class_global(code, "ent.BasePlayer")?;
+    let mut clicks = vec![];
+    for (cls, name) in [
+        ("st.Controller", "playerTriggerAction__impl"),
+        ("ent.MovingObject", "onTargetReached"),
+    ] {
+        let m = method(code, obj_type(code, cls)?, name)?;
+        let fi = fun_index(code, m.findex)?;
+        let f = &code.functions[fi];
+        let at: Vec<usize> = (0..f.ops.len())
+            .filter(|&k| {
+                matches!(&f.ops[k], Opcode::CallMethod { field, args, .. }
+                    if *field == on_action && args.len() == 2
+                        && is_sub(code, f.regs[args[0].0 as usize], ent_t)
+                        && is_sub(code, f.regs[args[1].0 as usize], ent_t))
+            })
+            .collect();
+        let [at] = at[..] else {
+            bail!("{cls}.{name}: not one Entity.onAction call");
+        };
+        clicks.push((fi, at));
+    }
+
     // PlaceView.tryClose: the refusals flWhy mirrors, in this order.
     let tc = method(code, view_t, "tryClose")?;
     let try_close_fi = fun_index(code, tc.findex)?;
@@ -983,6 +1038,10 @@ fn plan(code: &Bytecode) -> Result<Plan> {
         v_leave_cb,
         set_locked,
         act_win_cls,
+        ent_t,
+        on_action,
+        clicks,
+        bp_cls,
         o_visible,
         alive_fi,
         alive_fn,
@@ -1487,7 +1546,7 @@ fn top_down(
 
 /// `flWhy(view, poll) -> I32`: the first thing that makes `view.tryClose()`
 /// refuse (same order), and with `poll` what the pending leave also waits on.
-fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
+fn add_why(code: &mut Bytecode, p: &Plan, act: RefFun) -> Result<RefFun> {
     let ints = reason_ints(code);
     let t = &p.t;
     let mut r = Regs(vec![p.view_t, t.bool_]);
@@ -1561,6 +1620,15 @@ fn add_why(code: &mut Bytecode, p: &Plan) -> Result<RefFun> {
         fun: p.any_locked.0,
         arg0: game,
         arg1: nul,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "act");
+    ret(&mut a, R_LOCKED);
+    // 2 a coop activity (minigame) runs, whoever plays it
+    a.label("act");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: act,
+        arg0: game,
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "cine");
     ret(&mut a, R_LOCKED);
@@ -2902,6 +2970,168 @@ fn add_minigame(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun>
     push_fn(code, vec![p.game_t], t.bool_, r.0, a.finish(), p.dbg_file)
 }
 
+/// `flActivity(game) -> Bool`: a ui.win.ActivityWindow (any minigame window,
+/// shown or a spectator's hidden one) in game.mode.windows or game.ui.windows.
+/// Controller.startActivity__impl sets `lockedWith` only for a non-coop
+/// activity; a coop one (data `props.coop`: LockPick, the ruins puzzles, ...)
+/// is the host's ui.win.Activity and locks nobody, so anyPlayerLocked misses
+/// it. Its minigame window exists on the host whoever plays it (Activity._start's
+/// onReady builds it there; coop_spectate only hides a spectator's), from the
+/// paid start until the activity ends. Read on the host, which decides every leave.
+fn add_activity(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
+    let i0 = int_const(code, 0);
+    let t = &p.t;
+    let mut r = Regs(vec![p.game_t]);
+    let (mode, gui, lst, i, zero, raw, d, w, b, acr) = (
+        r.r(p.g_mode.1),
+        r.r(p.g_gui.1),
+        r.r(p.arr_t),
+        r.r(t.i32_),
+        r.r(t.i32_),
+        r.r(p.a_raw.1),
+        r.r(dyn_t),
+        r.r(p.win_t),
+        r.r(t.bool_),
+        r.r(p.act_win_cls.1),
+    );
+    let mut a = Asm::new();
+    a.op(Opcode::Int { dst: zero, ptr: i0 });
+    for (k, (head, out)) in [("a_loop", "a_gui"), ("ag_loop", "no")]
+        .into_iter()
+        .enumerate()
+    {
+        if k == 0 {
+            a.op(Opcode::Field {
+                dst: mode,
+                obj: Reg(0),
+                field: p.g_mode.0,
+            });
+            a.jmp(Opcode::JNull { reg: mode, offset: 0 }, out);
+            a.op(Opcode::Field {
+                dst: lst,
+                obj: mode,
+                field: p.m_windows.0,
+            });
+        } else {
+            a.label("a_gui");
+            a.op(Opcode::Field {
+                dst: gui,
+                obj: Reg(0),
+                field: p.g_gui.0,
+            });
+            a.jmp(Opcode::JNull { reg: gui, offset: 0 }, out);
+            a.op(Opcode::Field {
+                dst: lst,
+                obj: gui,
+                field: p.u_windows.0,
+            });
+        }
+        a.jmp(Opcode::JNull { reg: lst, offset: 0 }, out);
+        top_down(&mut a, p, lst, i, zero, raw, d, w, head, out);
+        a.op(Opcode::GetGlobal {
+            dst: acr,
+            global: p.act_win_cls.0,
+        });
+        a.op(Opcode::Call2 {
+            dst: b,
+            fun: p.base_check,
+            arg0: acr,
+            arg1: w,
+        });
+        a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
+        a.jmp(Opcode::JAlways { offset: 0 }, head);
+    }
+    a.label("no");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::Ret { ret: b });
+    a.label("yes");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::Ret { ret: b });
+    push_fn(code, vec![p.game_t], t.bool_, r.0, a.finish(), p.dbg_file)
+}
+
+/// `flClick(entity, from)`, in place of the host's Entity.onAction call of a
+/// player's click (playerTriggerAction__impl, onTargetReached; `from` a
+/// BasePlayer, not a roaming group reaching a player): in co-op, while
+/// flActivity (a minigame runs, whoever plays it), the click does nothing
+/// (logged), as vanilla's anyPlayerLocked refuses a talk while a player is busy;
+/// else the virtual onAction as before. A coop activity locks nobody, so a
+/// spectator's NPC talk (a shared Dialog set as every mode's window), door or
+/// script element would otherwise end the other player's minigame.
+fn add_click(code: &mut Bytecode, p: &Plan, activity: RefFun) -> Result<RefFun> {
+    let busy = str_global(code, p.t.str_, BUSY);
+    let t = &p.t;
+    let mut r = Regs(vec![p.ent_t, p.ent_t]);
+    let (gc, g, b, s, v, bpc) = (
+        r.r(p.g_cls.1),
+        r.r(p.game_t),
+        r.r(t.bool_),
+        r.r(t.str_),
+        r.r(t.void),
+        r.r(p.bp_cls.1),
+    );
+    let mut a = Asm::new();
+    // a player's interaction only (roaming groups reach their target player too)
+    a.op(Opcode::GetGlobal {
+        dst: bpc,
+        global: p.bp_cls.0,
+    });
+    a.op(Opcode::Call2 {
+        dst: b,
+        fun: p.base_check,
+        arg0: bpc,
+        arg1: Reg(1),
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "go");
+    a.op(Opcode::GetGlobal {
+        dst: gc,
+        global: p.g_cls.0,
+    });
+    a.op(Opcode::Field {
+        dst: g,
+        obj: gc,
+        field: p.g_inst,
+    });
+    a.jmp(Opcode::JNull { reg: g, offset: 0 }, "go");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: p.is_multi,
+        arg0: g,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "go");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: activity,
+        arg0: g,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "go");
+    a.op(Opcode::GetGlobal {
+        dst: s,
+        global: busy,
+    });
+    // a String goes to println's Dyn argument as is
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: s,
+    });
+    a.op(Opcode::Ret { ret: v });
+    a.label("go");
+    a.op(Opcode::CallMethod {
+        dst: v,
+        field: p.on_action,
+        args: vec![Reg(0), Reg(1)],
+    });
+    a.op(Opcode::Ret { ret: v });
+    push_fn(code, vec![p.ent_t, p.ent_t], t.void, r.0, a.finish(), p.dbg_file)
+}
+
 /// `flDefer(win) -> Bool`, at op 0 of Window.alive (a replicated window arrives
 /// on a client): while this machine runs a minigame (flMinigame), a window
 /// another machine opened waits in Controller.waitGameAlive, which
@@ -3950,7 +4180,7 @@ fn add_mark(code: &mut Bytecode, p: &Plan, tv: &Tav) -> Result<RefFun> {
 /// `tlWhy(game) -> I32`: what Tavern.askLeave__impl refuses on (a player
 /// lockedWith, fade, alive lock), then a running mode-switch barrier
 /// (syncLeaveMode would queue or drop the request).
-fn add_tl_why(code: &mut Bytecode, p: &Plan, tv: &Tav) -> Result<RefFun> {
+fn add_tl_why(code: &mut Bytecode, p: &Plan, tv: &Tav, act: RefFun) -> Result<RefFun> {
     let ints = reason_ints(code);
     let t = &p.t;
     let mut r = Regs(vec![p.game_t]);
@@ -3982,6 +4212,14 @@ fn add_tl_why(code: &mut Bytecode, p: &Plan, tv: &Tav) -> Result<RefFun> {
         fun: p.any_locked.0,
         arg0: Reg(0),
         arg1: rf,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "act");
+    ret(&mut a, R_LOCKED);
+    a.label("act");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: act,
+        arg0: Reg(0),
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "fade");
     ret(&mut a, R_LOCKED);
@@ -4565,7 +4803,7 @@ struct CGlobals {
 /// `cpWhy(game, camp) -> I32`: 0 when the vanilla body should run (nothing
 /// refuses, or a rest runs, which the vanilla body refuses on its own);
 /// otherwise what the camp leave waits on.
-fn add_cp_why(code: &mut Bytecode, p: &Plan, c: &Camp) -> Result<RefFun> {
+fn add_cp_why(code: &mut Bytecode, p: &Plan, c: &Camp, act: RefFun) -> Result<RefFun> {
     let ints = reason_ints(code);
     let t = &p.t;
     let mut r = Regs(vec![p.game_t, c.cm_t]);
@@ -4616,6 +4854,14 @@ fn add_cp_why(code: &mut Bytecode, p: &Plan, c: &Camp) -> Result<RefFun> {
         fun: p.any_locked.0,
         arg0: Reg(0),
         arg1: rf,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "act");
+    ret(&mut a, R_LOCKED);
+    a.label("act");
+    a.op(Opcode::Call1 {
+        dst: b,
+        fun: act,
+        arg0: Reg(0),
     });
     a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "fade");
     ret(&mut a, R_LOCKED);
@@ -5307,6 +5553,8 @@ fn add_cp_close(
 
 /// New functions, in the order `apply` appends them.
 struct Added {
+    activity: RefFun,
+    click: RefFun,
     why: RefFun,
     text: RefFun,
     log: RefFun,
@@ -5426,7 +5674,20 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         rel_at: add_global(code, p.t.f64_),
     };
     let go = p.camp.as_ref().map(|_| add_global(code, p.t.bool_));
-    let why = add_why(code, p)?;
+    let activity = add_activity(code, p, dyn_t)?;
+    let click = add_click(code, p, activity)?;
+    for &(fi, at) in &p.clicks {
+        let f = &mut code.functions[fi];
+        if let Opcode::CallMethod { dst, args, .. } = &f.ops[at] {
+            f.ops[at] = Opcode::Call2 {
+                dst: *dst,
+                fun: click,
+                arg0: args[0],
+                arg1: args[1],
+            };
+        }
+    }
+    let why = add_why(code, p, activity)?;
     let text = add_text(code, p, dyn_t)?;
     let log = add_log(code, p, text)?;
     let notify = add_notify(code, p)?;
@@ -5477,7 +5738,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         None => None,
         Some(tv) => {
             let mark = add_mark(code, p, tv)?;
-            let twhy = add_tl_why(code, p, tv)?;
+            let twhy = add_tl_why(code, p, tv, activity)?;
             let tf = TFns {
                 log,
                 closable,
@@ -5505,7 +5766,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
     };
     let camp = match (&p.camp, &cg, go) {
         (Some(c), Some(cg), Some(go)) => {
-            let cwhy = add_cp_why(code, p, c)?;
+            let cwhy = add_cp_why(code, p, c, activity)?;
             let asks = add_cp_asks(code, p, c, cg, dyn_t)?;
             let cf = CFns {
                 log,
@@ -5534,6 +5795,8 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
         _ => None,
     };
     Ok(Added {
+        activity,
+        click,
         why,
         text,
         log,
@@ -5554,6 +5817,7 @@ fn apply(code: &mut Bytecode, p: &Plan) -> Result<Added> {
 /// Indices of every function `apply` edits.
 fn touched(p: &Plan) -> Vec<usize> {
     let mut v = vec![p.update_fi, p.try_close_fi, p.leave_fi, p.content_fi, p.alive_fi];
+    v.extend(p.clicks.iter().map(|&(fi, _)| fi));
     if let Some(tv) = &p.tav {
         v.extend([tv.ask_fi, tv.close_fi, tv.upd_fi]);
     }
@@ -5578,8 +5842,8 @@ pub(crate) fn patch_force_leave(code: &mut Bytecode) {
     match apply(code, &p) {
         Ok(a) => {
             eprintln!(
-                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, text fn@{}, notify fn@{}, windows fn@{}, dialog fn@{}, minigame fn@{}, release fn@{}), Window.alive defers to fn@{} during a minigame, tryClose -> fn@{}, leave -> fn@{}",
-                a.update.0, a.why.0, a.log.0, a.text.0, a.notify.0, a.closable.0, a.dialog.0, a.minigame.0, a.release.0, a.defer.0, a.refused.0, a.paused.0
+                "patched force leave: PlaceView.update -> fn@{} (why fn@{}, log fn@{}, text fn@{}, notify fn@{}, windows fn@{}, dialog fn@{}, minigame fn@{}, activity fn@{}, release fn@{}), element clicks -> fn@{} during a minigame, Window.alive defers to fn@{} during a minigame, tryClose -> fn@{}, leave -> fn@{}",
+                a.update.0, a.why.0, a.log.0, a.text.0, a.notify.0, a.closable.0, a.dialog.0, a.minigame.0, a.activity.0, a.release.0, a.click.0, a.defer.0, a.refused.0, a.paused.0
             );
             if let Some(t) = a.tav {
                 eprintln!(
@@ -5623,9 +5887,9 @@ mod tests {
         let patched = write(&code);
         let back = read(&patched);
 
-        // Appended only: 22 functions (+ their types), 15 globals.
+        // Appended only: 24 functions (+ their types), 15 globals.
         let nf = orig.functions.len();
-        assert_eq!(back.functions.len(), nf + 22);
+        assert_eq!(back.functions.len(), nf + 24);
         assert_eq!(&back.types[..orig.types.len()], &orig.types[..]);
         let ng = orig.globals.len();
         assert_eq!(&back.globals[..ng], &orig.globals[..]);
@@ -5660,6 +5924,8 @@ mod tests {
             );
         }
         let new: Vec<RefFun> = vec![
+            added.activity,
+            added.click,
             added.why,
             added.text,
             added.log,
@@ -5702,6 +5968,18 @@ mod tests {
             assert!(
                 matches!(b.ops[at], Opcode::Call1 { fun: f, arg0: Reg(0), .. } | Opcode::Call0 { fun: f, .. } if f == fun)
             );
+            check_types(&back, b, at..at + 1);
+        }
+        // I: the click sites' onAction call is flClick(entity, from), same op count.
+        assert_eq!(p.clicks.len(), 2);
+        for &(fi, at) in &p.clicks {
+            let (a, b) = (&orig.functions[fi], &back.functions[fi]);
+            assert_eq!(a.ops.len(), b.ops.len());
+            assert!(matches!(
+                (&a.ops[at], &b.ops[at]),
+                (Opcode::CallMethod { field, args, .. }, Opcode::Call2 { fun, arg0, arg1, .. })
+                    if *field == p.on_action && *fun == added.click && [*arg0, *arg1] == args[..]
+            ));
             check_types(&back, b, at..at + 1);
         }
         // `if (hook(this)) return;` in front of askLeave__impl / closeTavern__impl,
@@ -5934,8 +6212,9 @@ mod tests {
     }
 
     /// `CallMethod` receiver / slot / arguments / result agree with the method the
-    /// slot holds in the receiver's class, and only tryClose / close are called on
-    /// objects (a virtual receiver is the leaveState proxy mark, checked above).
+    /// slot holds in the receiver's class, and only tryClose / close / leave /
+    /// onAction (flClick) are called on objects (a virtual receiver is the
+    /// leaveState proxy mark, checked above).
     fn check_virtual_calls(code: &Bytecode, f: &Function) {
         for op in &f.ops {
             let Opcode::CallMethod { dst, field, args } = op else {
@@ -5963,7 +6242,7 @@ mod tests {
                 .expect("method");
             let name = s(code, g.name);
             assert!(
-                name == "tryClose" || name == "close" || name == "leave",
+                name == "tryClose" || name == "close" || name == "leave" || name == "onAction",
                 "fn@{}: {name}",
                 f.findex.0
             );
@@ -6036,8 +6315,8 @@ mod tests {
         let first_new = orig.functions.len() + orig.natives.len();
         assert!(roots.iter().all(|f| f.0 >= first_new));
         let ours = reachable(&b, first_new, &roots);
-        // All 21 but flPaused (it hangs off PlaceView.leave, which diag also edits).
-        assert_eq!(ours.len(), 20, "functions the hooks reach");
+        // All 22 but flPaused (it hangs off PlaceView.leave, which diag also edits).
+        assert_eq!(ours.len(), 21, "functions the hooks reach");
         for g in ours {
             check_flow(g);
             check_types(&b, g, 0..g.ops.len());
