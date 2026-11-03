@@ -172,3 +172,19 @@ Commits 2692354 + 5c2416e (force_leave M: syncEnterMode / syncLeaveMode's lockSy
 | regression 3-8 | `-173326` / `-175458`: load world / battle / guest dead, drop, save list, weapon_set, windows PASS; shield dump fields empty / odd at some turns on this and on the fd21f96 build alike (harness dump timing, not the patch) | PASS (shield: harness flake) |
 
 dist\winmm.dll 5447168 B, SHA256 D3B211C3F768B83D80B8958DEC073F7153F33527938A5278E9DCEBE19D87C9D5.
+
+## Fix pass 4 (2026-11-03 late): watcher step-out, switch hold, shield dump
+
+Commits 7a144e7 (harness: dump opens a closed hud and runs HealthBars.sync before reading the shield), 36c16cc (force_leave M: hold only for a recorded non-coop activity element (flActRec at Controller.startActivity__impl, dropped by flActEnd at _callbackResult__impl) or an ActivityGather lock, plus flActivity; window locks never hold), a76539e + 76e4504 (coop_spectate step-out: spectators lose the chooseUnit 10000x10000 Interactive, watched LockPick / NinePuzzle / CylinderPuzzle input catcher propagates, Escape (Game.update loop hook) and the Leave button step out locally, hidden spectator copies skipped by Escape, camera restored via _cancel__impl's block + lockCamera cleared; harness `esc` verb, dump `aw`). Tests 228/228 (harness) + 227/227, lint ok.
+
+| Case | Evidence (run `20261103-190609`, test dll from the uncommitted tree = a76539e content; 76e4504 not run) | Status |
+| --- | --- | --- |
+| watcher lockpick, Escape | B `aw` watching: `vis true, iw 1280 ih 720, prop true, actInt false, camSave true`; `esc` -> ok, `mp: spectate LockPick out`, `vis false, camSave false`; snap w-after = place view; A (player) unchanged, A `lpstop` ends normally; 2nd `esc` -> hidden | PASS |
+| watcher lockpick, Leave button | B `lpstop` (LockPick.stopActivity) -> `spectate LockPick out`, no `not allowed` RPC error, A keeps playing | PASS |
+| watcher to the end, no step-out | snap w-noesc-end: place view back | PASS |
+| watcher ruins NinePuzzle, Escape | B `esc` -> `spectate NinePuzzle out`, `vis false, camSave false` | PASS (camera snap not taken) |
+| switch with guest NPC sheet + chest panel | T2Tavern, B `inspect T2Recruit1` (meLock Npc, UnitInfo, chest panel visible); A `enter T2Forge`: no `mode switch waits`, both T2Forge, B UnitInfo + chest panel still open | PASS (lock-type chest (CounterChest / camp chest) not reachable by harness) |
+| shield dump | rats 10 turns: first-dump nulls 0 of 20 (was null on every new turn); values track guard/taken/reduce A = B; negatives (Одик taken 65 -> -65) are shield_total's design (`vulnerability keeps its sign` test), no flicker | PASS |
+| host as watcher (guest plays coop lockpick) | no harness path (coop start uses player = host) | NOT-OBSERVABLE |
+
+PENDING (harness stopped by owner request): full regression on the committed build 76e4504 (items 3-8, minigame popup both directions, switch hold during host song / guest forge, lockpick leave), and a re-run of the cases above on it. dist\winmm.dll 5508096 B, SHA256 F18BA43079C3865B7C21B740A6CBCA97F79904868CF194D76AFFAB6643CEA310; dist-test SHA256 6AD5B73E....
