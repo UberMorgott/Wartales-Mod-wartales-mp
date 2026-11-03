@@ -172,7 +172,8 @@
 //      Every window another machine opens reaches this one through
 //      Window.alive (dialogs, the chest search window, confirms, notifies).
 //      Window.alive gets `if (flDefer(this)) return;` in front: while
-//      flMinigame(game) (a visible ActivityWindow, or a started Craft / Alter;
+//      flMinigame(game) (a visible ActivityWindow, or a started Craft / Alter
+//      whose act.unit is this machine's player's;
 //      a spectator's hidden minigame window does not count) the window's
 //      `alive` closure goes into Controller.waitGameAlive, which
 //      Controller.update re-runs every frame (the queue vanilla alive uses
@@ -262,6 +263,8 @@ const RELEASES: &str = "mp: leave releases lock ";
 /// W: a window held back during this machine's minigame, and shown after it.
 const WAITS_WIN: &str = "mp: window waits for the minigame";
 const SHOWS: &str = "mp: window shown after the minigame";
+/// D: a shared window (Window.alive) held back during this machine's minigame.
+const DEFERS: &str = "mp: shared window waits for the minigame";
 /// M: a party mode switch held while a minigame runs, and started after it.
 const SWITCH_WAITS: &str = "mp: mode switch waits for a minigame";
 const SWITCH_GO: &str = "mp: mode switch goes";
@@ -3028,6 +3031,7 @@ fn add_minigame(code: &mut Bytecode, p: &Plan, dyn_t: RefType, mine: RefFun) -> 
         r.r(p.act_win_cls.1),
         r.r(p.act_t),
     );
+    let (un, ow, me) = (r.r(p.unit_t), r.r(p.g_me.1), r.r(p.g_me.1));
     let acts: Vec<(&Lock, Reg, Reg, RefField)> = p
         .locks
         .iter()
@@ -3147,7 +3151,33 @@ fn add_minigame(code: &mut Bytecode, p: &Plan, dyn_t: RefType, mine: RefFun) -> 
                 obj: act,
                 field: p.act_started,
             });
-            a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "yes");
+            a.jmp(Opcode::JFalse { cond: b, offset: 0 }, next);
+            // only this machine's player's craft: the host keeps a client's
+            // Craft / Alter (built for it, hidden) while that client crafts
+            a.op(Opcode::Field {
+                dst: un,
+                obj: act,
+                field: p.act_unit,
+            });
+            a.jmp(Opcode::JNull { reg: un, offset: 0 }, next);
+            a.op(Opcode::Field {
+                dst: ow,
+                obj: un,
+                field: p.u_owner,
+            });
+            a.op(Opcode::Field {
+                dst: me,
+                obj: Reg(0),
+                field: p.g_me.0,
+            });
+            a.jmp(
+                Opcode::JEq {
+                    a: ow,
+                    b: me,
+                    offset: 0,
+                },
+                "yes",
+            );
             a.label(next);
         }
         a.jmp(Opcode::JAlways { offset: 0 }, head);
@@ -3646,9 +3676,11 @@ fn guard_hook_args(f: &mut Function, bool_t: RefType, void_t: RefType, fun: RefF
 }
 
 /// `flMine(game, win) -> Bool`: the minigame window `win` is this machine's
-/// player's: its `activity` (DynGet: every minigame window class has one) has
-/// no unit, or the unit's owner is game.me. A client shows the host's shared
-/// window of another player's activity too; that one is not this machine's.
+/// player's: its `activity` (DynGet; AnalyzeAction has none) has no unit (a shared
+/// puzzle everyone plays) or the unit's owner is game.me. A client shows the
+/// host's shared window of another player's activity too; that one is not this
+/// machine's. No activity at all is not this machine's: a wrong "mine" holds
+/// every shared window (flDefer) on a machine nobody plays on.
 fn add_mine(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
     let s_act = crate::asm::string_ref(code, "activity");
     let t = &p.t;
@@ -3667,9 +3699,9 @@ fn add_mine(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
         obj: Reg(1),
         field: s_act,
     });
-    a.jmp(Opcode::JNull { reg: d, offset: 0 }, "yes");
+    a.jmp(Opcode::JNull { reg: d, offset: 0 }, "no");
     a.op(Opcode::SafeCast { dst: act, src: d });
-    a.jmp(Opcode::JNull { reg: act, offset: 0 }, "yes");
+    a.jmp(Opcode::JNull { reg: act, offset: 0 }, "no");
     a.op(Opcode::Field {
         dst: un,
         obj: act,
@@ -3694,6 +3726,7 @@ fn add_mine(code: &mut Bytecode, p: &Plan, dyn_t: RefType) -> Result<RefFun> {
         },
         "yes",
     );
+    a.label("no");
     a.op(Opcode::Bool {
         dst: b,
         value: ValBool(false),
@@ -4396,8 +4429,12 @@ fn add_sync_held(
 /// Controller.update re-runs every frame (the vanilla queue alive uses during a
 /// fade); it shows once the minigame ends. A minigame window itself never waits.
 fn add_defer(code: &mut Bytecode, p: &Plan, minigame: RefFun, mine: RefFun) -> Result<RefFun> {
+    let waits = str_global(code, p.t.str_, DEFERS);
+    // set while windows wait (logged once per wait), cleared when none has to
+    let logged = add_global(code, p.t.bool_);
     let t = &p.t;
     let mut r = Regs(vec![p.win_t]);
+    let (s, v) = (r.r(t.str_), r.r(t.void));
     let (gc, g, b, acr, ctrl, lst, cb, n) = (
         r.r(p.g_cls.1),
         r.r(p.game_t),
@@ -4452,7 +4489,7 @@ fn add_defer(code: &mut Bytecode, p: &Plan, minigame: RefFun, mine: RefFun) -> R
         fun: minigame,
         arg0: g,
     });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "no");
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "free");
     a.op(Opcode::Field {
         dst: ctrl,
         obj: g,
@@ -4465,6 +4502,29 @@ fn add_defer(code: &mut Bytecode, p: &Plan, minigame: RefFun, mine: RefFun) -> R
         field: p.c_wait_alive.0,
     });
     a.jmp(Opcode::JNull { reg: lst, offset: 0 }, "no");
+    a.op(Opcode::GetGlobal {
+        dst: b,
+        global: logged,
+    });
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "set");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetGlobal {
+        global: logged,
+        src: b,
+    });
+    a.op(Opcode::GetGlobal {
+        dst: s,
+        global: waits,
+    });
+    a.op(Opcode::Call1 {
+        dst: v,
+        fun: p.println,
+        arg0: s,
+    });
+    a.label("set");
     // dispatchRemove__impl reads this.game while it waits
     a.op(Opcode::SetField {
         obj: Reg(0),
@@ -4488,6 +4548,16 @@ fn add_defer(code: &mut Bytecode, p: &Plan, minigame: RefFun, mine: RefFun) -> R
         value: ValBool(true),
     });
     a.op(Opcode::Ret { ret: b });
+    // no minigame: the hold is over, its next one is logged again
+    a.label("free");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(false),
+    });
+    a.op(Opcode::SetGlobal {
+        global: logged,
+        src: b,
+    });
     a.label("no");
     a.op(Opcode::Bool {
         dst: b,
@@ -7757,6 +7827,111 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, Opcode::Field { obj, field, .. }
                 if *field == hwo && g.regs[obj.0 as usize] == bp_t)));
+        }
+    }
+
+    /// Live bug: the host keeps a client's Craft (built for it, hidden) while that
+    /// client crafts; its started act made flMinigame true there, so every shared
+    /// dialog waited (flDefer, silently). Only this machine's player's craft counts.
+    #[test]
+    fn other_players_craft_is_no_minigame() {
+        use crate::testsim::{Sim, V};
+        let Some(image) = game() else { return };
+        let mut code = read(&image);
+        let p = plan(&code).expect("plan");
+        let n = code.functions.len();
+        let added = apply(&mut code, &p).expect("apply");
+        let craft = p.locks.iter().find(|l| l.act.is_some()).expect("Craft lock");
+        let (base, push, println) = (p.base_check, p.arr_push, p.println);
+        let mut s = Sim::new(
+            &code,
+            n,
+            move |c, f, a| {
+                if f == println {
+                    c.log.push(("println", a.to_vec()));
+                    Some(V::Null)
+                } else if f == base {
+                    Some(V::B(c.key_get(&a[1], "cls") == a[0]))
+                } else if f == push {
+                    c.log.push(("push", a.to_vec()));
+                    Some(V::I(1))
+                } else {
+                    None
+                }
+            },
+            |_, pi, _| panic!("virtual call {pi}"),
+        );
+        s.c.globals.insert(p.act_win_cls.0 .0, V::S("ActivityWindow".into()));
+        s.c.globals.insert(craft.g.0, V::S("Craft".into()));
+        let c = &mut s.c;
+        let (me, other) = (c.obj(&[]), c.obj(&[]));
+        let unit = c.obj(&[(p.u_owner, other.clone())]);
+        let act = c.obj(&[(p.act_started, V::B(true)), (p.act_unit, unit.clone())]);
+        let win = c.obj(&[(craft.act.unwrap(), act.clone())]);
+        c.key_set(&win, "cls".into(), V::S("Craft".into()));
+        let mode_list = c.arr(p.a_len, p.a_raw.0, vec![win]);
+        let ui_list = c.arr(p.a_len, p.a_raw.0, vec![]);
+        let mode = c.obj(&[(p.m_windows.0, mode_list)]);
+        let gui = c.obj(&[(p.u_windows.0, ui_list)]);
+        let waits = c.arr(p.a_len, p.a_raw.0, vec![]);
+        let ctrl = c.obj(&[(p.c_wait_alive.0, waits)]);
+        let game = c.obj(&[
+            (p.g_me.0, me.clone()),
+            (p.g_mode.0, mode),
+            (p.g_gui.0, gui),
+            (p.g_ctrl.0, ctrl),
+        ]);
+        let cls = c.obj(&[(p.g_inst, game.clone())]);
+        c.globals.insert(p.g_cls.0 .0, cls);
+        let dialog = c.obj(&[]);
+
+        // another player's started craft: no minigame here, the dialog shows now
+        assert_eq!(s.run(added.minigame, vec![game.clone()]), V::B(false));
+        assert_eq!(s.run(added.defer, vec![dialog.clone()]), V::B(false));
+        assert!(s.c.take("push").is_empty());
+        // this machine's own started craft: the dialog waits for it
+        s.c.set(&unit, p.u_owner, me.clone());
+        assert_eq!(s.run(added.minigame, vec![game.clone()]), V::B(true));
+        assert_eq!(s.run(added.defer, vec![dialog.clone()]), V::B(true));
+        assert_eq!(s.c.take("push").len(), 1);
+        assert_eq!(s.c.take("println"), vec![vec![V::S(DEFERS.into())]]);
+        // its re-run from the queue (and a second window) waits again, unlogged
+        assert_eq!(s.run(added.defer, vec![dialog.clone()]), V::B(true));
+        let w2 = s.c.obj(&[]);
+        assert_eq!(s.run(added.defer, vec![w2]), V::B(true));
+        assert!(s.c.take("println").is_empty());
+        s.c.take("push");
+        // not started yet: nothing waits
+        s.c.set(&act, p.act_started, V::B(false));
+        assert_eq!(s.run(added.minigame, vec![game.clone()]), V::B(false));
+
+        // A visible minigame window in game.ui.windows: only one whose activity's
+        // unit is this machine's player's (or a unit-less shared puzzle) holds
+        // windows. One without `activity` (AnalyzeAction) never does.
+        let aw = s.c.obj(&[(p.o_visible, V::B(true))]);
+        s.c.key_set(&aw, "cls".into(), V::S("ActivityWindow".into()));
+        let ui_list = s.c.arr(p.a_len, p.a_raw.0, vec![aw.clone()]);
+        let gui = s.c.get(&game, p.g_gui.0);
+        s.c.set(&gui, p.u_windows.0, ui_list);
+        let wact = s.c.obj(&[]);
+        for (activity, owner, held) in [
+            (V::Null, None, false),
+            (wact.clone(), None, true),
+            (wact.clone(), Some(other.clone()), false),
+            (wact.clone(), Some(me.clone()), true),
+        ] {
+            let u = owner.map_or(V::Null, |o| s.c.obj(&[(p.u_owner, o)]));
+            s.c.set(&wact, p.act_unit, u);
+            s.c.key_set(&aw, "dactivity".into(), activity);
+            assert_eq!(s.run(added.minigame, vec![game.clone()]), V::B(held));
+            // any shared window (dialog, unit choice, confirm): shown at once
+            // unless this machine's own minigame runs
+            for _ in 0..3 {
+                let w = s.c.obj(&[]);
+                assert_eq!(s.run(added.defer, vec![w]), V::B(held));
+            }
+            assert_eq!(s.c.take("push").len(), if held { 3 } else { 0 });
+            s.c.take("println");
         }
     }
 }
