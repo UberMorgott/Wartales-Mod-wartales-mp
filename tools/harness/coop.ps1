@@ -241,9 +241,10 @@ switch ($Action) {
         $deadline = (Get-Date).AddSeconds($TimeoutSec)
         foreach ($i in $Inst) {
             while ($true) {
-                # A loading game runs no frames, so a dump may go unanswered: keep polling.
+                # A loading game runs no frames, so a dump may go unanswered, or
+                # throw on a half-built game (Null access .players): keep polling.
                 $s = $null
-                try { $s = Send-Cmd $run $i 'dump' | ConvertFrom-Json } catch { if ("$_" -notmatch 'no ack') { throw } }
+                try { $s = Send-Cmd $run $i 'dump' | ConvertFrom-Json } catch { if ("$_" -notmatch "no ack|'dump' failed: error") { throw } }
                 if ($s -and (& $cond)) { Write-Host "${i}: $Until"; break }
                 if ((Get-Date) -gt $deadline) { throw "${i}: not '$Until' after $TimeoutSec s" }
                 Start-Sleep -Seconds 2
