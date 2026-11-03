@@ -244,9 +244,9 @@ switch ($Action) {
                 # A loading game runs no frames, so a dump may go unanswered, or
                 # throw on a half-built game (Null access .players): keep polling.
                 $s = $null
-                try { $s = Send-Cmd $run $i 'dump' | ConvertFrom-Json } catch { if ("$_" -notmatch "no ack|'dump' failed: error") { throw } }
+                try { $s = Send-Cmd $run $i 'dump' | ConvertFrom-Json; $last = '' } catch { if ("$_" -notmatch "no ack|'dump' failed: error") { throw }; $last = " (last dump: $_)" }
                 if ($s -and (& $cond)) { Write-Host "${i}: $Until"; break }
-                if ((Get-Date) -gt $deadline) { throw "${i}: not '$Until' after $TimeoutSec s" }
+                if ((Get-Date) -gt $deadline) { throw "${i}: not '$Until' after $TimeoutSec s$last" }
                 Start-Sleep -Seconds 2
             }
         }
