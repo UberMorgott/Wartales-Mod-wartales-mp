@@ -35,6 +35,7 @@ mod dialog_inventory;
 mod dialog_recruit;
 mod dlc_untouched;
 mod fade_chain;
+mod activity_join;
 mod fake_npc;
 mod drop_in;
 mod follow;
@@ -179,6 +180,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     dialog_inventory::patch_dialog_inventory(&mut code);
     camp_talk::patch_camp_talk(&mut code);
     fake_npc::patch_fake_npc(&mut code);
+    activity_join::patch_activity_join(&mut code);
     camp_any_unit::patch_camp_any_unit(&mut code);
     hold_speed::patch_hold_speed(&mut code);
     loot_level::patch_loot_level(&mut code);

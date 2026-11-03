@@ -142,6 +142,16 @@ behind every press-and-hold ring, divides its duration by 3 at entry
 (NPC/entity trigger 0.45 s -> 0.15 s, gamepad place exit and skill-bar arrow
 1.95 s -> 0.65 s). The gamepad long-press binding duration is cdb data
 (`Const` `Pad_LongPress_Duration`) and is not changed here.
+**Activity join** (`src/activity_join.rs`): a guest joining or reconnecting
+while a CylinderPuzzle / NinePuzzle runs gets the replicated `ui.win.Activity`
+in its full sync, and `Game.start` runs its `initData` before the guest's place
+has built any Element 3D object: the camera offset read
+`target.obj.getRotationQuat()` threw `Null access .getRotationQuat` and the
+guest stayed on the loading screen. Its two NullChecks (`target`, `target.obj`)
+become JNull to the block's end (`needUnit`): no target 3D object, no camera
+offset (only `_start` reads it, which a late guest never runs). Same op count.
+The guest's input stays held by the activity's unit-choice wait until the host
+ends the mini-game, as for a guest present at its start.
 **Weapon set** (`src/weapon_set.rs`): `st.Unit.getEquipSlots` gave the
 Weapon slot `allowed = [secondaryWeapon.inf.type]` with `identicItemType`,
 and the SecondaryWeapon slot the same from `weapon`, once the other set was
