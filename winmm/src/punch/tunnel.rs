@@ -30,6 +30,11 @@ const SEND_LIMIT: usize = 1024;
 /// The first message of a stream: magic + the opener's socket nonce.
 const OPEN: &[u8; 8] = b"WMPOPEN!";
 const OPEN_LEN: usize = 12;
+/// "No such stream": magic + conv, the answer to a segment of an unknown or
+/// ended stream.
+const RESET: &[u8; 8] = b"WMPRESET";
+const RESET_LEN: usize = 12;
+const RESET_EVERY: Duration = Duration::from_secs(1);
 
 /// A tunnel to one address, whoever opened it.
 pub(super) struct Peer {
@@ -117,6 +122,20 @@ pub(super) fn is_kcp(pkt: &[u8]) -> bool {
     pkt.len() >= kcp::KCP_OVERHEAD && (81..=84).contains(&pkt[4])
 }
 
+/// Reports whether a KCP segment proves its sender had heard this stream from
+/// us: anything but a PUSH, or a PUSH acking our data (una > 0). An opener's
+/// first segments (OPEN, maybe reordered behind later ones) are PUSH, una 0.
+fn had_state(pkt: &[u8]) -> bool {
+    pkt[4] != 81 || pkt[16..20] != [0; 4]
+}
+
+/// The conversation a reset datagram names: magic + conv (12 bytes, never
+/// STUN, punch or KCP).
+pub(super) fn reset_conv(pkt: &[u8]) -> Option<u32> {
+    (pkt.len() == RESET_LEN && &pkt[..8] == RESET)
+        .then(|| u32::from_le_bytes(pkt[8..].try_into().expect("4 bytes")))
+}
+
 impl Socket {
     #[allow(
         clippy::cast_possible_truncation,
@@ -165,8 +184,47 @@ impl Socket {
             self.cv.notify_all();
             return;
         }
-        if !st.closed && !st.gone.contains_key(&key) {
+        if st.closed {
+            return;
+        }
+        if st.gone.contains_key(&key) || had_state(pkt) {
+            self.reset_locked(&mut st, key);
+        } else {
             self.accept_locked(&mut st, key, pkt);
+        }
+    }
+
+    /// Tells the other end we have no such stream, so it ends its side now
+    /// instead of after TIMEOUT. One reset per stream per second: a flood of
+    /// segments gets no flood back (and a reset is smaller than any segment).
+    fn reset_locked(&self, st: &mut State, key: Key) {
+        let now = Instant::now();
+        // At most 256 resets a second in all: spoofed convs can't grow the table.
+        if st.resets.len() >= 256
+            || st
+                .resets
+                .get(&key)
+                .is_some_and(|t| now.duration_since(*t) < RESET_EVERY)
+        {
+            return;
+        }
+        st.resets.insert(key, now);
+        let mut m = [0u8; RESET_LEN];
+        m[..8].copy_from_slice(RESET);
+        m[8..].copy_from_slice(&key.1.to_le_bytes());
+        let _ = self.udp.send_to(&m, key.0);
+    }
+
+    /// Ends a stream the other end reset. Only that exact (address, conv) is
+    /// touched: a newer tunnel's streams have other random convs.
+    pub(super) fn on_reset(&self, conv: u32, from: SocketAddr) {
+        let key = (from, conv);
+        let mut st = self.st();
+        if st.streams.contains_key(&key) {
+            Self::remove_locked(&mut st, key);
+            drop(st);
+            logf!(self.log, "punch: stream {conv:08x} reset by {from}");
+            self.cv.notify_all();
         }
     }
 
@@ -392,5 +450,7 @@ impl Socket {
             Self::remove_locked(st, k);
         }
         st.gone.retain(|_, t| now.duration_since(*t) < GONE_FOR);
+        st.resets
+            .retain(|_, t| now.duration_since(*t) < RESET_EVERY);
     }
 }

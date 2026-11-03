@@ -249,6 +249,37 @@ fn test_punch_forwarder_redials() {
     );
 }
 
+/// The host loses its stream state (a restart, or a timeout while the guest was
+/// frozen): the guest's next segment draws a reset and its stream ends at once,
+/// not after TIMEOUT, so the game's connection drops and it reconnects.
+#[test]
+fn test_punch_reset_ends_stale_stream() {
+    let host = open_s(0, &echo(), &[]);
+    let guest = open_s(0, "", &[]);
+    let ga: SocketAddr = local(&guest).parse().unwrap();
+    let fwd = guest.dial(&local(&host)).unwrap();
+    let mut c = TcpStream::connect(&fwd).unwrap();
+    c.write_all(b"live").unwrap();
+    let mut got = [0u8; 4];
+    c.read_exact(&mut got).unwrap();
+    {
+        let mut st = host.st();
+        host.drop_peer_locked(&mut st, ga);
+        st.gone.clear(); // as after a restart: no tombstone either
+    }
+    let start = Instant::now();
+    c.write_all(b"stale").unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let r = c.read(&mut got);
+    let d = start.elapsed();
+    assert!(
+        matches!(r, Ok(0) | Err(_)) && d < Duration::from_secs(2),
+        "stale stream read {r:?} after {d:?}; want its end within 2 s"
+    );
+    // The route still works: a new stream opens a new tunnel on the host.
+    round_trip(&fwd, b"after the reset");
+}
+
 /// Roles swap: the former host dials the former guest, whose tunnel it serves.
 #[test]
 fn test_punch_role_swap() {

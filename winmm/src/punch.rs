@@ -17,7 +17,10 @@
 //! 10 s and closed after 60 s without a datagram from it. A stream is a KCP
 //! conversation (message mode, random conv): its first message is OPEN (magic +
 //! the opener's socket nonce, so a peer that restarted on the same address
-//! replaces its old streams), an empty message is FIN. One owner thread reads
+//! replaces its old streams), an empty message is FIN. A segment of a stream
+//! the receiver no longer has (ended, timed out, restarted) is answered by a
+//! reset (WMPRESET + conv) that ends the sender's side at once, so its TCP side
+//! closes and the game reconnects without waiting out TIMEOUT. One owner thread reads
 //! the socket and runs the KCP timers; per stream one thread copies TCP->KCP and
 //! one KCP->TCP, all under one mutex. Queues are bounded by the KCP windows.
 
@@ -86,6 +89,7 @@ struct State {
     peers: HashMap<SocketAddr, tunnel::Peer>, // tunnels, both roles
     streams: HashMap<tunnel::Key, tunnel::Stream>,
     gone: HashMap<tunnel::Key, Instant>, // ended streams: their late packets open nothing
+    resets: HashMap<tunnel::Key, Instant>, // last reset sent per stream (rate limit)
     fwds: HashMap<SocketAddr, SocketAddr>, // guest role: loopback forwarders by host address
     keep: Option<SocketAddr>,            // STUN server for the keepalive
     keep_tx: Option<[u8; 12]>,           // its pending transaction
@@ -244,6 +248,8 @@ impl Socket {
                     self.hear(from);
                 } else if tunnel::is_kcp(pkt) {
                     self.on_kcp(pkt, from);
+                } else if let Some(conv) = tunnel::reset_conv(pkt) {
+                    self.on_reset(conv, from);
                 }
             }
             if Instant::now() >= next_update {
