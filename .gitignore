@@ -1,4 +1,3 @@
-/wartales-mp.exe
 /dist/
 /dist-test/
 /.serena/
@@ -9,6 +8,6 @@
 /patcher/dist/*.exe
 /patcher/dist/*.zip
 
-# helper/ (Rust, wartales-mp)
-/helper/target/
-/helper/target-test/
+# winmm/ (Rust, wartales-mp: the whole winmm.dll)
+/winmm/target/
+/winmm/target-test/

@@ -2,7 +2,8 @@
 
 The Rust bytecode patcher of wartales-mp. It lives in `patcher/` of this
 repository (crate and library name stay `wartales-tips` / `wartales_tips`);
-`shim\build.ps1` builds it and links it into `winmm.dll`.
+the `winmm` crate depends on it as a Rust library, so `tools\build.ps1` builds it
+into `winmm.dll`.
 
 Tooltips on the Wartales new-game **start choice** screen. Hover an item in the
 starting-troop preview to see the game's own item tooltip; hover a unit line
@@ -547,6 +548,15 @@ never ran and a host whose relay connect failed loaded forever. The cast is now
 `Std.string(e)` (same op count): the error text is logged and the failure path
 runs. Skipped (logged) on mismatch.
 
+**Master config** (`src/master_config.rs`): `Const.getMPManConfig` (from
+`Main.initMpman`) lists `master.shirogames.com` and `master2.shirogames.com`,
+port 60442, `ssl: true`. Both hosts now load `"127.0.0.1"` and `ssl` is
+`false` (same op count): the game talks plain WebSocket to the master inside
+winmm.dll, no DNS hook, TLS or CA install. Harness builds read
+`WARTALES_MP_TEST_INSTANCE=N` (1..9) at patch time and use `127.0.0.N`.
+Skipped (logged) on mismatch, which refuses the image: never plaintext to a
+public host.
+
 **Fade chain** (`src/fade_chain.rs`): vanilla `Game.fadeTo` dropped a fade
 asked for while a no-break one (any fadeIn) ran ("Interrupted fade"), so its
 onEnd never ran. Every mode switch parks its next step in its fadeIn's onEnd:
@@ -843,12 +853,11 @@ Two ways, pick one:
 
 ## Build
 
-From `patcher\` (`..\shim\build.ps1` runs the gnu-target build itself;
-override the location with `-PatcherDir`):
+From `patcher\` (`..\tools\build.ps1` builds `winmm.dll` with this crate inside):
 
 ```powershell
 cargo build --release                                   # wartales-tips.exe (CLI)
-cargo build --release --target x86_64-pc-windows-gnu    # libwartales_tips.a for winmm.dll
+cargo test --release                                    # tests on the real game image skip without it
 .\target\release\wartales-tips.exe patch <in.dat> <out.dat>
 .\target\release\wartales-tips.exe inspect <in.dat> ui.comp.Element
 ```

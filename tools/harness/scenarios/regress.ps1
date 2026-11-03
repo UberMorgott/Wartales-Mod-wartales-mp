@@ -15,8 +15,17 @@
 #             both in world.Confession; `console save` (save006.dat, copied to
 #             fixtures\coop-save006-confession.dat), stop, up.ps1 again: the guest
 #             must reach the camp (issue #9: no `Null access .elementType`).
+# reload:     run after up.ps1. The host reloads the save in game (`host`), Start;
+#             the guest follows (reload_route): guest `mp: reload: connecting to
+#             the server id this game joined by`, host a second `> Join`.
+# reconnect:  run after up.ps1. B frozen past the host relay's 120 s idle
+#             timeout, so the host drops it; B's own network side is frozen
+#             with its game (one process), so the drop comes from the host.
+#             Thawed, B logs `mp: reconnect: connection to the host lost,
+#             rejoining` and joins again (over punch up to ~60 s later: B's
+#             tunnel stream times out first).
 param(
-    [ValidateSet('chest', 'rats', 'confession')][string]$Case = 'chest',
+    [ValidateSet('chest', 'rats', 'confession', 'reload', 'reconnect')][string]$Case = 'chest',
     [int]$Rounds = 2
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -86,6 +95,28 @@ switch ($Case) {
         & (Join-Path $PSScriptRoot 'up.ps1') | Select-Object -Last 1
         Start-Sleep 10
         foreach ($i in 'A', 'B') { $j = Dump $i; "$i mode=$($j.mode) loading=$($j.isLoading) connected=$($j.connectedToHost)" }
+        Errors
+    }
+    'reload' {
+        T A 'host save006'; Start-Sleep 20
+        & $script:c wait -Inst A -Until '$s.game -and $s.hasGameplayStarted' -TimeoutSec 180 | Select-Object -Last 1
+        Start-Sleep 10; T A 'welcome'; Start-Sleep 10
+        & $script:c wait -Inst B -Until '$s.game -and $s.hasGameplayStarted -and $s.connectedToHost -and -not $s.isLoading' -TimeoutSec 120 | Select-Object -Last 1
+        $run = Get-Content 'D:\WartalesTest\runs\current.txt'
+        Get-Content "$run\B\wartales-mp\shim.log" | Select-String 'game: mp: reload' | Select-Object -Last 1 | ForEach-Object { $_.Line }
+        Get-Content "$run\A\wartales-mp\shim.log" | Select-String '> Join' | Select-Object -Last 2 | ForEach-Object { $_.Line }
+        Errors
+    }
+    'reconnect' {
+        $run = Get-Content 'D:\WartalesTest\runs\current.txt'
+        $log = "$run\B\wartales-mp\shim.log"
+        $before = @(Select-String -LiteralPath $log -Pattern 'mp: reconnect: connection to the host lost').Count
+        & $script:c freeze -Inst B; Start-Sleep 135; & $script:c thaw -Inst B
+        # connectedToHost stays true until B notices the drop: wait for the log line first
+        for ($k = 0; $k -lt 50 -and @(Select-String -LiteralPath $log -Pattern 'mp: reconnect: connection to the host lost').Count -le $before; $k++) { Start-Sleep 3 }
+        & $script:c wait -Inst B -Until '$s.game -and $s.hasGameplayStarted -and $s.connectedToHost -and -not $s.isLoading' -TimeoutSec 150 | Select-Object -Last 1
+        Get-Content $log | Select-String 'game: mp: reconnect' | Select-Object -Last 1 | ForEach-Object { $_.Line }
+        Get-Content "$run\A\wartales-mp\wartales-mp.log" | Select-String 'relay: client (cid \d+ gone|connected)' | Select-Object -Last 2 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(120, $_.Line.Length)) }
         Errors
     }
 }

@@ -3,7 +3,7 @@
 Status per patcher pass (`patcher/src/lib.rs`, 71 pass statements + the test-only `harness`) and per shim / helper feature.
 
 - **PASS**: exercised in the co-op harness (two instances, `docs/coop-harness-plan.md`), run folder cited.
-- **unit**: only unit tests (`cargo test --release`: 186 passed, every pass module has a `patches_installed_game` test against the installed `hlboot.dat`, several have testsim behaviour tests; `go test ./...` ok).
+- **unit**: only unit tests (`cargo test --release`: 186 passed, every pass module has a `patches_installed_game` test against the installed `hlboot.dat`, several have testsim behaviour tests; the C/Go build also passed `go test ./...`).
 - **UNTESTED**: neither.
 
 Applied: the test build's `shim.log` (run `20261009-015931`) has 110 `tips: patched ...` lines, no `skipped`; `patch_image` refuses the whole image when any pass skips, so every listed pass is applied whenever the game starts patched. Release build + `shim\check.ps1`: `OK: 0 failure(s)`; seamcheck: release dll clean, test dll has the seam. Real game folder unchanged (file list/size/mtime diff 0, `winmm.dll` SHA256 `FB5157EB…4AC9`).
@@ -86,27 +86,28 @@ Runs (`D:\WartalesTest\runs\…`): R1 `20261008-224953` (S1–S3, S6), R2 `20261
 | jit_names | PASS | every run: the patched image starts (the JIT crash it prevents is at startup) |
 | harness (test build only) | PASS | all runs |
 
-## Shim (`winmm.dll`) and helper (`wartales-mp.exe`)
+## `winmm.dll` (game side and network side)
+
+Since 2026-11-03 one Rust DLL (`winmm/`); the helper exe, its firewall command and its cert install are gone. Rows below keep the evidence of the C/Go build unless a newer run is named.
 
 | Feature | Status | Evidence |
 | --- | --- | --- |
-| winmm proxy, in-memory hlboot patch, cached image | PASS | every run; `check.ps1` |
+| winmm proxy, in-memory hlboot patch, cached image | PASS | every run; `winmm/tests/dll.rs`, `bytecode.rs` tests; single-DLL run `20261103-015616` |
 | patch-progress window (bb555bf) | PASS | R7 `A-022259-splash0.png`: "Applying co-op patches: 29 of 72... 4 s" |
 | game print hook -> shim.log | PASS | every run; R8: hxbit SYNC trace lines counted, not logged (`game: N network SYNC trace lines not logged` at exit), shimcheck covers it |
-| helper extraction + launch, single-instance mutex | PASS | every run (test seam: per-instance mutex) |
+| network start in the game process, single-instance mutex | PASS | single-DLL runs `20261103-*` (test seam: per-instance mutex); no `wartales-mp` process |
 | master emulation: lobby, join code, member ids | PASS | R1 S1, R6 rejoin |
 | relay (`wsx`, sha1 X-Pass), `instance/get` answer | PASS | R1 S1 |
 | direct transport | PASS | all runs (loopback) |
-| `uid`, `code`, `modver`, `sendq`, `link`, `hlpatch` | unit | go test ok |
+| `uid`, `code`, `modver`, `sendq`, `link`, `hlpatch` | unit | `cargo test --release` in `winmm/` |
 | NAT (UPnP / STUN) | unit | disabled by the harness seam |
 | SDR bridge / Steam invite join | unit | sdrbridge tests; untestable on one PC (same Steam account) |
-| firewall rule | UNTESTED | no tests, not needed on loopback |
-| install | UNTESTED | no tests |
+| old-install cleanup (exe, sdr.status, `%ProgramData%` certs) | unit | `net::tests::remove_old_install_deletes_only_old_files` |
 | applog | PASS | logs in every run |
 
 ## Counts
 
-Patcher passes (71; party_inventory counted as 5, harness not counted): PASS 23, unit 48, UNTESTED 0. Shim / helper rows: PASS 8, unit 3 (the six-package row, NAT, SDR), UNTESTED 2 (firewall, install).
+Patcher passes (71; party_inventory counted as 5, harness not counted): PASS 23, unit 48, UNTESTED 0. `winmm.dll` rows: PASS 8, unit 4 (the six-module row, NAT, SDR, old-install cleanup), UNTESTED 0.
 
 ## Findings (2026-10-09)
 

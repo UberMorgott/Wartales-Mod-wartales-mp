@@ -8,7 +8,7 @@ The mod replaces Wartales' old connection system, which prevented players in dif
 
 ## What it does
 
-Everything below is in the one **winmm.dll**. The game patches are applied in memory when the game starts; the game files on disk are not changed. Each patch first checks that the game code looks as expected: if any patch does not match (a different game build), none of them is applied and the game runs its original code, while the connection part of the mod (Steam transport, join by code, helper) still works.
+Everything below is in the one **winmm.dll**. The game patches are applied in memory when the game starts; the game files on disk are not changed. Each patch first checks that the game code looks as expected: if any patch does not match (a different game build), none of them is applied and the game runs its original code: vanilla online play, without the co-op fixes, join by code or the mod's Steam transport.
 
 ### Network and lobby
 
@@ -129,7 +129,7 @@ Everything below is in the one **winmm.dll**. The game patches are applied in me
 2. Close Wartales.
 3. In Steam, right-click Wartales → **Manage** → **Browse local files**.
 4. Copy **winmm.dll** into that folder, next to **Wartales.exe**. Replace the old mod DLL when updating.
-5. Launch the game through Steam as usual. For the first few seconds a small **Wartales Co-op Fix** window shows that the mod is preparing the game; it closes by itself when the game window appears. No console windows open. If the mod cannot apply its patches or its helper stops, a message box says so and names the log.
+5. Launch the game through Steam as usual. For the first few seconds a small **Wartales Co-op Fix** window shows that the mod is preparing the game; it closes by itself when the game window appears. No console windows open. If the mod cannot apply its patches or its network part stops, a message box says so and names the log.
 
 Install the mod on every player's machine. **All players need the same version**: a guest whose mod files differ from the host's cannot join.
 
@@ -141,9 +141,18 @@ Install the mod on every player's machine. **All players need the same version**
 
 **By code:** the host creates a game and sends its code to the friend, who enters it in the game. Codes normally have **8 symbols**, or 11 with custom settings, or 16 when they also carry the host's address for NAT hole punching. This method needs a reachable direct connection to the host (hole punching may find one through the router). If it fails, join through Steam instead.
 
+**Windows Firewall:** the direct route of a code join needs inbound connections to **Wartales.exe** on the host. Allow access if Windows asks. If the prompt was dismissed, the host can add the rules in a command prompt run as administrator (put the game folder in place of `<full path>`):
+
+```
+netsh advfirewall firewall add rule name="wartales-mp TCP" dir=in action=allow program="<full path>\Wartales.exe" protocol=TCP localport=14250
+netsh advfirewall firewall add rule name="wartales-mp UDP" dir=in action=allow program="<full path>\Wartales.exe" protocol=UDP localport=14250
+```
+
+The UDP rule is for hole punching and is optional. Joining through Steam needs neither.
+
 ## Update or remove
 
-To update, close the game and replace **winmm.dll** with the new version. To uninstall, close the game and remove that file from its folder. The mod does not overwrite the original game files.
+To update, close the game and replace **winmm.dll** with the new version. To uninstall, close the game, remove that file from its folder and delete the `%LOCALAPPDATA%\wartales-mp` folder (logs and the patched copy of the game code). The mod does not overwrite the original game files. What older versions left behind (a helper program in that folder and certificates in `%ProgramData%\wartales-mp`) is deleted automatically the first time the game starts with this version.
 
 ## Known issues
 
@@ -157,10 +166,10 @@ The mod is still being tested and is not guaranteed to work on every network. If
 
 The logs, **wartales-mp.log** and **shim.log**, are in `%LOCALAPPDATA%\wartales-mp`. You can paste that path into File Explorer's address bar.
 
-Antivirus software may flag the DLL. If that happens, include the antivirus name and detection name in your report.
+The mod is this one DLL: it starts no separate program, is not packed and installs no certificates. Antivirus software may still flag it. If that happens, include the antivirus name and detection name in your report.
 
 [Technical notes and build instructions](docs/TECHNICAL.md) · [CC BY-NC 4.0 licence](LICENSE)
 
-Project code and documentation: Copyright (c) 2026 UberMorgott, CC BY-NC 4.0. Third-party components retain their own licences, including [MinHook](shim/minhook/LICENSE.txt) and [hlbc](patcher/vendor/NOTICE.md).
+Project code and documentation: Copyright (c) 2026 UberMorgott, CC BY-NC 4.0. Third-party components retain their own licences, including [MinHook](https://github.com/TsudaKageyu/minhook) (through the [minhook](https://crates.io/crates/minhook) crate) and [hlbc](patcher/vendor/NOTICE.md).
 
 This is an unofficial mod, not affiliated with Shiro Games or Valve.

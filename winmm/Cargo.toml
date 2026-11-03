@@ -1,0 +1,49 @@
+[package]
+name = "wartales-mp"
+version = "0.1.0"
+edition = "2021"
+license = "CC-BY-NC-4.0"
+description = "Wartales co-op: the whole winmm.dll (forwarding, bytecode patches, Steam SDR, master, relay, punch, NAT)"
+
+[lib]
+name = "winmm"
+# The game loads winmm.dll from its folder; rlib for the integration tests.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Local co-op test harness (D:\WartalesTest): never shipped.
+harness = ["wartales-tips/harness"]
+
+[dependencies]
+# The bytecode patcher, called through its Rust API.
+wartales-tips = { path = "../patcher" }
+anyhow = "1"
+kcp = "0.6.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+quick-xml = "0.42"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
+# MinHook: suspends other threads while patching (the game calls hooked functions live).
+minhook = "0.9.0"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+# why: prose names Win32/Go/HashLink identifiers constantly; backticking each one hurts reading.
+doc_markdown = "allow"
+# why: crate-internal API (one cdylib), no external callers to read Errors/Panics sections.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# why: crate-internal API; #[must_use] on every pure fn is noise without external callers.
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = 3
+# unwind, not abort: every thread entry catches a panic and logs it; abort would kill the game.
+panic = "unwind"
+codegen-units = 1
+lto = "thin"
+strip = true

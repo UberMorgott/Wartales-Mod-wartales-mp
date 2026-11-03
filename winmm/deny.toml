@@ -1,0 +1,22 @@
+# cargo-deny 0.20 config for winmm/ (tools/lint.ps1).
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+# Exactly the licenses our dependency tree uses; CC-BY-NC-4.0 = our own crates (winmm, patcher).
+allow = ["Apache-2.0", "CC-BY-NC-4.0", "MIT", "Unicode-3.0", "Unlicense"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

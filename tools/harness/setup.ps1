@@ -29,7 +29,9 @@ $Game = (Resolve-Path -LiteralPath $Game).Path
 $Dll = (Resolve-Path -LiteralPath $Dll).Path
 if ((Split-Path -Qualifier $Game) -ne (Split-Path -Qualifier $Root)) { throw "hardlinks need $Root on the same volume as $Game" }
 if ($Root.TrimEnd('\') -ieq $Game.TrimEnd('\') -or $Root.StartsWith($Game, [StringComparison]::OrdinalIgnoreCase)) { throw "refusing: $Root is inside the real game folder" }
-& (Join-Path $PSScriptRoot '..\..\shim\seamcheck.ps1') -Path $Dll -Expect present
+# Same seam markers tools\build.ps1 checks: only a -Test build may go here.
+$latin = [Text.Encoding]::GetEncoding(28591)
+if (-not $latin.GetString([IO.File]::ReadAllBytes($Dll)).Contains('WMP_TEST_SEAM')) { throw "no test seam in $Dll (expected a tools\build.ps1 -Test build)" }
 
 $realDll = Join-Path $Game 'winmm.dll'
 $before = if (Test-Path -LiteralPath $realDll) { (Get-FileHash -LiteralPath $realDll).Hash } else { 'absent' }

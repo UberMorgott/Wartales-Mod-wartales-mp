@@ -56,6 +56,7 @@ mod log_error_cast;
 mod loot_level;
 mod loot_all;
 mod marker_names;
+mod master_config;
 mod mirror;
 mod mod_version;
 mod net_guard;
@@ -120,7 +121,7 @@ pub(crate) fn skipped(why: String) {
 }
 
 // Progress of the running `patch_image`, read by the start-up window from
-// another thread (`wartales_tips_progress`). Approximate telemetry only: the
+// another thread (`progress`). Approximate telemetry only: the
 // outcome is `patch_image`'s result, never these counters.
 static PROGRESS_DONE: AtomicU32 = AtomicU32::new(0);
 static PROGRESS_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -219,6 +220,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     mode_windows::patch_mode_windows(&mut code);
     stale_lobby::patch_stale_lobby(&mut code);
     log_error_cast::patch_log_error_cast(&mut code);
+    master_config::patch_master_config(&mut code);
     start_transport::patch_start_transport(&mut code);
     reload_route::patch_reload_route(&mut code);
     reconnect::patch_reconnect(&mut code);
@@ -280,93 +282,15 @@ pub fn inspect_type(image: &[u8], type_name: &str) -> Result<()> {
     inspect(&code, type_name)
 }
 
-// ---------- C ABI, for linking into a proxy DLL ----------
-
-/// Patches `image[0..len]`. On success returns 0 and sets `*out`/`*out_len` to a
-/// buffer owned by this library (release with `wartales_tips_free`). On failure
-/// returns 1 and leaves `*out` NULL; the reason is copied into `err` (NUL-terminated,
-/// truncated to `err_len`). Never unwinds across the boundary.
-///
-/// # Safety
-/// `image` must point to `len` readable bytes; `out`, `out_len` must be valid
-/// pointers; `err` must point to `err_len` writable bytes (or be NULL with `err_len` 0).
-#[no_mangle]
-pub unsafe extern "C" fn wartales_tips_patch(
-    image: *const u8,
-    len: usize,
-    out: *mut *mut u8,
-    out_len: *mut usize,
-    err: *mut u8,
-    err_len: usize,
-) -> i32 {
-    if !out.is_null() {
-        *out = std::ptr::null_mut();
-    }
-    if !out_len.is_null() {
-        *out_len = 0;
-    }
-    let report = |msg: &str| {
-        if err.is_null() || err_len == 0 {
-            return;
-        }
-        let bytes = msg.as_bytes();
-        let n = bytes.len().min(err_len - 1);
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), err, n);
-        *err.add(n) = 0;
-    };
-    if image.is_null() || out.is_null() || out_len.is_null() {
-        report("null argument");
-        return 1;
-    }
-    let input = std::slice::from_raw_parts(image, len);
-    let result = std::panic::catch_unwind(|| patch_image(input));
-    match result {
-        Ok(Ok(v)) => {
-            let mut v = v.into_boxed_slice();
-            *out_len = v.len();
-            *out = v.as_mut_ptr();
-            std::mem::forget(v);
-            0
-        }
-        Ok(Err(e)) => {
-            report(&format!("{e:#}"));
-            1
-        }
-        Err(_) => {
-            report("panic inside the patcher");
-            1
-        }
-    }
-}
-
-/// Releases a buffer returned by `wartales_tips_patch`.
-///
-/// # Safety
-/// `p`/`len` must be exactly what `wartales_tips_patch` returned, or `p` NULL.
-#[no_mangle]
-pub unsafe extern "C" fn wartales_tips_free(p: *mut u8, len: usize) {
-    if !p.is_null() {
-        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, len)));
-    }
-}
-
-/// Reports the progress of a `wartales_tips_patch` running on another thread:
-/// passes finished, passes in all (0 while the image is still being read) and
-/// passes that did not match this game build. Any pointer may be NULL.
-///
-/// # Safety
-/// Each non-NULL pointer must be valid for one `u32` write.
-#[no_mangle]
-pub unsafe extern "C" fn wartales_tips_progress(done: *mut u32, total: *mut u32, skipped: *mut u32) {
-    if !done.is_null() {
-        *done = PROGRESS_DONE.load(Ordering::Relaxed);
-    }
-    if !total.is_null() {
-        *total = PROGRESS_TOTAL.load(Ordering::Relaxed);
-    }
-    if !skipped.is_null() {
-        *skipped = PROGRESS_SKIPPED.load(Ordering::Relaxed);
-    }
+/// Progress of a `patch_image` running on another thread: (passes finished,
+/// passes in all (0 while the image is still being read), passes that did not
+/// match this game build).
+pub fn progress() -> (u32, u32, u32) {
+    (
+        PROGRESS_DONE.load(Ordering::Relaxed),
+        PROGRESS_TOTAL.load(Ordering::Relaxed),
+        PROGRESS_SKIPPED.load(Ordering::Relaxed),
+    )
 }
 
 // ---------- lookup helpers (by name, never by hard-coded index) ----------

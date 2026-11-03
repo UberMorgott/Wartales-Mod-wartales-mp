@@ -9,7 +9,7 @@
 // that id. On our direct relay the host's id is "W127.0.0.1:<port>:<pw>": the
 // host reaches its relay on loopback. The guests got the same id at the start
 // in a lobby message, which their master rewrites to the route they joined over
-// (internal/master/relayaddr.go); the reload RPC rides the game connection and
+// (winmm/src/master/route.rs guest_relay_addr); the reload RPC rides the game connection and
 // is never rewritten, so a guest on another PC dialed its own machine and
 // stayed on the loading screen while the host waited for it.
 //
