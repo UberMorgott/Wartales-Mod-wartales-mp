@@ -342,6 +342,10 @@ struct Ctx {
     obj_y: RefField,
     obj_children: RefField,
     obj_t: RefType,
+    /// dump mvis / gvis: Object.parent, Object.getScene, Window.windowRoot.
+    obj_parent: RefField,
+    get_scene: (RefFun, RefType),
+    win_root: (RefField, RefType),
     debrief_win_t: RefType,
     debrief: (RefField, RefType),
     loot: (RefField, RefType),
@@ -357,6 +361,9 @@ struct Ctx {
     pick_count: RefField,
     /// `act`: world.PlaceView.elements, ent.p.Element.id, Element.activate.
     pv_t: RefType,
+    /// dump u: world.PlaceView class global, PlaceView.activityUnits.
+    pv_cls: (RefGlobal, RefType),
+    pv_units: (RefField, RefType),
     pv_elements: RefField,
     pelem_t: RefType,
     pelem_id: RefField,
@@ -398,6 +405,8 @@ struct Ctx {
     tutorial: (RefType, RefFun),
     /// `lpstop`: ui.win.LockPick and its stopActivity (the Leave button's onClick).
     lpstop: (RefType, RefFun),
+    np: NpF,
+    sdrag: SDrag,
     /// `esc` / dump `aw`: a watched camera minigame window.
     watch: Watch,
     /// `put` / `take`: st.Inventory.hasAuthority, _networkOperation (the slot
@@ -512,6 +521,36 @@ struct Shield {
 /// cameraSave; `spect_esc`: the function Game.update's Escape loop calls per
 /// window (coop_spectate's spectEsc, found by its (ui.Window) -> Int call there;
 /// None without that pass).
+/// Verb `sdrag` / dump `sdrag`, `drag`: the skill bar's SkillSlot class,
+/// Element.pushedDrag / allocated / onPush (dynamic method field), BaseUI.dragElement.
+struct SDrag {
+    slot_cls: (RefGlobal, RefType),
+    el_t: RefType,
+    pushed: RefField,
+    allocated: RefField,
+    on_push: (RefField, RefType),
+    drag_el: RefField,
+    /// Game.PREFS.editSkillbar (the in-battle skill bar edit option), SkillSlot.allowDrag.
+    edit: RefField,
+    allow: RefField,
+    slot_t: RefType,
+}
+
+/// The ruins NinePuzzle: verb `tile` and dump `np`.
+struct NpF {
+    t: RefType,
+    slot_t: RefType,
+    /// slots (ArrayObj of slot virtuals), currentEmptySlot, tiles (3D objects).
+    slots: RefField,
+    empty: RefField,
+    tiles: RefField,
+    /// static isMovable(slot, empty); the moveTileFromSlot RPC (a click's call).
+    movable: RefFun,
+    mv: RefFun,
+    o3_t: RefType,
+    o3_xy: (RefField, RefField),
+}
+
 struct Watch {
     wins: [(RefType, RefField); 2],
     act_t: RefType,
@@ -1063,6 +1102,12 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         obj_y: f(obj_t, "y")?,
         obj_children: typed(code, obj_t, "children", arr_t)?,
         obj_t,
+        obj_parent: typed(code, obj_t, "parent", obj_t)?,
+        get_scene: {
+            let scene_t = obj_type(code, "h2d.Scene")?;
+            (mfn(obj_t, "getScene", &[obj_t], scene_t)?, scene_t)
+        },
+        win_root: field(code, win_t, "windowRoot")?,
         debrief_win_t,
         debrief,
         loot: (loot, inv_t),
@@ -1124,6 +1169,42 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
         lpstop: {
             let t = obj_type(code, "ui.win.LockPick")?;
             (t, mfn(t, "stopActivity", &[t], void_t)?)
+        },
+        sdrag: {
+            let el_t = obj_type(code, "ui.comp.Element")?;
+            SDrag {
+                slot_cls: class_global(code, "ui.comp.SkillSlot")?,
+                el_t,
+                pushed: typed(code, el_t, "pushedDrag", bool_t)?,
+                allocated: typed(code, el_t, "allocated", bool_t)?,
+                on_push: field(code, el_t, "onPush")?,
+                drag_el: typed(code, base_ui_t, "dragElement", el_t)?,
+                edit: {
+                    let e = field_of_virtual(code, game_prefs.1, "editSkillbar")?;
+                    if e.1 != bool_t {
+                        bail!("Game.PREFS.editSkillbar is not a Bool");
+                    }
+                    e.0
+                },
+                allow: typed(code, obj_type(code, "ui.comp.SkillSlot")?, "allowDrag", bool_t)?,
+                slot_t: obj_type(code, "ui.comp.SkillSlot")?,
+            }
+        },
+        np: {
+            let t = obj_type(code, "ui.win.NinePuzzle")?;
+            let (empty, slot_t) = field(code, t, "currentEmptySlot")?;
+            let o3_t = obj_type(code, "h3d.scene.Object")?;
+            NpF {
+                t,
+                slot_t,
+                slots: typed(code, t, "slots", arr_t)?,
+                empty,
+                tiles: typed(code, t, "tiles", arr_t)?,
+                movable: sfn("ui.win.$NinePuzzle", "isMovable", &[slot_t, slot_t], bool_t)?,
+                mv: mfn(t, "moveTileFromSlot", &[t, slot_t, slot_t], void_t)?,
+                o3_t,
+                o3_xy: (f(o3_t, "x")?, f(o3_t, "y")?),
+            }
         },
         watch: {
             let act_t = obj_type(code, "ui.win.Activity")?;
@@ -1337,6 +1418,8 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
             p
         },
         pv_t: obj_type(code, "world.PlaceView")?,
+        pv_cls: class_global(code, "world.PlaceView")?,
+        pv_units: field(code, obj_type(code, "world.PlaceView")?, "activityUnits")?,
         pv_elements: typed(code, obj_type(code, "world.PlaceView")?, "elements", arr_t)?,
         pelem_t: obj_type(code, "ent.p.Element")?,
         pelem_id: typed(code, obj_type(code, "ent.p.Element")?, "id", str_t)?,
@@ -1938,6 +2021,8 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_equip = gs("equip ");
     let s_tutorial = gs("tutorial");
     let s_lpstop = gs("lpstop");
+    let s_tile = gs("tile");
+    let s_sdrag = gs("sdrag");
     let s_esc = gs("esc");
     let (s_esc0, s_esc2) = (gs("vanilla"), gs("hidden"));
     let s_song = gs("song");
@@ -2049,6 +2134,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let chest = r.r(c.chest_inv.1);
     let icr = r.r(c.inv_content.1);
     let ob = r.r(c.obj_t);
+    let (wn, wrt, sc) = (r.r(c.win_t), r.r(c.win_root.1), r.r(c.get_scene.1));
     let va = r.r(c.flow_va.1);
     let dwin = r.r(c.debrief_win_t);
     let dbr = r.r(c.debrief.1);
@@ -2104,6 +2190,17 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let jcb = r.r(c.ujob.cb_t);
     let tw = r.r(c.tutorial.0);
     let lpw = r.r(c.lpstop.0);
+    let (npw, sl, sl_e, o3) = (r.r(c.np.t), r.r(c.np.slot_t), r.r(c.np.slot_t), r.r(c.np.o3_t));
+    let (sdel, scls, pcl) = (
+        r.r(c.sdrag.el_t),
+        r.r(c.sdrag.slot_cls.1),
+        r.r(c.sdrag.on_push.1),
+    );
+    let sslot = r.r(c.sdrag.slot_t);
+    let (aum, pvc, pvv) = (r.r(c.pv_units.1), r.r(c.pv_cls.1), r.r(c.pv_t));
+    // the slot `sdrag` pushed, for the dump
+    code.globals.push(c.sdrag.el_t);
+    let g_sd = RefGlobal(code.globals.len() - 1);
     let wt = &c.watch;
     let (ww0, ww1, wact, wroot, wint, wcs, wk, wz) = (
         r.r(wt.wins[0].0),
@@ -3030,6 +3127,157 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("ack");
     a.label("not_lpstop");
 
+    // verb: tile  (the open NinePuzzle: the first slot that isMovable onto the
+    // empty one gets moveTileFromSlot(slot, empty), what a click's onRelease
+    // calls; run it on the player's machine)
+    verb(&mut a, s_tile, "not_tile", None);
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.np.t,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: npw, src: win });
+    a.gg(res, s_noelem);
+    a.fld(sl_e, npw, c.np.empty);
+    a.if_null(sl_e, "ack");
+    a.fld(list, npw, c.np.slots);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.loop_head("tile_lp");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.op(Opcode::ToVirtual { dst: sl, src: d });
+    a.jmp(
+        Opcode::JEq {
+            a: sl,
+            b: sl_e,
+            offset: 0,
+        },
+        "tile_lp",
+    );
+    a.call(b, c.np.movable, &[sl, sl_e]);
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "tile_lp");
+    a.call(void, c.np.mv, &[npw, sl, sl_e]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_tile");
+
+    // verb: sdrag  (battle: a push on the first SkillSlot of the shown skill
+    // bar page, as its interactive's push handler: pushedDrag = true, then the
+    // onPush that Element.onDrag installed, which starts the drag loop)
+    verb(&mut a, s_sdrag, "not_sdrag", None);
+    a.gg(res, s_nogame);
+    a.gg(gcls, c.game_g);
+    a.fld(g, gcls, c.game_inst);
+    a.if_null(g, "ack");
+    a.gg(res, s_noelem);
+    a.fld(battle, g, c.g.battle);
+    a.if_null(battle, "ack");
+    a.fld(sbar, battle, c.battle_sbar.0);
+    a.if_null(sbar, "ack");
+    a.fld(list, sbar, c.sb_layout);
+    a.if_null(list, "ack");
+    a.fld(sbm, sbar, c.sb_cur);
+    a.fld(n, list, c.arr_len);
+    a.jmp(
+        Opcode::JSGte {
+            a: sbm,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.fld(arr, list, c.arr_arr.0);
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: sbm,
+    });
+    a.op(Opcode::SafeCast {
+        dst: sbpage,
+        src: d,
+    });
+    a.if_null(sbpage, "ack");
+    a.fld(n, sbpage, c.arr_len);
+    a.fld(sbarr, sbpage, c.arr_arr.0);
+    a.int(ix, k0);
+    a.loop_head("sd_lp");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: sbarr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.if_null(d, "sd_lp");
+    a.op(Opcode::SafeCast { dst: ob, src: d });
+    a.loop_head("sd_up");
+    a.if_null(ob, "sd_lp");
+    a.gg(scls, c.sdrag.slot_cls.0);
+    a.call(b, c.base_check, &[scls, ob]);
+    a.jmp(Opcode::JTrue { cond: b, offset: 0 }, "sd_got");
+    a.fld(ob, ob, c.obj_parent);
+    a.go("sd_up");
+    a.label("sd_got");
+    // the edit option on (PREFS in memory only) and this slot draggable, as a
+    // slot built with that option
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.fld(gprefs, gcls, c.game_prefs.0);
+    a.if_null(gprefs, "ack");
+    a.setf(gprefs, c.sdrag.edit, b);
+    a.op(Opcode::SafeCast { dst: sslot, src: ob });
+    a.setf(sslot, c.sdrag.allow, b);
+    a.op(Opcode::SafeCast { dst: sdel, src: ob });
+    a.fld(pcl, sdel, c.sdrag.on_push.0);
+    a.if_null(pcl, "ack");
+    a.op(Opcode::Bool {
+        dst: b,
+        value: ValBool(true),
+    });
+    a.op(Opcode::SetField {
+        obj: sdel,
+        field: c.sdrag.pushed,
+        src: b,
+    });
+    a.op(Opcode::SetGlobal {
+        global: g_sd,
+        src: sdel,
+    });
+    a.op(Opcode::CallClosure {
+        dst: void,
+        fun: pcl,
+        args: vec![],
+    });
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_sdrag");
+
     // verb: esc  (the open LockPick / NinePuzzle through Game.update's Escape
     // hook: ack ok = this watcher stepped out, hidden = a hidden copy (Escape
     // goes on), vanilla = this player's own window, Escape as the game does)
@@ -3873,6 +4121,18 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     });
     w.a.call(list, c.get_locked, &[g, b]);
     w.obj_q(list);
+    // the place's parked activity workers (element -> worker entry)
+    w.lit(code, ",\"au\":");
+    w.a.op(Opcode::Null { dst: aum });
+    w.a.fld(mode, g, c.g.mode.0);
+    w.a.if_null(mode, "au_q");
+    w.a.gg(pvc, c.pv_cls.0);
+    w.a.call(b, c.base_check, &[pvc, mode]);
+    w.a.if_false(b, "au_q");
+    w.a.op(Opcode::UnsafeCast { dst: pvv, src: mode });
+    w.a.fld(aum, pvv, c.pv_units.0);
+    w.a.label("au_q");
+    w.obj_q(aum);
     // the current place: id, its parent's id, the region kind getRegion gives
     // (the region whose script globals the place's element scripts see)
     w.lit(code, ",\"place\":");
@@ -4285,6 +4545,175 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.fld(list, mode, c.windows);
     w.a.label("mw_q");
     w.obj_q(list);
+    // mvis / gvis, in mwins / gwins order: the window is on screen (visible,
+    // in a scene, and its windowRoot with every parent visible)
+    for (key, global) in [(",\"mvis\":[", false), (",\"gvis\":[", true)] {
+        let (lp, lend, first, walk, show, hid, next) = (
+            lbl("wv_loop", &mut w.n),
+            lbl("wv_end", &mut w.n),
+            lbl("wv_first", &mut w.n),
+            lbl("wv_walk", &mut w.n),
+            lbl("wv_show", &mut w.n),
+            lbl("wv_hid", &mut w.n),
+            lbl("wv_next", &mut w.n),
+        );
+        w.lit(code, key);
+        w.a.op(Opcode::Null { dst: list });
+        if global {
+            w.a.fld(gwui, g, c.global_ui.0);
+            w.a.if_null(gwui, lend);
+            w.a.fld(list, gwui, c.windows);
+        } else {
+            w.a.fld(mode, g, c.g.mode.0);
+            w.a.if_null(mode, lend);
+            w.a.fld(list, mode, c.windows);
+        }
+        w.a.if_null(list, lend);
+        w.a.fld(n, list, c.arr_len);
+        w.a.fld(arr, list, c.arr_arr.0);
+        w.a.int(ix, k0);
+        w.a.loop_head(lp);
+        w.a.jmp(
+            Opcode::JSGte {
+                a: ix,
+                b: n,
+                offset: 0,
+            },
+            lend,
+        );
+        w.a.int(kk, k0);
+        w.a.jmp(
+            Opcode::JEq {
+                a: ix,
+                b: kk,
+                offset: 0,
+            },
+            first,
+        );
+        w.lit(code, ",");
+        w.a.label(first);
+        w.a.op(Opcode::GetArray {
+            dst: d,
+            array: arr,
+            index: ix,
+        });
+        w.a.op(Opcode::SafeCast { dst: wn, src: d });
+        w.a.if_null(wn, hid);
+        w.a.fld(b, wn, c.obj_visible);
+        w.a.jmp(Opcode::JFalse { cond: b, offset: 0 }, hid);
+        w.a.op(Opcode::SafeCast { dst: ob, src: d });
+        w.a.call(sc, c.get_scene.0, &[ob]);
+        w.a.if_null(sc, hid);
+        w.a.fld(wrt, wn, c.win_root.0);
+        w.a.if_null(wrt, show);
+        w.a.op(Opcode::SafeCast { dst: ob, src: wrt });
+        w.a.loop_head(walk);
+        w.a.if_null(ob, show);
+        w.a.fld(b, ob, c.obj_visible);
+        w.a.jmp(Opcode::JFalse { cond: b, offset: 0 }, hid);
+        w.a.fld(ob, ob, c.obj_parent);
+        w.a.go(walk);
+        w.a.label(show);
+        w.lit(code, "true");
+        w.a.go(next);
+        w.a.label(hid);
+        w.lit(code, "false");
+        w.a.label(next);
+        w.a.op(Opcode::Incr { dst: ix });
+        w.a.go(lp);
+        w.a.label(lend);
+        w.lit(code, "]");
+    }
+    // the open NinePuzzle's tiles: x, y of each 3D tile (a move shows here)
+    w.lit(code, ",\"np\":");
+    w.a.op(Opcode::Type {
+        dst: ty,
+        ty: c.np.t,
+    });
+    w.a.call(win, find, &[ty]);
+    w.a.if_null(win, "np_none");
+    w.a.op(Opcode::SafeCast { dst: npw, src: win });
+    w.a.fld(list, npw, c.np.tiles);
+    w.a.if_null(list, "np_none");
+    w.lit(code, "[");
+    w.a.fld(n, list, c.arr_len);
+    w.a.fld(arr, list, c.arr_arr.0);
+    w.a.int(ix, k0);
+    w.a.loop_head("np_lp");
+    w.a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "np_lend",
+    );
+    w.a.int(kk, k0);
+    w.a.jmp(
+        Opcode::JEq {
+            a: ix,
+            b: kk,
+            offset: 0,
+        },
+        "np_first",
+    );
+    w.lit(code, ",");
+    w.a.label("np_first");
+    w.a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    w.a.op(Opcode::SafeCast { dst: o3, src: d });
+    w.a.if_null(o3, "np_null");
+    w.a.fld(fl, o3, c.np.o3_xy.0);
+    w.val(fl);
+    w.lit(code, ",");
+    w.a.fld(fl, o3, c.np.o3_xy.1);
+    w.val(fl);
+    w.a.go("np_next");
+    w.a.label("np_null");
+    w.lit(code, "null,null");
+    w.a.label("np_next");
+    w.a.op(Opcode::Incr { dst: ix });
+    w.a.go("np_lp");
+    w.a.label("np_lend");
+    w.lit(code, "]");
+    w.a.go("np_end");
+    w.a.label("np_none");
+    w.lit(code, "null");
+    w.a.label("np_end");
+    // the slot `sdrag` pushed (still in a scene, still pushed) and the
+    // dragged element of globalUI / the mode (a drag in progress)
+    w.lit(code, ",\"sdrag\":");
+    w.a.gg(sdel, g_sd);
+    w.a.if_null(sdel, "sdd_none");
+    w.lit(code, "{\"alloc\":");
+    w.a.fld(b, sdel, c.sdrag.allocated);
+    w.val(b);
+    w.lit(code, ",\"pushed\":");
+    w.a.fld(b, sdel, c.sdrag.pushed);
+    w.val(b);
+    w.lit(code, "}");
+    w.a.go("sdd_end");
+    w.a.label("sdd_none");
+    w.lit(code, "null");
+    w.a.label("sdd_end");
+    w.lit(code, ",\"drag\":[");
+    w.a.op(Opcode::Null { dst: sdel });
+    w.a.fld(gwui, g, c.global_ui.0);
+    w.a.if_null(gwui, "dg_g");
+    w.a.fld(sdel, gwui, c.sdrag.drag_el);
+    w.a.label("dg_g");
+    w.obj_q(sdel);
+    w.lit(code, ",");
+    w.a.op(Opcode::Null { dst: sdel });
+    w.a.fld(mode, g, c.g.mode.0);
+    w.a.if_null(mode, "dg_m");
+    w.a.fld(sdel, mode, c.sdrag.drag_el);
+    w.a.label("dg_m");
+    w.obj_q(sdel);
+    w.lit(code, "]");
     // the open LockPick / NinePuzzle: windowRoot shown, its full-window input
     // catcher (size, propagateEvents), its activity's chooseUnit Interactive
     // and saved camera (a watcher's view to restore)
