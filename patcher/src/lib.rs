@@ -34,6 +34,7 @@ mod start_transport;
 mod dialog_inventory;
 mod dialog_recruit;
 mod dlc_untouched;
+mod drag_cancel;
 mod fade_chain;
 mod activity_join;
 mod fake_npc;
@@ -206,6 +207,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     prepared_skill::patch_prepared_skill(&mut code);
     skill_sync::patch_skill_sync(&mut code);
     skill_result::patch_skill_result(&mut code);
+    drag_cancel::patch_drag_cancel(&mut code);
     skill_vars::patch_skill_vars(&mut code);
     chest_buttons::patch_chest_buttons(&mut code);
     camp_chest::patch_camp_chest(&mut code);

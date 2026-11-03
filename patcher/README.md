@@ -263,6 +263,17 @@ old weapon's passive until the next action. The callback now ends like
 unchanged (the callback exists on the client path only). Skipped (logged) on
 mismatch.
 
+**Drag cancel** (`src/drag_cancel.rs`): the battle skill bar's reorder drag
+(`ui.comp.Element.onDrag`) runs a per-frame loop that starts the drag after
+20 px and ends it only on the slot's own release. `Element.onRemove` cancels a
+started drag, not a push still under 20 px, so a skill bar rebuilt in that
+moment (a co-op guest redraws it whenever a sync marks its battle UI dirty)
+left the drag started on the removed slot with no release ever reaching it: the
+icon stuck to the cursor and every skill click was ignored. The loop now first
+cancels (`pushedDrag = false; stopDrag(true); return true`) when the element
+left the scene (`!allocated`), or on Escape / a right click. Skipped (logged)
+on mismatch.
+
 **Loading draw** (`src/loading_draw.rs`, issue #3): `Game.render` drew
 `Main.loadingS2d` only once `Game.state` exists. A joining client waits for the
 host between `Game.init` (which creates the loading scene) and `Game.start`
