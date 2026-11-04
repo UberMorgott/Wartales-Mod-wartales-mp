@@ -217,3 +217,25 @@ Runs `D:\WartalesTest\runs\20261104-*`. Test dll = HEAD + harness probes (8bf8f7
 | 5c `go_once` | flPump ran processSyncMode with no game (Codex): syncEnterMode's NullCheck throws before flSyncHeld consumes go_once. 674ad44 drops a game-less pump | FIXED |
 
 Tests: patcher 230/230, + harness 231/231 (1 ignored), winmm 163/163, lint ok. dist\winmm.dll 5530624 B, SHA256 A85B77313A4FFF9B9D9C724440BE44760917E8A071594A5D1CF23F30D2E3AF27.
+
+## Window sharing vs pre-rewrite (2026-11-04)
+
+Owner rule: windows any player opens stay vanilla (shared as the game shares them); our patches only (1) defer remote windows over a player's own running minigame, (2) keep own sheet / chest / inventory open (battle closes them). Pre-rewrite build = c524427 in a temp worktree (+ harness `act` via the click RPC from 4ca81cc and the new `pick` verb backported, test seam only). Runs `D:\WartalesTest\runs\20261104-094947` / `-103141` (c524427), `-100826` / `-102442` / `-103635` / `-105*` (HEAD + `pick`). Background only (cmd channel, `snap`).
+
+| case | c524427 | HEAD | verdict |
+| --- | --- | --- | --- |
+| guest / host NPC dialog (TavernerT2) | Dialog A+B | Dialog A+B | same |
+| guest Anvil unit choice | ChooseUnit B only | ChooseUnit B only | same; vanilla (Tool craft choice is local, forge_mirror header) |
+| guest / host ruins barricade dialog | A+B | A+B | same |
+| barricade choice (`pick 1`) by guest / host -> ChooseUnit "Thief" | A+B | A+B | same |
+| guest / host locked door (Ruins_Section4_lockedDoor) dialog | A+B (one choice: Leave) | A+B | same; its unit choice not reachable here |
+| B own sheet open + host barricade choice | ChooseUnit A+B, drawn over B's sheet | same | same (vanilla global-window order) |
+| guest choice "not enough resources" Confirm (Ruins_event1_from) | not run | B only | clicker-only notice |
+| theft | not reachable (towns are CityWorld menus) | - | NOT TESTED |
+| deferral: guest sings, host talks | - | host Dialog at once, guest's after the song | PASS |
+| ruins NinePuzzle watcher / step-out | - | B watches, `esc` out, A keeps it | PASS |
+
+No HEAD regression found: no fix commit. The live report on D3B211C3 (bf59f04, "guest's unit choice only on the host") matches force_leave D at bf59f04: flDefer held every incoming alive window on a client while flMinigame was true for another player's started Craft or any visible AnalyzeAction (a shared, owner-less window; c524427 had the same test); fixed by 0f641b2 (flMine ownership). Codex agrees on the mechanism (static check, `codex-windows.txt` in the session scratchpad). Gap (same in c524427): a dialog another player opens ends an open AnalyzeAction (GameMode.setWindow replaces it); it has no owner, so flMine does not protect it.
+Deviations from vanilla window behaviour beyond rules (1)/(2), all kept (owner rules "nobody blocked / force-moved"): force_leave S (Npc.talk / Chest.action refuse only for the clicker's own lock), W (flSetWin / flFocus: host keeps its own minigame and camera; rule 1), coop_spectate (watchers get no minigame window / camera move), dialog_inventory (inventory panels stay drawn over a shared dialog), mode_windows (closes a personally opened NPC sheet on a leave), npc_inspect / dialog_recruit / camp_talk (lock and gate changes), window_close (vanilla modal bug fix).
+Harness: new verb `pick <k>` (Dialog choice by net id). Tests: patcher 230/230, + harness 231/231 (1 ignored), lint ok.
+dist\winmm.dll 5530624 B, SHA256 77632FF0CAE5D4A3490C669287A4B501BBA9CF047D408CEF78FCE4249C168792.
