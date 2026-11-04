@@ -239,3 +239,19 @@ No HEAD regression found: no fix commit. The live report on D3B211C3 (bf59f04, "
 Deviations from vanilla window behaviour beyond rules (1)/(2), all kept (owner rules "nobody blocked / force-moved"): force_leave S (Npc.talk / Chest.action refuse only for the clicker's own lock), W (flSetWin / flFocus: host keeps its own minigame and camera; rule 1), coop_spectate (watchers get no minigame window / camera move), dialog_inventory (inventory panels stay drawn over a shared dialog), mode_windows (closes a personally opened NPC sheet on a leave), npc_inspect / dialog_recruit / camp_talk (lock and gate changes), window_close (vanilla modal bug fix).
 Harness: new verb `pick <k>` (Dialog choice by net id). Tests: patcher 230/230, + harness 231/231 (1 ignored), lint ok.
 dist\winmm.dll 5530624 B, SHA256 77632FF0CAE5D4A3490C669287A4B501BBA9CF047D408CEF78FCE4249C168792.
+
+## Own sheet stays on top (2026-11-04, 09c4c77)
+
+Owner rule: a player's own sheet / inventory / chest stays over a window another player's action opens; that window opens underneath and is answered after the own window closes. Pass `own_top` (end of Window.alive: replicated windows; end of Window.netSharing(true) on the host: shared windows, e.g. a client's barricade ChooseUnit the dialog script builds after the client's RPC, where getActionPlayer() is already the host): a modal globalUI window over an open UnitInfo moves under it in globalUI.windows (Escape order) and in the draw order (Layers.over of the sheet and above). Codex agrees on raising, not deferring (`codex-owntop-a.txt` in the session scratchpad). Runs `D:\WartalesTest\runs\20261104-134251`, `-135947` (final build), background only (cmd channel, `snap`, PostMessage Escape).
+
+| case | result | verdict |
+| --- | --- | --- |
+| B sheet + host barricade `pick 1` | B gwins `[..., ChooseUnit, UnitInfo]`, `mp: own sheet stays over a shared window`; snap: sheet fully on top; B Escape closes the sheet, ChooseUnit "Выбрать: Вор" visible (gvis true); host Escape cancels it on both | PASS |
+| A sheet + guest barricade `pick 1` | A gwins `[..., ChooseUnit, UnitInfo]`, same log line; A Escape closes the sheet, ChooseUnit visible; A Escape again cancels it | PASS |
+| B sheet + host barricade dialog (mode window) | sheet already drawn over the Dialog (vanilla); B Escape closes the sheet, the Dialog stays | PASS (unchanged) |
+| inventory / chest panels | GameUI panels: drawn over ChooseUnit already (snaps) | vanilla, unchanged |
+| deferral: host sings, guest talks | host SingAction on, host Dialog hidden (mvis false), `mp: window waits for the minigame`; after the song the Dialog shows | PASS |
+| guest's own clicks inside the sheet while the shared window waits | no background click path (harness rule) | NOT TESTED |
+| gamepad (layer 6 windows) | not run | NOT TESTED |
+
+Tests: patcher 232/232, + harness 233/233 (1 ignored), winmm 163/163, lint ok. dist\winmm.dll 5561344 B, SHA256 21BDDC4AF986A92BA1FE8CB1A161304AF64D7BBCE5DEA5E222AF759938EAE446.
