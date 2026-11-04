@@ -76,6 +76,8 @@
 //                       Confirm: onResult(true), else the open CraftConfirm: onResult().
 //       forgehit <k>    the open ForgeAction: validateStep(metalShards[k]).
 //       lpstop          the open LockPick: stopActivity (its Leave button).
+//       pick <k>        the open Dialog: the k-th Button of its choices gets
+//                       Dialog.setClick(netID), the RPC a held choice sends.
 //       song            the open SongRepertoire: onSongChoose (Play).
 //       endturn         Battle.endTurn (the End Turn button).
 //       skill <id>      the skill bar click: Battle.canPlay, setCurrentSkill(the
@@ -407,6 +409,7 @@ struct Ctx {
     lpstop: (RefType, RefFun),
     np: NpF,
     sdrag: SDrag,
+    dpick: Pick,
     /// `esc` / dump `aw`: a watched camera minigame window.
     watch: Watch,
     /// `put` / `take`: st.Inventory.hasAuthority, _networkOperation (the slot
@@ -534,6 +537,17 @@ struct SDrag {
     edit: RefField,
     allow: RefField,
     slot_t: RefType,
+}
+
+/// Verb `pick`: ui.win.Dialog, its `choices` container and setClick (RPC),
+/// ui.comp.Button (class, type) and its getNetID.
+struct Pick {
+    dlg_t: RefType,
+    choices: (RefField, RefType),
+    set_click: RefFun,
+    btn_cls: (RefGlobal, RefType),
+    btn_t: RefType,
+    net_id: RefFun,
 }
 
 /// The ruins NinePuzzle: verb `tile` and dump `np`.
@@ -1188,6 +1202,18 @@ fn plan(code: &Bytecode) -> Result<Ctx> {
                 },
                 allow: typed(code, obj_type(code, "ui.comp.SkillSlot")?, "allowDrag", bool_t)?,
                 slot_t: obj_type(code, "ui.comp.SkillSlot")?,
+            }
+        },
+        dpick: {
+            let dlg_t = obj_type(code, "ui.win.Dialog")?;
+            let btn_t = obj_type(code, "ui.comp.Button")?;
+            Pick {
+                dlg_t,
+                choices: field(code, dlg_t, "choices")?,
+                set_click: mfn(dlg_t, "setClick", &[dlg_t, str_t], void_t)?,
+                btn_cls: class_global(code, "ui.comp.Button")?,
+                btn_t,
+                net_id: mfn(btn_t, "getNetID", &[btn_t], str_t)?,
             }
         },
         np: {
@@ -2023,6 +2049,7 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     let s_lpstop = gs("lpstop");
     let s_tile = gs("tile");
     let s_sdrag = gs("sdrag");
+    let s_pick = gs("pick ");
     let s_esc = gs("esc");
     let (s_esc0, s_esc2) = (gs("vanilla"), gs("hidden"));
     let s_song = gs("song");
@@ -2197,6 +2224,14 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
         r.r(c.sdrag.on_push.1),
     );
     let sslot = r.r(c.sdrag.slot_t);
+    let (pdlg, pch, pbc, pbt, pid, pkn) = (
+        r.r(c.dpick.dlg_t),
+        r.r(c.dpick.choices.1),
+        r.r(c.dpick.btn_cls.1),
+        r.r(c.dpick.btn_t),
+        r.r(c.str_t),
+        r.r(c.i32_t),
+    );
     let (aum, pvc, pvv) = (r.r(c.pv_units.1), r.r(c.pv_cls.1), r.r(c.pv_t));
     // the slot `sdrag` pushed, for the dump
     code.globals.push(c.sdrag.el_t);
@@ -3277,6 +3312,69 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.gg(res, s_ok);
     a.go("ack");
     a.label("not_sdrag");
+
+    // verb: pick <k>  (the open Dialog: the k-th ui.comp.Button among its
+    // choices' children gets Dialog.setClick(getNetID()), the RPC a held choice
+    // button sends; the host runs the click as the player's)
+    verb(&mut a, s_pick, "not_pick", Some(k5));
+    a.gg(res, s_nowindow);
+    a.op(Opcode::Type {
+        dst: ty,
+        ty: c.dpick.dlg_t,
+    });
+    a.call(win, find, &[ty]);
+    a.if_null(win, "ack");
+    a.op(Opcode::SafeCast { dst: pdlg, src: win });
+    a.gg(res, s_unknown);
+    a.call(ni, c.parse_int, &[s]);
+    a.if_null(ni, "ack");
+    a.op(Opcode::SafeCast { dst: pkn, src: ni });
+    a.op(Opcode::Null { dst: ni });
+    a.gg(res, s_noelem);
+    a.fld(pch, pdlg, c.dpick.choices.0);
+    a.if_null(pch, "ack");
+    a.fld(list, pch, c.obj_children);
+    a.if_null(list, "ack");
+    a.fld(n, list, c.arr_len);
+    a.fld(arr, list, c.arr_arr.0);
+    a.int(ix, k0);
+    a.int(kk, k0);
+    a.loop_head("pk_lp");
+    a.jmp(
+        Opcode::JSGte {
+            a: ix,
+            b: n,
+            offset: 0,
+        },
+        "ack",
+    );
+    a.op(Opcode::GetArray {
+        dst: d,
+        array: arr,
+        index: ix,
+    });
+    a.op(Opcode::Incr { dst: ix });
+    a.if_null(d, "pk_lp");
+    a.gg(pbc, c.dpick.btn_cls.0);
+    a.call(b, c.base_check, &[pbc, d]);
+    a.if_false(b, "pk_lp");
+    a.jmp(
+        Opcode::JEq {
+            a: pkn,
+            b: kk,
+            offset: 0,
+        },
+        "pk_got",
+    );
+    a.op(Opcode::Decr { dst: pkn });
+    a.go("pk_lp");
+    a.label("pk_got");
+    a.op(Opcode::SafeCast { dst: pbt, src: d });
+    a.call(pid, c.dpick.net_id, &[pbt]);
+    a.call(void, c.dpick.set_click, &[pdlg, pid]);
+    a.gg(res, s_ok);
+    a.go("ack");
+    a.label("not_pick");
 
     // verb: esc  (the open LockPick / NinePuzzle through Game.update's Escape
     // hook: ack ok = this watcher stepped out, hidden = a hidden copy (Escape

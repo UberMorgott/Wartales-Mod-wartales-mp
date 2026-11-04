@@ -202,6 +202,7 @@ New verbs (`patcher/src/harness.rs`; each answers `ok` / `nowindow` / `noelem` /
 | `learn <i> <skillId>` | `Unit.learnSkill(id)` of `GameState.getUnits()[i]` (dump `army` order), e.g. `WeaponSwapSword` (the second weapon set) |
 | `equip <i> <slot> <kind>` | `Unit.equipSlot` of unit i: the equip slot whose identifier starts with `<slot>` (`Weapon`, `SecondaryWeapon`, `Shield`), its current item as prev, the first own inventory item whose kind contains `<kind>`; ack `noelem` if either is missing. dump `army[]`: `weapon2`, `left`, `slots`; `battle.currentUnit`: `shield` (its LiteUnitHud HealthBars guard counter value; a closed hud is opened and the next dump reads it), `guard`, `taken`, `reduce` |
 | `lpstop` | the open `ui.win.LockPick`: `stopActivity` (Leave) |
+| `pick <k>` | the open `ui.win.Dialog`: the k-th `ui.comp.Button` of `choices` gets `Dialog.setClick(getNetID())`, the RPC a held choice sends (0 is often Leave) |
 | `craft` / `confirm` / `forgehit <k>` | `Craft.forgeRecipe(selectedRecipe)`; `Confirm.onResult(true)`; `ForgeAction.validateStep(metalShards[k])` (a hit on shard k; T2Forge's anvil has 4) |
 
 Console steps that replace clicks: `console quit` (leave the place, Place console), `console goto <placeId>` (teleport on the world map), `console item <Item> <n>`. Enter a place with the harness verb `enter <placeId>`, not `console enter` (the first entry may start a fight: `console win`).
