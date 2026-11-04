@@ -542,6 +542,17 @@ opens for itself). The client's call now gets `if (__host == null) close()` in
 front, as Escape already does (Game.hx:1725-1727); shared windows keep the RPC.
 Skipped (logged) on mismatch.
 
+**Own sheet on top** (`src/own_top.rs`): in co-op a modal window of another
+player's action that lands in globalUI over this player's open UnitInfo moves
+just under the sheet, in `globalUI.windows` (Escape order) and in the draw
+order (`s2d.over` of the sheet and everything above it). Hooked at the end of
+`Window.alive` (a window replicated from another machine) and of
+`Window.netSharing(true)` on the host (a shared window, e.g. a client's barricade
+ChooseUnit the dialog script builds after the client's RPC); prints `mp: own
+sheet stays over a shared window`. Nothing is hidden or deferred: closing the
+sheet uncovers it. Inventory / chest panels are GameUI panels, already drawn
+over these windows. Skipped (logged) on mismatch.
+
 **Stale lobby** (`src/stale_lobby.rs`): two lobby creations answered in one
 tick (StartChoice's start button has no repeat guard) made the second `Lobby`
 constructor leave the first (`mpLobby = null`) before the first's

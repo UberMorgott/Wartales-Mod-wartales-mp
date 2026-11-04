@@ -91,6 +91,7 @@ mod title_version;
 mod tooltip_input;
 mod weapon_set;
 mod window_close;
+mod own_top;
 mod mode_windows;
 mod rest_report;
 mod window_drag;
@@ -219,6 +220,7 @@ pub fn patch_image(image: &[u8]) -> Result<Vec<u8>> {
     loot_all::patch_loot_all(&mut code);
     debrief::patch_debrief(&mut code);
     window_close::patch_window_close(&mut code);
+    own_top::patch_own_top(&mut code);
     mode_windows::patch_mode_windows(&mut code);
     stale_lobby::patch_stale_lobby(&mut code);
     log_error_cast::patch_log_error_cast(&mut code);
