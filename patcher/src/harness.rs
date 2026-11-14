@@ -44,8 +44,8 @@
 //                       gate) `harnessCam()` prints "harness: cam <camera>
 //                       <dragMode>": Std.string of battle.state.camera (x, y,
 //                       targetX/Y, followSpeed, targetFollowSpeed, ...).
-//       ud <key>        Storage.setUserData(key, null): drops one user-data
-//                       key (a panel's saved spot or size).
+//       ud <key> [int]  Storage.setUserData(key, null): drops one user-data
+//                       key (a panel's saved spot or size); with an int: sets it.
 //       leave           in a place: getCurrentPlace().setLeaveState(true, false,
 //                       null), the Leave button's request (RPC to the host).
 //       inspect <sub>   in a place: Npc.inspect(null) of the first NPC element
@@ -2819,9 +2819,34 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     a.go("ack");
     a.label("not_camtrace");
 
-    // verb: ud <key>  (removes one key of the user data, e.g. a panel's saved size)
+    // verb: ud <key> [int]  (removes one key of the user data, e.g. a panel's saved size; with an int: sets it)
     verb(&mut a, s_ud, "not_ud", Some(k3));
     a.op(Opcode::Null { dst: d });
+    a.op(Opcode::Null { dst: ni });
+    // `ud <key> <int>` sets it instead (seeds a saved panel spot).
+    a.gg(s2, s_sp);
+    a.call(i, c.index_of, &[s, s2, ni]);
+    a.int(kk, k0);
+    a.jmp(
+        Opcode::JSLt {
+            a: i,
+            b: kk,
+            offset: 0,
+        },
+        "ud_set",
+    );
+    a.op(Opcode::Mov { dst: cnt, src: i });
+    a.op(Opcode::Incr { dst: cnt });
+    a.call(s2, c.substr, &[s, cnt, ni]);
+    a.gg(res, s_unknown);
+    a.call(ni, c.parse_int, &[s2]);
+    a.if_null(ni, "ack");
+    a.op(Opcode::SafeCast { dst: cnt, src: ni });
+    a.op(Opcode::ToDyn { dst: d, src: cnt });
+    a.op(Opcode::ToDyn { dst: ni, src: i });
+    a.call(s, c.substr, &[s, kk, ni]);
+    a.op(Opcode::Null { dst: ni });
+    a.label("ud_set");
     a.call(void, c.set_ud, &[s, d]);
     a.gg(res, s_ok);
     a.go("ack");
@@ -4884,6 +4909,14 @@ fn build(code: &mut Bytecode, c: &Ctx, find: RefFun) -> Result<RefFun> {
     w.a.if_null(invp, "no_invp");
     w.a.fld(b, invp, c.obj_visible);
     w.val(b);
+    // its screen rect (a dragged spot under the HUD bar, issue #12)
+    w.lit(code, ",\"invPanel\":{\"x\":");
+    w.a.fld(fl, invp, c.obj_abs.0);
+    w.val(fl);
+    w.kv(code, "y", invp, c.obj_abs.1, fl);
+    w.kv(code, "w", invp, c.flow_size.0, fl);
+    w.kv(code, "h", invp, c.flow_size.1, fl);
+    w.lit(code, "}");
     w.a.go("invp_end");
     w.a.label("no_invp");
     w.lit(code, "null");
