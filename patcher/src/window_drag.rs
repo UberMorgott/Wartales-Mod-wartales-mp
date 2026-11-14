@@ -58,7 +58,8 @@
 //   mpDragClamp(obj, key)  for an onAfterReflow: a visible, flow-placed `obj`
 //       with a non-zero offset in its parent flow is pushed back so at least
 //       KEEP_PX of it stays inside the scene horizontally and its top edge
-//       stays within [0, height - KEEP_PX] (header reachable). Position: parent
+//       stays within [0, bottom - KEEP_PX] (header reachable; bottom: the
+//       HUD bottom bar's top while shown, else the scene's). Position: parent
 //       absX/absY (local x/y before its first sync) + obj.x/y; width: the
 //       flow's calculatedWidth for it. Covers restore at a smaller resolution
 //       and a window resize. A panel (key not null) at its `mpWinBase:<key>`
@@ -1749,6 +1750,50 @@ fn add_rs_move(
     push_fn(code, vec![], c.void_t, r.0, a.finish(), c.dbg_file)
 }
 
+/// `room = min(room, Game.inst.ui.worldButtonsBar.absY)` while the HUD bottom
+/// bar is shown (absY > 0: placed). `f` = [room, tmp, zero tmp] (f64), `b` a
+/// bool, `o` = [Game class, Game, GameUI, bar] registers; `done` a fresh label.
+fn hud_floor(
+    a: &mut Asm,
+    c: &Ctx,
+    f0: hlbc::types::RefFloat,
+    f: [Reg; 3],
+    b: Reg,
+    o: [Reg; 4],
+    done: &'static str,
+) {
+    let ([room, t, z], [gcls, gi, gui, bar]) = (f, o);
+    a.op(Opcode::GetGlobal {
+        dst: gcls,
+        global: c.rs.game_cls.0,
+    });
+    a.jmp(Opcode::JNull { reg: gcls, offset: 0 }, done);
+    for (dst, obj, field) in [
+        (gi, gcls, c.rs.game_inst.0),
+        (gui, gi, c.rs.game_ui.0),
+        (bar, gui, c.rs.ui_bar.0),
+    ] {
+        a.op(Opcode::Field { dst, obj, field });
+        a.jmp(Opcode::JNull { reg: dst, offset: 0 }, done);
+    }
+    a.op(Opcode::Field {
+        dst: b,
+        obj: bar,
+        field: c.visible,
+    });
+    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, done);
+    a.op(Opcode::Field {
+        dst: t,
+        obj: bar,
+        field: c.abs_y,
+    });
+    a.op(Opcode::Float { dst: z, ptr: f0 });
+    a.jmp(Opcode::JSLte { a: t, b: z, offset: 0 }, done);
+    a.jmp(Opcode::JSGte { a: t, b: room, offset: 0 }, done);
+    a.op(Opcode::Mov { dst: room, src: t });
+    a.label(done);
+}
+
 /// Handle push `(cap(panel, key), hxd.Event)`: a left push starts the resize.
 #[allow(clippy::too_many_arguments)]
 fn add_rs_push(
@@ -1859,77 +1904,7 @@ fn add_rs_push(
         field: c.sc_h,
     });
     a.op(Opcode::ToSFloat { dst: room, src: si });
-    a.op(Opcode::GetGlobal {
-        dst: gcls,
-        global: c.rs.game_cls.0,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: gcls,
-            offset: 0,
-        },
-        "bar",
-    );
-    a.op(Opcode::Field {
-        dst: gi,
-        obj: gcls,
-        field: c.rs.game_inst.0,
-    });
-    a.jmp(Opcode::JNull { reg: gi, offset: 0 }, "bar");
-    a.op(Opcode::Field {
-        dst: gui,
-        obj: gi,
-        field: c.rs.game_ui.0,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: gui,
-            offset: 0,
-        },
-        "bar",
-    );
-    a.op(Opcode::Field {
-        dst: bar,
-        obj: gui,
-        field: c.rs.ui_bar.0,
-    });
-    a.jmp(
-        Opcode::JNull {
-            reg: bar,
-            offset: 0,
-        },
-        "bar",
-    );
-    a.op(Opcode::Field {
-        dst: b,
-        obj: bar,
-        field: c.visible,
-    });
-    a.jmp(Opcode::JFalse { cond: b, offset: 0 }, "bar");
-    a.op(Opcode::Field {
-        dst: t,
-        obj: bar,
-        field: c.abs_y,
-    });
-    a.op(Opcode::Float { dst: h, ptr: f0 });
-    a.jmp(
-        Opcode::JSLte {
-            a: t,
-            b: h,
-            offset: 0,
-        },
-        "bar",
-    );
-    a.jmp(
-        Opcode::JSGte {
-            a: t,
-            b: room,
-            offset: 0,
-        },
-        "bar",
-    );
-    a.op(Opcode::Mov { dst: room, src: t });
-    a.label("bar");
+    hud_floor(&mut a, c, f0, [room, t, h], b, [gcls, gi, gui, bar], "bar");
     for fl in [c.abs_y, c.rs.calc_h] {
         a.op(Opcode::Field {
             dst: t,
@@ -3172,6 +3147,12 @@ fn add_clamp(
         r.r(c.f64_t),
         r.r(c.f64_t),
     );
+    let hud = [
+        r.r(c.rs.game_cls.1),
+        r.r(c.rs.game_inst.1),
+        r.r(c.rs.game_ui.1),
+        r.r(c.rs.ui_bar.1),
+    ];
     let gd = Guard { exc, v };
     let fld =
         |a: &mut Asm, dst: Reg, obj: Reg, field: RefField| a.op(Opcode::Field { dst, obj, field });
@@ -3346,6 +3327,8 @@ fn add_clamp(
     });
     fld(&mut a, wi, sc, c.sc_h);
     a.op(Opcode::ToSFloat { dst: hm, src: wi });
+    // Issue #12: a header under the HUD bottom bar can be neither seen nor grabbed.
+    hud_floor(&mut a, c, f0, [hm, t, zf], b, hud, "hud");
     a.op(Opcode::Sub {
         dst: hm,
         a: hm,
@@ -5873,6 +5856,37 @@ mod tests {
         s.run(clamp, vec![win, V::Null]);
         assert_eq!(s.c.get(&wpr, c.off_y), V::I(150));
         assert!(s.c.take("setUserData").is_empty());
+    }
+
+    /// Issue #12: a spot whose header sits under the HUD bottom bar (top y
+    /// 1030 on 1080; bar top 1000) is pushed up so KEEP_PX of it stays above
+    /// the bar; with the bar hidden the screen bottom bound (1032) keeps it.
+    #[test]
+    fn clamp_keeps_header_above_hud_bar() {
+        let Some(image) = game() else { return };
+        let (code, n) = built(&image);
+        let c = ctx(&code).unwrap();
+        let mut s = sim(&code, n, &c);
+        let bar = s.c.obj(&[(c.visible, V::B(false)), (c.abs_y, V::F(1000.0))]);
+        let ui = s.c.obj(&[(c.rs.ui_bar.0, bar.clone())]);
+        let gi = s.c.obj(&[(c.rs.game_ui.0, ui)]);
+        let gcls = s.c.obj(&[(c.rs.game_inst.0, gi)]);
+        s.c.globals.insert(c.rs.game_cls.0 .0, gcls);
+        let clamp = find_named(&code, N_CLAMP).unwrap();
+        let (win, pr) = scene(&mut s, &c);
+        s.c.set(&win, c.visible, V::B(true));
+        s.c.set(&win, c.y, V::F(1030.0));
+        s.c.set(&pr, c.off_y, V::I(980));
+        s.c.set(&pr, c.p_calc_w, V::I(300));
+        let fl = s.c.get(&win, c.parent);
+        s.c.set(&fl, c.abs_x, V::F(0.0));
+        s.c.set(&fl, c.abs_y, V::F(0.0));
+        s.run(clamp, vec![win.clone(), V::Null]);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(980), "bar hidden");
+        s.c.set(&bar, c.visible, V::B(true));
+        s.run(clamp, vec![win, V::Null]);
+        let up = 1030 - (1000 - KEEP_PX as i32);
+        assert_eq!(s.c.get(&pr, c.off_y), V::I(980 - up), "above the bar");
     }
 
     /// An inventory panel (scroll area 330 px = 6 rows, grid built for 6)
