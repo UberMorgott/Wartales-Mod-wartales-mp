@@ -72,17 +72,16 @@
 //    36 0b 09 kk     JNotLt      if r11 !< r9 jump over  <- r9 becomes r11
 //    1e 01 02 01 10  CallMethod  r1  = r16.timeout()     (proto index 2)
 //
-// The third needle is ops 6..12 of the title screen's join handler @34236;
-// the two four-byte function indices (34237 = 0x85bd, 24714 = 0x608a) make it
-// unique on their own:
+// The third, fifth and sixth needles stop before renderer-specific function
+// indices. Each sequence of complete ops is unique in both shipped images.
+// The third locates the join handler's length check:
 //
+//    47 02                    NullCheck     r2
+//    19 02 00 02              Call1         r2 = fn@0(r2)
 //    47 02                    NullCheck     r2
 //    26 04 02 01              Field         r4 = r2.length
 //    01 06 1e                 Int           r6 = int@30 (= 5)
 //    39 04 06 03              JNotEq        if r4 != r6 jump +3  <- becomes JSLt (0x30)
-//    21 07 c0 00 85 bd        StaticClosure r7 = fn@34237
-//    1a 01 c0 00 60 8a 02 07  Call2         r1 = joinCode@24714(r2, r7)
-//    3a 04                    JAlways       jump +4 (over the error branch)
 //
 // The fourth is the whole validate closure @34233 (8 ops):
 //
@@ -95,22 +94,22 @@
 //    03 01 00       Bool      r1 = false
 //    43 01          Ret       r1
 //
-// The fifth is ops 8..12 of joinWithCode2@23875, where maxLen is set:
+// The fifth locates the assignment to maxLen in joinWithCode2:
 //
+//    47 05                NullCheck     r5
+//    26 02 05 22          Field         r2 = r5.field@34
 //    52 06                New           r6 = new {formatText, maxLen, validate}
 //    01 07 1e             Int           r7 = int@30 (= 5)  <- int@19 (= 32)
 //    3b 08 07             ToDyn         r8 = r7
 //    27 06 01 08          SetField      r6.maxLen = r8
-//    21 09 c0 00 85 b9    StaticClosure r9 = fn@34233
 //
-// The sixth is ops 6..11 of the formatText closure @34234, the substr cap:
+// The sixth locates the substr cap in the formatText closure:
 //
 //    47 01                NullCheck r1
 //    01 06 01             Int       r6 = int@1 (= 0)
 //    01 07 1e             Int       r7 = int@30 (= 5)  <- int@19 (= 32)
 //    3b 08 07             ToDyn     r8 = r7
 //    1b 01 08 01 06 08    Call3     r1 = substr@8(r1, r6, r8)
-//    19 01 c0 00 5b 53 01 Call1     r1 = trim@23379(r1)
 
 use anyhow::{anyhow, bail, Result};
 
@@ -150,11 +149,10 @@ pub const PATCHES: &[Patch] = &[
     Patch {
         name: "TitleScreen join code length check (TitleScreen.hx:646)",
         needle: &[
-            0x47, 0x02, 0x26, 0x04, 0x02, 0x01, 0x01, 0x06, 0x1e, 0x39, 0x04, 0x06, 0x03, 0x21,
-            0x07, 0xc0, 0x00, 0x85, 0xbd, 0x1a, 0x01, 0xc0, 0x00, 0x60, 0x8a, 0x02, 0x07, 0x3a,
-            0x04,
+            0x47, 0x02, 0x19, 0x02, 0x00, 0x02, 0x47, 0x02, 0x26, 0x04, 0x02, 0x01, 0x01, 0x06,
+            0x1e, 0x39, 0x04, 0x06, 0x03,
         ],
-        index: 9,
+        index: 15,
         from: 0x39, // JNotEq: error unless length == 5
         to: 0x30,   // JSLt:   error only if length < 5
     },
@@ -171,10 +169,10 @@ pub const PATCHES: &[Patch] = &[
     Patch {
         name: "TitleScreen join code maxLen (TitleScreen.hx:640)",
         needle: &[
-            0x52, 0x06, 0x01, 0x07, 0x1e, 0x3b, 0x08, 0x07, 0x27, 0x06, 0x01, 0x08, 0x21, 0x09,
-            0xc0, 0x00, 0x85, 0xb9,
+            0x47, 0x05, 0x26, 0x02, 0x05, 0x22, 0x52, 0x06, 0x01, 0x07, 0x1e, 0x3b, 0x08, 0x07,
+            0x27, 0x06, 0x01, 0x08,
         ],
-        index: 4,
+        index: 10,
         from: 0x1e, // int@30 = 5
         to: 0x13,   // int@19 = 32
     },
@@ -182,7 +180,7 @@ pub const PATCHES: &[Patch] = &[
         name: "TitleScreen join code formatText substr (TitleScreen.hx:642)",
         needle: &[
             0x47, 0x01, 0x01, 0x06, 0x01, 0x01, 0x07, 0x1e, 0x3b, 0x08, 0x07, 0x1b, 0x01, 0x08,
-            0x01, 0x06, 0x08, 0x19, 0x01, 0xc0, 0x00, 0x5b, 0x53, 0x01,
+            0x01, 0x06, 0x08,
         ],
         index: 7,
         from: 0x1e, // int@30 = 5
@@ -348,13 +346,24 @@ mod tests {
     #[test]
     fn apply_patches_live_bytecode() {
         let path = std::env::var("WARTALES_HLBOOT").unwrap_or_else(|_| GAME_PATH.into());
-        let Ok(mut buf) = std::fs::read(&path) else {
-            eprintln!("skip: no game bytecode at {path}");
+        check_live_image(std::path::Path::new(&path));
+    }
+
+    #[test]
+    fn apply_patches_live_opengl_bytecode() {
+        let path = std::env::var("WARTALES_HLBOOT").unwrap_or_else(|_| GAME_PATH.into());
+        check_live_image(&std::path::Path::new(&path).with_file_name("sdlboot.dat"));
+    }
+
+    fn check_live_image(path: &std::path::Path) {
+        let Ok(mut buf) = std::fs::read(path) else {
+            eprintln!("skip: no game bytecode at {}", path.display());
             return;
         };
         assert!(
             buf.starts_with(MAGIC.as_bytes()),
-            "{path} does not start with {MAGIC:?}"
+            "{} does not start with {MAGIC:?}",
+            path.display()
         );
         let orig = buf.clone();
         apply(&mut buf).expect("apply on the real bytecode");
@@ -386,11 +395,15 @@ mod tests {
         let mut buf = image(&good_ints());
         buf.extend([0u8; 4096]);
         assert!(apply(&mut buf).is_err());
-        // duplicate
-        let mut buf = image(&good_ints());
-        buf.extend(p.needle);
-        buf.extend(p.needle);
-        assert!(apply(&mut buf).is_err());
+        // A second match must reject even an otherwise complete image.
+        for duplicate in PATCHES {
+            let mut buf = image(&good_ints());
+            buf.extend(all_needles());
+            buf.extend(duplicate.needle);
+            let before = buf.clone();
+            assert!(apply(&mut buf).is_err());
+            assert_eq!(buf, before);
+        }
         // broken signature
         let mut buf = image(&good_ints());
         let hdr = buf.len();
